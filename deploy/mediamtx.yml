@@ -1,0 +1,14 @@
+# MediaMTX 精简配置：只开本方案需要的入口
+#   RTSP   :8554  本机 FFmpeg/GStreamer 推流入口
+#   WebRTC :8889  浏览器拉流播放（内置播放页 http://<ip>:8889/<流名>/）
+# 注意：默认配置会占用 8888(HLS)，与后台页面端口冲突，故显式关闭
+logLevel: info
+rtspAddress: :8554
+webrtcAddress: :8889
+hls: no
+rtmp: no
+srt: no
+
+# 允许任意流名推流（v1.x 必须显式声明，否则推流报 path not configured）
+paths:
+  all_others:

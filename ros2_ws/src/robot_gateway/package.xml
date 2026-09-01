@@ -1,0 +1,16 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>robot_gateway</name>
+  <version>0.1.0</version>
+  <description>遥控网关：浏览器 WebSocket 指令转 /cmd_vel，带心跳失控保护与速度限幅</description>
+  <maintainer email="dev@example.com">ubuntu</maintainer>
+  <license>MIT</license>
+
+  <depend>rclpy</depend>
+  <depend>geometry_msgs</depend>
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>

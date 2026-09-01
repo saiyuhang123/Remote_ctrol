@@ -1,0 +1,16 @@
+# 巡检机器人全局配置 —— 换机（Jetson → x64 工控机）只需改本文件
+
+control:
+  max_linear: 0.5      # 线速度上限 m/s（远程遥控模式强制限幅）
+  max_angular: 1.0     # 角速度上限 rad/s
+  cmd_timeout: 1.0     # 心跳超时秒数，超时自动刹车
+
+ports:
+  ws: 8765             # WebSocket：遥控指令 / 遥测
+  web: 8888            # 管理后台页面
+
+video:
+  stream_name: cam     # MediaMTX 流名，推流与拉流共用
+  # 编码器按平台选择：jetson -> nvv4l2h264enc，x64 -> h264_vaapi，兜底 libx264
+  # 当前无摄像头阶段统一用 libx264 测试源，此字段 M4 接入摄像头时启用
+  encoder: libx264

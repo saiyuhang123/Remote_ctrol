@@ -1,0 +1,102 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>巡检机器人遥控台</title>
+<style>
+  body { font-family: sans-serif; margin: 16px; background: #1e1e1e; color: #ddd; }
+  #status { padding: 6px 10px; border-radius: 4px; display: inline-block; margin-bottom: 10px; }
+  .ok { background: #1b5e20; } .bad { background: #b71c1c; }
+  #wrap { display: flex; gap: 24px; flex-wrap: wrap; align-items: flex-start; }
+  iframe { width: 960px; height: 540px; border: 1px solid #444; background: #000; }
+  #stick { background: #2b2b2b; border-radius: 50%; touch-action: none; }
+  #estop { width: 220px; height: 48px; margin-top: 12px; font-size: 20px;
+           background: #d32f2f; color: #fff; border: none; border-radius: 6px; cursor: pointer; }
+  #hint { color: #888; font-size: 13px; margin-top: 8px; }
+</style>
+</head>
+<body>
+<div id="status" class="bad">未连接</div>
+<div id="wrap">
+  <!-- MediaMTX 内置 WebRTC 播放页 -->
+  <iframe id="video" allow="autoplay; fullscreen"></iframe>
+  <div>
+    <canvas id="stick" width="220" height="220"></canvas>
+    <br>
+    <button id="estop">急 停</button>
+    <div id="hint">拖动摇杆或用 W/S/A/D 键控制；松开即停</div>
+  </div>
+</div>
+<script>
+const host = location.hostname;
+document.getElementById('video').src = `http://${host}:8889/cam/`;
+
+// ---- WebSocket 通道 ----
+let ws;
+function connect() {
+  ws = new WebSocket(`ws://${host}:8765`);
+  const el = document.getElementById('status');
+  ws.onopen  = () => { el.textContent = '已连接机器人'; el.className = 'ok'; };
+  ws.onclose = () => { el.textContent = '连接断开，3s 后重连…'; el.className = 'bad';
+                      setTimeout(connect, 3000); };
+}
+connect();
+
+function send(obj) { if (ws && ws.readyState === 1) ws.send(JSON.stringify(obj)); }
+
+// ---- 指令状态：linear 前+/后-（m/s 比例），angular 左+/右- ----
+// 页面发的是 -1..1 的比例值，具体限幅由网关按 config 执行
+let linear = 0, angular = 0, active = false;
+
+setInterval(() => {            // 10Hz 心跳式发送，网关 1s 收不到就自动刹车
+  if (active || linear !== 0 || angular !== 0)
+    send({ type: 'cmd_vel', linear, angular });
+}, 100);
+
+// ---- 虚拟摇杆 ----
+const canvas = document.getElementById('stick');
+const ctx = canvas.getContext('2d');
+const R = 100, CX = 110, CY = 110;   // 摇杆半径与圆心
+let knob = { x: CX, y: CY };
+
+function draw() {
+  ctx.clearRect(0, 0, 220, 220);
+  ctx.beginPath(); ctx.arc(CX, CY, R, 0, 7); ctx.strokeStyle = '#555'; ctx.stroke();
+  ctx.beginPath(); ctx.arc(knob.x, knob.y, 32, 0, 7);
+  ctx.fillStyle = active ? '#4caf50' : '#666'; ctx.fill();
+}
+draw();
+
+function updateKnob(clientX, clientY) {
+  const rect = canvas.getBoundingClientRect();
+  let dx = clientX - rect.left - CX, dy = clientY - rect.top - CY;
+  const len = Math.hypot(dx, dy);
+  if (len > R) { dx *= R / len; dy *= R / len; }
+  knob = { x: CX + dx, y: CY + dy };
+  linear  = -dy / R;    // 屏幕上为前进
+  angular = -dx / R;    // ROS 约定 +angular.z 为左转
+  draw();
+}
+
+canvas.addEventListener('pointerdown', e => { active = true; canvas.setPointerCapture(e.pointerId); updateKnob(e.clientX, e.clientY); });
+canvas.addEventListener('pointermove', e => { if (active) updateKnob(e.clientX, e.clientY); });
+function release() { active = false; linear = 0; angular = 0; knob = { x: CX, y: CY }; draw(); send({ type: 'cmd_vel', linear: 0, angular: 0 }); }
+canvas.addEventListener('pointerup', release);
+canvas.addEventListener('pointercancel', release);
+
+// ---- 键盘（W/S/A/D 或方向键）----
+const keys = {};
+addEventListener('keydown', e => { keys[e.key.toLowerCase()] = true;  applyKeys(); });
+addEventListener('keyup',   e => { keys[e.key.toLowerCase()] = false; applyKeys(); });
+function applyKeys() {
+  if (active) return;  // 摇杆优先
+  const k = k => keys[k] ? 1 : 0;
+  linear  = (k('w') || k('arrowup')) - (k('s') || k('arrowdown'));
+  angular = (k('a') || k('arrowleft')) - (k('d') || k('arrowright'));
+}
+
+document.getElementById('estop').onclick = () => { release(); send({ type: 'estop' }); };
+</script>
+</body>
+</html>

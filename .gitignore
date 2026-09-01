@@ -1,0 +1,45 @@
+# ================= 二进制组件（install.sh 按架构下载，不入库）=================
+/bin/
+
+# ================= ROS2 colcon 构建产物 =================
+ros2_ws/build/
+ros2_ws/install/
+ros2_ws/log/
+
+# ================= Python =================
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+
+# ================= 运行时数据（数据库/抓拍/报告/日志/媒体存档）=================
+*.db
+*.sqlite
+*.sqlite3
+*.log
+backend/data/
+captures/
+reports/
+
+# ================= 本机私有配置覆盖（config.yaml 入库，本机差异用 local 覆盖）=================
+config/config.local.yaml
+
+# ================= MediaMTX / 证书等运行时生成物 =================
+auto.key
+auto.crt
+*.pem
+
+# ================= 前端构建（若后期引入 npm 构建链）=================
+node_modules/
+web/dist/
+
+# ================= IDE / 系统垃圾 =================
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
