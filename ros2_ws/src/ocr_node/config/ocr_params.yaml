@@ -1,0 +1,26 @@
+# OCR Node configuration
+ocr_node:
+  ros__parameters:
+    # Language: 'ch' = Chinese + English, 'en' = English only
+    lang: "ch"
+
+    # Use GPU acceleration (PaddlePaddle-GPU required)
+    # Set to false on Jetson without Paddle-GPU or for CPU-only
+    use_gpu: true
+
+    # Minimum confidence threshold (0.0 - 1.0)
+    # Detections below this score are filtered out
+    conf_threshold: 0.5
+
+    # --- Streaming mode (continuous recognition) ---
+    # Set to true to continuously run OCR at processing_interval.
+    # Set to false for service-only mode (on-demand via /ocr/recognize).
+    enable_streaming: false
+
+    # Minimum interval in seconds between streaming OCR runs
+    # (only used when enable_streaming: true)
+    processing_interval: 0.5
+
+    # Publish annotated image with bounding boxes on /ocr/annotated_img
+    # (only used when enable_streaming: true)
+    enable_annotated_img: true

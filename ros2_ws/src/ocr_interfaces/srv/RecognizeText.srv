@@ -1,0 +1,14 @@
+# Service: recognize text on the latest cached frame.
+#
+# Call this when the robot reaches a target pose and needs to
+# read text/numbers from the current camera view.
+
+# --- Request ---
+# Confidence override: 0.0 = use the node's default conf_threshold.
+# Values > 0.0 override it for this single recognition call.
+float32 conf_threshold
+---
+bool success                # false if no frame was ever received
+string message              # human-readable status / error info
+OcrDetection[] detections   # all recognized text regions
+float32 processing_time_ms  # how long the OCR inference took (ms)
