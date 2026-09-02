@@ -1,0 +1,8 @@
+# 抓图请求
+uint8 quality         # 图片质量 0-2 (0=最好)
+string save_path      # 保存路径 (留空则仅发布不保存)
+---
+# 抓图响应
+bool success
+string message
+sensor_msgs/Image image   # 抓到的图片 (如果成功)

@@ -1,0 +1,5 @@
+# 启动巡检任务
+hk_camera/MissionWaypoint[] waypoints
+---
+bool accepted
+string message

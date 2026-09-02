@@ -1,0 +1,7 @@
+# 设置云台绝对位置
+float32 pan       # 水平角度 (0~360)
+float32 tilt      # 垂直角度 (0~90)
+float32 zoom      # 变倍 (1~N)
+---
+bool success
+string message

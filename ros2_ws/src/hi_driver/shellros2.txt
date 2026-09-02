@@ -1,0 +1,20 @@
+source /opt/ros/foxy/setup.bash 
+
+source install/setup.bash 
+
+colcon build 
+
+
+ros2 launch hi_ros2 hins_fe_launch.py
+ros2 launch hi_ros2 hins_he_launch.py
+ ros2 topic echo /scan_fe
+ 
+ros2 topic hz  /scan_fe
+ros2 topic hz  /scan_he
+ros2 topic echo /laser_info 
+
+
+ros2 service call /laser_cmd hi_ros2/srv/CmdSrv cmd:\ 1\ 
+ros2 topic pub /set_area_common hi_ros2/msg/AreaCom "{mode: 1, channel: 63, angle: 0, speed: 0, channel_group: 0}"
+
+
