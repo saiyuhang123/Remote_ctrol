@@ -8,41 +8,51 @@
       <uri>model://ground_plane</uri>
     </include>
 
-    <!-- 四周围墙 12m x 12m -->
+    <!-- 四周围墙 14m x 10m（长方形，破掉正方形旋转对称性，利于 AMCL） -->
     <model name="wall_n">
       <static>true</static>
-      <pose>0 6 0.5 0 0 0</pose>
+      <pose>0 5 0.5 0 0 0</pose>
       <link name="link">
-        <collision name="c"><geometry><box><size>12.4 0.2 1.0</size></box></geometry></collision>
-        <visual name="v"><geometry><box><size>12.4 0.2 1.0</size></box></geometry></visual>
+        <collision name="c"><geometry><box><size>14.4 0.2 1.0</size></box></geometry></collision>
+        <visual name="v"><geometry><box><size>14.4 0.2 1.0</size></box></geometry></visual>
       </link>
     </model>
     <model name="wall_s">
       <static>true</static>
-      <pose>0 -6 0.5 0 0 0</pose>
+      <pose>0 -5 0.5 0 0 0</pose>
       <link name="link">
-        <collision name="c"><geometry><box><size>12.4 0.2 1.0</size></box></geometry></collision>
-        <visual name="v"><geometry><box><size>12.4 0.2 1.0</size></box></geometry></visual>
+        <collision name="c"><geometry><box><size>14.4 0.2 1.0</size></box></geometry></collision>
+        <visual name="v"><geometry><box><size>14.4 0.2 1.0</size></box></geometry></visual>
       </link>
     </model>
     <model name="wall_e">
       <static>true</static>
-      <pose>6 0 0.5 0 0 0</pose>
+      <pose>7 0 0.5 0 0 0</pose>
       <link name="link">
-        <collision name="c"><geometry><box><size>0.2 12.4 1.0</size></box></geometry></collision>
-        <visual name="v"><geometry><box><size>0.2 12.4 1.0</size></box></geometry></visual>
+        <collision name="c"><geometry><box><size>0.2 10.4 1.0</size></box></geometry></collision>
+        <visual name="v"><geometry><box><size>0.2 10.4 1.0</size></box></geometry></visual>
       </link>
     </model>
     <model name="wall_w">
       <static>true</static>
-      <pose>-6 0 0.5 0 0 0</pose>
+      <pose>-7 0 0.5 0 0 0</pose>
       <link name="link">
-        <collision name="c"><geometry><box><size>0.2 12.4 1.0</size></box></geometry></collision>
-        <visual name="v"><geometry><box><size>0.2 12.4 1.0</size></box></geometry></visual>
+        <collision name="c"><geometry><box><size>0.2 10.4 1.0</size></box></geometry></collision>
+        <visual name="v"><geometry><box><size>0.2 10.4 1.0</size></box></geometry></visual>
       </link>
     </model>
 
-    <!-- 场内障碍：柱子与箱子，供雷达/导航测试 -->
+    <!-- 内部隔断墙（L 型特征，强定位参照物） -->
+    <model name="inner_wall">
+      <static>true</static>
+      <pose>-1.0 0.8 0.5 0 0 0</pose>
+      <link name="link">
+        <collision name="c"><geometry><box><size>0.15 3.0 1.0</size></box></geometry></collision>
+        <visual name="v"><geometry><box><size>0.15 3.0 1.0</size></box></geometry></visual>
+      </link>
+    </model>
+
+    <!-- 场内障碍：柱子与箱子（不对称分布，给扫描匹配更多特征） -->
     <model name="pillar_1">
       <static>true</static>
       <pose>2.5 2.0 0.5 0 0 0</pose>
@@ -59,6 +69,22 @@
         <visual name="v"><geometry><cylinder><radius>0.25</radius><length>1.0</length></cylinder></geometry></visual>
       </link>
     </model>
+    <model name="pillar_3">
+      <static>true</static>
+      <pose>-4.5 2.8 0.5 0 0 0</pose>
+      <link name="link">
+        <collision name="c"><geometry><cylinder><radius>0.3</radius><length>1.0</length></cylinder></geometry></collision>
+        <visual name="v"><geometry><cylinder><radius>0.3</radius><length>1.0</length></cylinder></geometry></visual>
+      </link>
+    </model>
+    <model name="pillar_4">
+      <static>true</static>
+      <pose>5.2 -1.2 0.5 0 0 0</pose>
+      <link name="link">
+        <collision name="c"><geometry><cylinder><radius>0.2</radius><length>1.0</length></cylinder></geometry></collision>
+        <visual name="v"><geometry><cylinder><radius>0.2</radius><length>1.0</length></cylinder></geometry></visual>
+      </link>
+    </model>
     <model name="box_1">
       <static>true</static>
       <pose>1.5 -2.5 0.4 0 0 0.5</pose>
@@ -69,10 +95,26 @@
     </model>
     <model name="box_2">
       <static>true</static>
-      <pose>-2.0 2.5 0.3 0 0 -0.3</pose>
+      <pose>-2.6 3.2 0.3 0 0 -0.3</pose>
       <link name="link">
         <collision name="c"><geometry><box><size>0.8 0.8 0.6</size></box></geometry></collision>
         <visual name="v"><geometry><box><size>0.8 0.8 0.6</size></box></geometry></visual>
+      </link>
+    </model>
+    <model name="box_3">
+      <static>true</static>
+      <pose>4.2 3.4 0.4 0 0 0.2</pose>
+      <link name="link">
+        <collision name="c"><geometry><box><size>1.2 0.6 0.8</size></box></geometry></collision>
+        <visual name="v"><geometry><box><size>1.2 0.6 0.8</size></box></geometry></visual>
+      </link>
+    </model>
+    <model name="box_4">
+      <static>true</static>
+      <pose>-5.6 -2.8 0.35 0 0 0</pose>
+      <link name="link">
+        <collision name="c"><geometry><box><size>0.6 1.4 0.7</size></box></geometry></collision>
+        <visual name="v"><geometry><box><size>0.6 1.4 0.7</size></box></geometry></visual>
       </link>
     </model>
   </world>
