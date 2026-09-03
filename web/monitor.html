@@ -1,0 +1,455 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>巡检机器人远程监控台</title>
+<style>
+  * { box-sizing: border-box; }
+  html, body { height: 100%; }
+  body {
+    font-family: "Microsoft YaHei", "PingFang SC", sans-serif;
+    margin: 0; background: #14171c; color: #dde3ea;
+    display: flex; flex-direction: column; overflow: hidden;
+  }
+
+  /* ---------- 顶栏 ---------- */
+  header {
+    flex: 0 0 52px; display: flex; align-items: center; gap: 14px; padding: 0 18px;
+    background: #1c2129; border-bottom: 1px solid #2a313c;
+  }
+  header h1 { font-size: 17px; margin: 0; font-weight: 600; white-space: nowrap; }
+  #status { padding: 4px 12px; border-radius: 12px; font-size: 13px; white-space: nowrap; }
+  .ok { background: #1b5e20; } .bad { background: #b71c1c; }
+  #net { margin-left: auto; font-size: 12px; color: #7d8a99; white-space: nowrap; }
+
+  /* ---------- 主区：地图自适应撑满 + 右侧固定栏 ---------- */
+  #main {
+    flex: 1; display: flex; gap: 14px; padding: 14px; min-height: 0;
+  }
+  #mapWrap {
+    flex: 1; min-width: 0; position: relative;
+    background: #0d0f12; border: 1px solid #2a313c; border-radius: 8px; overflow: hidden;
+  }
+  #mapCanvas { position: absolute; inset: 0; cursor: grab; }
+  #mapHint {
+    position: absolute; left: 10px; bottom: 8px; font-size: 12px; color: #6b7787;
+    background: rgba(0,0,0,.45); padding: 2px 8px; border-radius: 4px; pointer-events: none;
+  }
+
+  #side {
+    flex: 0 0 clamp(280px, 20vw, 380px);
+    display: flex; flex-direction: column; gap: 14px;
+    overflow-y: auto; min-height: 0; padding-right: 2px;
+  }
+  #side::-webkit-scrollbar { width: 6px; }
+  #side::-webkit-scrollbar-thumb { background: #2a313c; border-radius: 3px; }
+
+  .card { background: #1c2129; border: 1px solid #2a313c; border-radius: 8px; padding: 12px 14px; flex: 0 0 auto; }
+  .card h2 { font-size: 13px; margin: 0 0 10px; color: #8fa1b5; font-weight: 600;
+             display: flex; align-items: center; justify-content: space-between; }
+
+  /* ---------- 仪表 ---------- */
+  .gauges { display: grid; grid-template-columns: 1fr 1fr; gap: 8px 12px; font-size: 13px; }
+  .gauges .v { font-size: 19px; font-weight: 700; color: #4fc3f7; }
+  .gauges .v.small { font-size: 14px; }
+  .gauges .u { font-size: 11px; color: #7d8a99; font-weight: 400; margin-left: 2px; }
+  #battBar { height: 8px; background: #2a313c; border-radius: 4px; margin-top: 8px; overflow: hidden; }
+  #battFill { height: 100%; width: 100%; background: #4caf50; border-radius: 4px; transition: width .5s; }
+
+  /* ---------- 视频 ---------- */
+  #videoBox { position: relative; width: 100%; aspect-ratio: 4/3; background: #000;
+              border: 1px solid #2a313c; border-radius: 6px; overflow: hidden; }
+  #video { width: 100%; height: 100%; border: 0; display: none; }
+  #videoOff { position: absolute; inset: 0; display: flex; flex-direction: column;
+              align-items: center; justify-content: center; gap: 10px; color: #6b7787; font-size: 13px; }
+  .btn {
+    padding: 7px 18px; font-size: 13px; border: none; border-radius: 5px; cursor: pointer;
+    background: #2d6da3; color: #fff; transition: background .15s;
+  }
+  .btn:hover { background: #3a82bd; }
+  .btn.gray { background: #3a424e; }
+  .btn.gray:hover { background: #4a5563; }
+
+  /* ---------- 遥控 ---------- */
+  #stick { background: #232932; border-radius: 50%; touch-action: none; display: block; margin: 0 auto; }
+  #estop {
+    width: 100%; height: 46px; margin-top: 12px; font-size: 18px; letter-spacing: 6px;
+    background: #d32f2f; color: #fff; border: none; border-radius: 6px; cursor: pointer;
+  }
+  #estop:active { background: #ff1744; }
+  #hint { color: #6b7787; font-size: 12px; margin-top: 8px; text-align: center; }
+
+  /* 窄屏（<1100px）堆叠布局 */
+  @media (max-width: 1100px) {
+    body { overflow: auto; }
+    #main { flex-direction: column; }
+    #mapWrap { flex: 0 0 62vh; }
+    #side { flex: 1 1 auto; overflow: visible; }
+  }
+</style>
+</head>
+<body>
+<header>
+  <h1>巡检机器人远程监控台</h1>
+  <span id="status" class="bad">未连接</span>
+  <span id="net"></span>
+</header>
+
+<div id="main">
+  <div id="mapWrap">
+    <canvas id="mapCanvas"></canvas>
+    <div id="mapHint">滚轮缩放 · 拖拽平移</div>
+    <div style="position:absolute;top:10px;right:10px;display:flex;gap:8px">
+      <button class="btn" id="btnPose">初始定位</button>
+      <button class="btn" id="btnGoal" style="background:#2e7d32">目标点</button>
+      <button class="btn gray" id="btnNavCancel" style="display:none">取消导航</button>
+    </div>
+  </div>
+
+  <div id="side">
+    <div class="card">
+      <h2>车辆状态</h2>
+      <div class="gauges">
+        <div>速度<div class="v"><span id="gvSpeed">0.00</span><span class="u">m/s</span></div></div>
+        <div>转向<div class="v"><span id="gvTurn">0.00</span><span class="u">rad/s</span></div></div>
+        <div>位置<div class="v small"><span id="gvPos">-</span></div></div>
+        <div>朝向<div class="v small"><span id="gvYaw">-</span></div></div>
+      </div>
+      <h2 style="margin-top:12px">电池（模拟）</h2>
+      <div class="gauges">
+        <div>电量<div class="v"><span id="gvBatt">100</span><span class="u">%</span></div></div>
+        <div>电压<div class="v"><span id="gvVolt">48.0</span><span class="u">V</span></div></div>
+      </div>
+      <div id="battBar"><div id="battFill"></div></div>
+    </div>
+
+    <div class="card">
+      <h2>视频监控（D435）
+        <button class="btn gray" id="btnVideo" style="font-size:12px;padding:3px 10px">开启</button>
+      </h2>
+      <div id="videoBox">
+        <iframe id="video" allow="autoplay; fullscreen"></iframe>
+        <div id="videoOff">
+          <span>视频未开启</span>
+          <span style="font-size:11px">点击右上角"开启"，不看时关闭省带宽</span>
+        </div>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>远程遥控</h2>
+      <canvas id="stick" width="200" height="200"></canvas>
+      <button id="estop">急 停</button>
+      <div id="hint">拖动摇杆或 W/S/A/D 键；松开即停</div>
+    </div>
+  </div>
+</div>
+
+<script>
+const host = location.hostname;
+
+// ================= WebSocket 通道 =================
+let ws;
+function connect() {
+  ws = new WebSocket(`ws://${host}:8765`);
+  const el = document.getElementById('status');
+  ws.onopen  = () => { el.textContent = '已连接机器人'; el.className = 'ok';
+                      document.getElementById('net').textContent = host; };
+  ws.onclose = () => { el.textContent = '连接断开，3s 后重连…'; el.className = 'bad';
+                      closeVideo();
+                      setTimeout(connect, 3000); };
+  ws.onmessage = onMessage;
+}
+connect();
+
+function send(obj) { if (ws && ws.readyState === 1) ws.send(JSON.stringify(obj)); }
+
+// ================= 视频按需开关 =================
+const videoIframe = document.getElementById('video');
+const videoOff = document.getElementById('videoOff');
+const btnVideo = document.getElementById('btnVideo');
+let videoOn = false;
+
+function openVideo() {
+  videoIframe.src = `http://${host}:8889/cam/`;
+  videoIframe.style.display = 'block';
+  videoOff.style.display = 'none';
+  btnVideo.textContent = '关闭';
+  videoOn = true;
+}
+function closeVideo() {
+  videoIframe.src = 'about:blank';   // 断开 WebRTC，MediaMTX 停止向本端推流
+  videoIframe.style.display = 'none';
+  videoOff.style.display = 'flex';
+  btnVideo.textContent = '开启';
+  videoOn = false;
+}
+btnVideo.onclick = () => videoOn ? closeVideo() : openVideo();
+
+// ================= 遥控指令（与 M1 相同协议） =================
+let linear = 0, angular = 0, stickActive = false;
+
+setInterval(() => {
+  if (stickActive || linear !== 0 || angular !== 0)
+    send({ type: 'cmd_vel', linear, angular });
+}, 100);
+
+// ---- 虚拟摇杆 ----
+const stick = document.getElementById('stick');
+const sctx = stick.getContext('2d');
+const SR = 90, SCX = 100, SCY = 100;
+let knob = { x: SCX, y: SCY };
+
+function drawStick() {
+  sctx.clearRect(0, 0, 200, 200);
+  sctx.beginPath(); sctx.arc(SCX, SCY, SR, 0, 7); sctx.strokeStyle = '#4a5568'; sctx.stroke();
+  sctx.beginPath(); sctx.arc(knob.x, knob.y, 30, 0, 7);
+  sctx.fillStyle = stickActive ? '#4caf50' : '#5a6572'; sctx.fill();
+}
+drawStick();
+
+function updateKnob(clientX, clientY) {
+  const rect = stick.getBoundingClientRect();
+  let dx = clientX - rect.left - SCX, dy = clientY - rect.top - SCY;
+  const len = Math.hypot(dx, dy);
+  if (len > SR) { dx *= SR / len; dy *= SR / len; }
+  knob = { x: SCX + dx, y: SCY + dy };
+  linear  = -dy / SR;
+  angular = -dx / SR;   // ROS 约定 +angular.z 为左转
+  drawStick();
+}
+stick.addEventListener('pointerdown', e => { stickActive = true; stick.setPointerCapture(e.pointerId); updateKnob(e.clientX, e.clientY); });
+stick.addEventListener('pointermove', e => { if (stickActive) updateKnob(e.clientX, e.clientY); });
+function releaseStick() { stickActive = false; linear = 0; angular = 0; knob = { x: SCX, y: SCY }; drawStick(); send({ type: 'cmd_vel', linear: 0, angular: 0 }); }
+stick.addEventListener('pointerup', releaseStick);
+stick.addEventListener('pointercancel', releaseStick);
+
+// ---- 键盘 ----
+const keys = {};
+addEventListener('keydown', e => { keys[e.key.toLowerCase()] = true;  applyKeys(); });
+addEventListener('keyup',   e => { keys[e.key.toLowerCase()] = false; applyKeys(); });
+function applyKeys() {
+  if (stickActive) return;
+  const k = k => keys[k] ? 1 : 0;
+  linear  = (k('w') || k('arrowup')) - (k('s') || k('arrowdown'));
+  angular = (k('a') || k('arrowleft')) - (k('d') || k('arrowright'));
+}
+document.getElementById('estop').onclick = () => { releaseStick(); send({ type: 'estop' }); };
+
+// ================= 地图监控（canvas 随容器自适应） =================
+const mapWrap = document.getElementById('mapWrap');
+const cv = document.getElementById('mapCanvas');
+const c2 = cv.getContext('2d');
+let meta = null;
+const mapImg = new Image();
+let mapReady = false;
+
+let zoom = 1.0, panX = 0, panY = 0, baseScale = 1.0;
+
+async function loadMap() {
+  meta = await (await fetch('maps/meta.json')).json();
+  await new Promise(res => { mapImg.onload = res; mapImg.src = 'maps/patrol.png'; });
+  fitView();
+  mapReady = true;
+}
+function fitView() {
+  baseScale = Math.min(cv.width / meta.width, cv.height / meta.height);
+  zoom = 1.0;
+  panX = (cv.width  - meta.width  * baseScale) / 2;
+  panY = (cv.height - meta.height * baseScale) / 2;
+}
+
+// canvas 尺寸跟随容器（1080p / 2K / 窗口拉伸自适应）
+new ResizeObserver(() => {
+  const w = mapWrap.clientWidth, h = mapWrap.clientHeight;
+  if (w === 0 || h === 0) return;
+  cv.width = w; cv.height = h;
+  cv.style.width = w + 'px'; cv.style.height = h + 'px';
+  if (mapReady) fitView();
+}).observe(mapWrap);
+
+loadMap();
+
+// map 坐标(米) -> canvas 像素（含 y 翻转：pgm 首行对应 y 最大）
+function m2cx(x) { return (x - meta.origin[0]) / meta.resolution * baseScale * zoom + panX; }
+function m2cy(y) { return (meta.height - (y - meta.origin[1]) / meta.resolution) * baseScale * zoom + panY; }
+// canvas 像素 -> map 坐标(米)，逆变换（初始定位点选用）
+function c2mx(px) { return (px - panX) / (baseScale * zoom) * meta.resolution + meta.origin[0]; }
+function c2my(py) { return meta.origin[1] + (meta.height - (py - panY) / (baseScale * zoom)) * meta.resolution; }
+
+// ---- 初始定位 / 目标点 点选模式 ----
+let pickMode = null;              // null | 'pose' | 'goal'
+let poseStart = null, poseCur = null;
+const btnPose = document.getElementById('btnPose');
+const btnGoal = document.getElementById('btnGoal');
+const btnNavCancel = document.getElementById('btnNavCancel');
+const mapHint = document.getElementById('mapHint');
+let navStatus = 'idle';
+
+function setPickMode(mode) {
+  pickMode = mode;
+  poseStart = poseCur = null;
+  btnPose.textContent = pickMode === 'pose' ? '取消' : '初始定位';
+  btnGoal.textContent = pickMode === 'goal' ? '取消' : '目标点';
+  cv.style.cursor = pickMode ? 'crosshair' : 'grab';
+  if (pickMode === 'pose') mapHint.textContent = '点选初始位姿：按下并拖出朝向，松开下发（ESC 取消）';
+  else if (pickMode === 'goal') mapHint.textContent = '点选导航目标：按下并拖出朝向，松开下发（ESC 取消）';
+  else mapHint.textContent = '滚轮缩放 · 拖拽平移';
+}
+btnPose.onclick = () => setPickMode(pickMode === 'pose' ? null : 'pose');
+btnGoal.onclick = () => setPickMode(pickMode === 'goal' ? null : 'goal');
+btnNavCancel.onclick = () => send({ type: 'nav_cancel' });
+addEventListener('keydown', e => { if (e.key === 'Escape' && pickMode) setPickMode(null); });
+
+const NAV_STATUS_TEXT = {
+  idle: '', sent: '目标已发送…', driving: '导航行驶中…',
+  succeeded: '已到达目标点', aborted: '导航失败',
+  canceled: '导航已取消', rejected: '目标被拒绝', error: 'Nav2 未就绪',
+  canceling: '正在取消…',
+};
+function refreshNavUI() {
+  btnNavCancel.style.display = (navStatus === 'driving' || navStatus === 'sent') ? '' : 'none';
+  const t = NAV_STATUS_TEXT[navStatus] || navStatus;
+  if (!pickMode) mapHint.textContent = t || '滚轮缩放 · 拖拽平移';
+}
+
+// ---- 缩放/平移 ----
+cv.addEventListener('wheel', e => {
+  e.preventDefault();
+  if (!mapReady) return;
+  const rect = cv.getBoundingClientRect();
+  const mx = e.clientX - rect.left, my = e.clientY - rect.top;
+  const old = zoom;
+  zoom *= e.deltaY < 0 ? 1.15 : 1 / 1.15;
+  zoom = Math.max(0.3, Math.min(20, zoom));
+  panX = mx - (mx - panX) * (zoom / old);
+  panY = my - (my - panY) * (zoom / old);
+}, { passive: false });
+
+let panning = false, panStart = null;
+function canvasPos(e) {
+  const rect = cv.getBoundingClientRect();
+  return { x: e.clientX - rect.left, y: e.clientY - rect.top };
+}
+cv.addEventListener('pointerdown', e => {
+  if (pickMode) {
+    poseStart = canvasPos(e); poseCur = poseStart;
+  } else {
+    panning = true; panStart = { x: e.clientX - panX, y: e.clientY - panY };
+    cv.style.cursor = 'grabbing';
+  }
+  cv.setPointerCapture(e.pointerId);
+});
+cv.addEventListener('pointermove', e => {
+  if (pickMode && poseStart) { poseCur = canvasPos(e); return; }
+  if (panning) { panX = e.clientX - panStart.x; panY = e.clientY - panStart.y; }
+});
+function endPan(e) {
+  if (pickMode && poseStart && poseCur) {
+    // 拖出朝向并下发（canvas y 向下，yaw 取负）
+    const dx = poseCur.x - poseStart.x, dy = poseCur.y - poseStart.y;
+    if (Math.hypot(dx, dy) > 8) {   // 拖得太短视为误触
+      const x = c2mx(poseStart.x), y = c2my(poseStart.y);
+      const yaw = Math.atan2(-dy, dx);
+      if (pickMode === 'pose') {
+        send({ type: 'initial_pose', x, y, yaw });
+        mapHint.textContent = `初始位姿已下发: (${x.toFixed(2)}, ${y.toFixed(2)})`;
+      } else {
+        send({ type: 'nav_goal', x, y, yaw });
+        mapHint.textContent = `目标已下发: (${x.toFixed(2)}, ${y.toFixed(2)})`;
+      }
+    }
+    setPickMode(null);
+  }
+  panning = false;
+  if (!pickMode) cv.style.cursor = 'grab';
+}
+cv.addEventListener('pointerup', endPan);
+cv.addEventListener('pointercancel', endPan);
+
+// ---- 遥测 ----
+let robotPose = null;
+let scanPts = [];
+let simBatt = 100;
+
+function onMessage(ev) {
+  let d;
+  try { d = JSON.parse(ev.data); } catch { return; }
+  if (d.type === 'telemetry') {
+    robotPose = d.pose;
+    scanPts = d.scan;
+    document.getElementById('gvSpeed').textContent = (d.speed ?? 0).toFixed(2);
+    document.getElementById('gvTurn').textContent = (d.turn ?? 0).toFixed(2);
+    document.getElementById('gvPos').textContent = `${d.pose.x.toFixed(2)}, ${d.pose.y.toFixed(2)}`;
+    document.getElementById('gvYaw').textContent = `${(d.pose.yaw * 57.2958).toFixed(1)}°`;
+    if (d.nav !== undefined && d.nav !== navStatus) {
+      navStatus = d.nav;
+      refreshNavUI();
+    }
+  }
+}
+
+// 模拟电池缓慢下降（真车到货后换真实 battery_status）
+setInterval(() => {
+  simBatt = Math.max(0, simBatt - 0.001);
+  document.getElementById('gvBatt').textContent = simBatt.toFixed(1);
+  document.getElementById('gvVolt').textContent = (44 + simBatt * 0.048).toFixed(1);
+  const f = document.getElementById('battFill');
+  f.style.width = simBatt + '%';
+  f.style.background = simBatt > 30 ? '#4caf50' : '#d32f2f';
+}, 1000);
+
+// ---- 渲染循环 ----
+function render() {
+  requestAnimationFrame(render);
+  if (cv.width === 0) return;
+  c2.clearRect(0, 0, cv.width, cv.height);
+  if (!mapReady) {
+    c2.fillStyle = '#5a6572'; c2.font = '16px sans-serif';
+    c2.fillText('地图加载中…', 20, 40);
+    return;
+  }
+  c2.imageSmoothingEnabled = false;
+  c2.drawImage(mapImg, panX, panY, meta.width * baseScale * zoom, meta.height * baseScale * zoom);
+
+  c2.fillStyle = 'rgba(0,229,255,0.75)';
+  for (const [x, y] of scanPts) {
+    c2.fillRect(m2cx(x) - 1.5, m2cy(y) - 1.5, 3, 3);
+  }
+
+  if (robotPose) {
+    const cx = m2cx(robotPose.x), cy = m2cy(robotPose.y);
+    c2.save();
+    c2.translate(cx, cy);
+    c2.rotate(-robotPose.yaw);
+    c2.beginPath();
+    c2.moveTo(14, 0); c2.lineTo(-9, 8); c2.lineTo(-5, 0); c2.lineTo(-9, -8); c2.closePath();
+    c2.fillStyle = '#ffb300'; c2.fill();
+    c2.strokeStyle = '#14171c'; c2.lineWidth = 1.5; c2.stroke();
+    c2.restore();
+  }
+
+  // 点选模式拖拽中的临时箭头（初始定位=红，目标点=绿）
+  if (pickMode && poseStart && poseCur) {
+    const dx = poseCur.x - poseStart.x, dy = poseCur.y - poseStart.y;
+    if (Math.hypot(dx, dy) > 8) {
+      const ang = Math.atan2(dy, dx);
+      const color = pickMode === 'pose' ? '#ff5252' : '#69f0ae';
+      c2.save();
+      c2.translate(poseStart.x, poseStart.y);
+      c2.rotate(ang);
+      c2.beginPath();
+      c2.moveTo(0, 0); c2.lineTo(Math.hypot(dx, dy), 0);
+      c2.moveTo(Math.hypot(dx, dy) - 10, -6); c2.lineTo(Math.hypot(dx, dy), 0);
+      c2.lineTo(Math.hypot(dx, dy) - 10, 6);
+      c2.strokeStyle = color; c2.lineWidth = 3; c2.stroke();
+      c2.beginPath(); c2.arc(0, 0, 5, 0, 7); c2.fillStyle = color; c2.fill();
+      c2.restore();
+    }
+  }
+}
+render();
+</script>
+</body>
+</html>

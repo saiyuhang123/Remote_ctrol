@@ -1,0 +1,22 @@
+slam_toolbox:
+  ros__parameters:
+    use_sim_time: true
+
+    # 坐标系：与本车 URDF/插件一致
+    odom_frame: odom
+    base_frame: Frame
+    map_frame: map
+    scan_topic: /scan
+
+    mode: mapping
+
+    # 雷达量程与 2D 雷达仿真参数一致
+    max_laser_range: 12.0
+
+    # 地图分辨率
+    resolution: 0.05
+
+    # 建图质量（场地小，默认值即可；适当收紧提高边缘质量）
+    minimum_travel_distance: 0.2
+    minimum_travel_heading: 0.2
+    scan_buffer_size: 10

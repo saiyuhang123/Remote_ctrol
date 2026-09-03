@@ -1,0 +1,20 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>chassis_nav2</name>
+  <version>0.1.0</version>
+  <description>JD03 底盘仿真 Nav2 接入（建图/定位/巡航）</description>
+  <maintainer email="dev@example.com">ubuntu</maintainer>
+  <license>Proprietary</license>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+
+  <exec_depend>chassis_gazebo</exec_depend>
+  <exec_depend>slam_toolbox</exec_depend>
+  <exec_depend>nav2_bringup</exec_depend>
+  <exec_depend>nav2_smac_planner</exec_depend>
+  <exec_depend>nav2_regulated_pure_pursuit_controller</exec_depend>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>

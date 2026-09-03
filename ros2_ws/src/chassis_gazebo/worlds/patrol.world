@@ -1,0 +1,79 @@
+<?xml version="1.0" ?>
+<sdf version="1.6">
+  <world name="patrol">
+    <include>
+      <uri>model://sun</uri>
+    </include>
+    <include>
+      <uri>model://ground_plane</uri>
+    </include>
+
+    <!-- 四周围墙 12m x 12m -->
+    <model name="wall_n">
+      <static>true</static>
+      <pose>0 6 0.5 0 0 0</pose>
+      <link name="link">
+        <collision name="c"><geometry><box><size>12.4 0.2 1.0</size></box></geometry></collision>
+        <visual name="v"><geometry><box><size>12.4 0.2 1.0</size></box></geometry></visual>
+      </link>
+    </model>
+    <model name="wall_s">
+      <static>true</static>
+      <pose>0 -6 0.5 0 0 0</pose>
+      <link name="link">
+        <collision name="c"><geometry><box><size>12.4 0.2 1.0</size></box></geometry></collision>
+        <visual name="v"><geometry><box><size>12.4 0.2 1.0</size></box></geometry></visual>
+      </link>
+    </model>
+    <model name="wall_e">
+      <static>true</static>
+      <pose>6 0 0.5 0 0 0</pose>
+      <link name="link">
+        <collision name="c"><geometry><box><size>0.2 12.4 1.0</size></box></geometry></collision>
+        <visual name="v"><geometry><box><size>0.2 12.4 1.0</size></box></geometry></visual>
+      </link>
+    </model>
+    <model name="wall_w">
+      <static>true</static>
+      <pose>-6 0 0.5 0 0 0</pose>
+      <link name="link">
+        <collision name="c"><geometry><box><size>0.2 12.4 1.0</size></box></geometry></collision>
+        <visual name="v"><geometry><box><size>0.2 12.4 1.0</size></box></geometry></visual>
+      </link>
+    </model>
+
+    <!-- 场内障碍：柱子与箱子，供雷达/导航测试 -->
+    <model name="pillar_1">
+      <static>true</static>
+      <pose>2.5 2.0 0.5 0 0 0</pose>
+      <link name="link">
+        <collision name="c"><geometry><cylinder><radius>0.25</radius><length>1.0</length></cylinder></geometry></collision>
+        <visual name="v"><geometry><cylinder><radius>0.25</radius><length>1.0</length></cylinder></geometry></visual>
+      </link>
+    </model>
+    <model name="pillar_2">
+      <static>true</static>
+      <pose>-2.5 -1.5 0.5 0 0 0</pose>
+      <link name="link">
+        <collision name="c"><geometry><cylinder><radius>0.25</radius><length>1.0</length></cylinder></geometry></collision>
+        <visual name="v"><geometry><cylinder><radius>0.25</radius><length>1.0</length></cylinder></geometry></visual>
+      </link>
+    </model>
+    <model name="box_1">
+      <static>true</static>
+      <pose>1.5 -2.5 0.4 0 0 0.5</pose>
+      <link name="link">
+        <collision name="c"><geometry><box><size>1.5 0.8 0.8</size></box></geometry></collision>
+        <visual name="v"><geometry><box><size>1.5 0.8 0.8</size></box></geometry></visual>
+      </link>
+    </model>
+    <model name="box_2">
+      <static>true</static>
+      <pose>-2.0 2.5 0.3 0 0 -0.3</pose>
+      <link name="link">
+        <collision name="c"><geometry><box><size>0.8 0.8 0.6</size></box></geometry></collision>
+        <visual name="v"><geometry><box><size>0.8 0.8 0.6</size></box></geometry></visual>
+      </link>
+    </model>
+  </world>
+</sdf>

@@ -1,0 +1,395 @@
+<?xml version="1.0"?>
+<!-- This URDF was automatically created by SolidWorks to URDF Exporter! Originally created by Stephen Brawner (brawner@gmail.com) 
+     Commit Version: 1.6.0-4-g7f85cfe  Build Version: 1.6.7995.38578
+     For more information, please see http://wiki.ros.org/sw_urdf_exporter -->
+<robot
+  name="chassis">
+  <link
+    name="Frame">
+    <inertial>
+      <origin
+        xyz="0.0928281919478462 -0.00673923092999855 0.151666421008473"
+        rpy="0 0 0" />
+      <mass
+        value="1.5731528453802" />
+      <inertia
+        ixx="0.0218145784639336"
+        ixy="-0.00154424352543078"
+        ixz="8.40761431895854E-08"
+        iyy="0.00042670429513181"
+        iyz="2.24579560949427E-07"
+        izz="0.0218008704749134" />
+    </inertial>
+    <visual>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://chassis_description/meshes/Frame.STL" />
+      </geometry>
+      <material
+        name="">
+        <color
+          rgba="0.823529411764706 0.823529411764706 1 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://chassis_description/meshes/Frame.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <link
+    name="wheel_1">
+    <inertial>
+      <origin
+        xyz="2.26501005035074E-06 -0.0334707379419106 -3.72874907977883E-07"
+        rpy="0 0 0" />
+      <mass
+        value="2.55809164145743" />
+      <inertia
+        ixx="0.0142910768404817"
+        ixy="6.68835490530129E-08"
+        ixz="9.10300718206809E-09"
+        iyy="0.0267766869584139"
+        iyz="-8.33810412526065E-09"
+        izz="0.0142909867417535" />
+    </inertial>
+    <visual>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://chassis_description/meshes/wheel_1.STL" />
+      </geometry>
+      <material
+        name="">
+        <color
+          rgba="0.823529411764706 0.823529411764706 1 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://chassis_description/meshes/wheel_1.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint name="wheel_1_joint" type="continuous">
+    <origin xyz="-0.00154970976 -0.0283967243 0.0603998383" rpy="-0.00440320604907234 0.00971868346536325 -0.0750440468661808" />
+    <parent link="steering_1" />
+    <child link="wheel_1" />
+    <axis xyz="0 1 0" />
+    <limit effort="100" velocity="15" />
+  </joint>
+  <link
+    name="wheel_2">
+    <inertial>
+      <origin
+        xyz="9.28521727735498E-05 0.0334718985994525 -0.000144245708811025"
+        rpy="0 0 0" />
+      <mass
+        value="2.55809223504083" />
+      <inertia
+        ixx="0.0142912069151952"
+        ixy="4.24912130650615E-05"
+        ixz="-1.72055124458042E-07"
+        iyy="0.026776306808243"
+        iyz="-5.46196789244644E-05"
+        izz="0.0142912446422559" />
+    </inertial>
+    <visual>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://chassis_description/meshes/wheel_2.STL" />
+      </geometry>
+      <material
+        name="">
+        <color
+          rgba="0.823529411764706 0.823529411764706 1 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://chassis_description/meshes/wheel_2.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint name="wheel_2_joint" type="continuous">
+    <origin xyz="0.00514556716 0.0279502959 0.0602240903" rpy="0.00440320604907234 0.00971868346536325 -0.0682343762240833" />
+    <parent link="steering_2" />
+    <child link="wheel_2" />
+    <axis xyz="0 1 0" />
+    <limit effort="100" velocity="15" />
+  </joint>
+  <link
+    name="wheel_3">
+    <inertial>
+      <origin
+        xyz="2.2649315989387E-06 -0.0334707379464665 -3.72906138745854E-07"
+        rpy="0 0 0" />
+      <mass
+        value="2.55809164171419" />
+      <inertia
+        ixx="0.0142910768411321"
+        ixy="6.6867572156814E-08"
+        ixz="9.10203159797975E-09"
+        iyy="0.026776686956972"
+        iyz="-8.336287049684E-09"
+        izz="0.0142909867402285" />
+    </inertial>
+    <visual>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://chassis_description/meshes/wheel_3.STL" />
+      </geometry>
+      <material
+        name="">
+        <color
+          rgba="0.823529411764706 0.823529411764706 1 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://chassis_description/meshes/wheel_3.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint name="wheel_3_joint" type="continuous">
+    <origin xyz="-0.00135531087 -0.0284093576 0.0604005012" rpy="-0.00440320736914554 0.00974828930347111 -0.0683200977841862" />
+    <parent link="steering_3" />
+    <child link="wheel_3" />
+    <axis xyz="0 1 0" />
+    <limit effort="100" velocity="15" />
+  </joint>
+  <link
+    name="wheel_4">
+    <inertial>
+      <origin
+        xyz="1.99595972960598E-06 0.0333630669871767 1.32608472092066E-07"
+        rpy="0 0 0" />
+      <mass
+        value="2.55809229698053" />
+      <inertia
+        ixx="0.0142910620534096"
+        ixy="-2.91645980447187E-08"
+        ixz="1.40144867758775E-08"
+        iyy="0.0267766929241229"
+        iyz="3.46518444283218E-09"
+        izz="0.0142910069486517" />
+    </inertial>
+    <visual>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://chassis_description/meshes/wheel_4.STL" />
+      </geometry>
+      <material
+        name="">
+        <color
+          rgba="0.823529411764706 0.823529411764706 1 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+      <geometry>
+        <mesh
+          filename="package://chassis_description/meshes/wheel_4.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint name="wheel_4_joint" type="continuous">
+    <origin xyz="0.00366614467 0.0408821734 0.0604561298" rpy="0.00440320736914554 0.00974828930347111 -0.074958325306078" />
+    <parent link="steering_4" />
+    <child link="wheel_4" />
+    <axis xyz="0 1 0" />
+    <limit effort="100" velocity="15" />
+  </joint>
+  <link name="steering_1">
+    <inertial>
+      <origin xyz="-0.00405440867 -0.0617715727 0.0605472782" rpy="0 0 0" />
+      <mass
+        value="2.55809164145743" />
+      <inertia
+        ixx="0.0143612666"
+        ixy="0.000933496702"
+        ixz="-4.11446165e-06"
+        iyy="0.0267062552"
+        iyz="-5.48306043e-05"
+        izz="0.0142912287" />
+    </inertial>
+    <visual>
+      <origin xyz="0 0 0" rpy="-0.010014 -0.077734 -1.6417" />
+      <geometry>
+        <mesh
+          filename="package://chassis_description/meshes/steering_1.STL" />
+      </geometry>
+      <material
+        name="">
+        <color
+          rgba="0.823529411764706 0.823529411764706 1 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="-0.010014 -0.077734 -1.6417" />
+      <geometry>
+        <mesh
+          filename="package://chassis_description/meshes/steering_1.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint name="steering_1_joint" type="revolute">
+    <!-- 坐标系已掰直：rpy=0，纯 Z 轴转向（阿克曼插件按此推算几何） -->
+    <origin xyz="0.23696 -0.18808 0.072721" rpy="0 0 0" />
+    <parent link="Frame" />
+    <child link="steering_1" />
+    <axis xyz="0 0 1" />
+    <limit lower="-0.53" upper="0.53" effort="50" velocity="2" />
+  </joint>
+  <link name="steering_2">
+    <inertial>
+      <origin xyz="0.00751535776 0.0613388383 0.0602267908" rpy="0 0 0" />
+      <mass
+        value="2.55809223504083" />
+      <inertia
+        ixx="0.0143550053"
+        ixy="0.000891222127"
+        ixz="9.31465057e-09"
+        iyy="0.0267127476"
+        iyz="-5.57306199e-08"
+        izz="0.0142910054" />
+    </inertial>
+    <visual>
+      <origin xyz="0 0 0" rpy="-0.010014 0.077734 -1.6432" />
+      <geometry>
+        <mesh
+          filename="package://chassis_description/meshes/steering_2.STL" />
+      </geometry>
+      <material
+        name="">
+        <color
+          rgba="0.823529411764706 0.823529411764706 1 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="-0.010014 0.077734 -1.6432" />
+      <geometry>
+        <mesh
+          filename="package://chassis_description/meshes/steering_2.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint name="steering_2_joint" type="revolute">
+    <!-- 坐标系已掰直：rpy=0，纯 Z 轴转向（阿克曼插件按此推算几何） -->
+    <origin xyz="0.26138 0.15232 0.072721" rpy="0 0 0" />
+    <parent link="Frame" />
+    <child link="steering_2" />
+    <axis xyz="0 0 1" />
+    <limit lower="-0.53" upper="0.53" effort="50" velocity="2" />
+  </joint>
+  <link name="steering_3">
+    <inertial>
+      <origin xyz="-0.00363483011 -0.0617976889 0.0605472705" rpy="0 0 0" />
+      <mass
+        value="2.55809164171419" />
+      <inertia
+        ixx="0.0143492069"
+        ixy="0.000849937726"
+        ixz="-3.7437488e-06"
+        iyy="0.0267183149"
+        iyz="-5.48591652e-05"
+        izz="0.0142912287" />
+    </inertial>
+    <visual>
+      <origin xyz="0 0 0" rpy="-0.0095184 -0.0778 -1.6417" />
+      <geometry>
+        <mesh
+          filename="package://chassis_description/meshes/steering_3.STL" />
+      </geometry>
+      <material
+        name="">
+        <color
+          rgba="0.823529411764706 0.823529411764706 1 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="-0.0095184 -0.0778 -1.6417" />
+      <geometry>
+        <mesh
+          filename="package://chassis_description/meshes/steering_3.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint name="steering_3_joint" type="fixed">
+    <!-- 后转向锁死：Ecu 接口只有前轮转角，后轮转向由底盘控制器内部处理 -->
+    <origin xyz="-0.26168 -0.13947 0.072664" rpy="0 0 0" />
+    <parent link="Frame" />
+    <child link="steering_3" />
+  </joint>
+  <link name="steering_4">
+    <inertial>
+      <origin xyz="0.00616509514 0.0741505201 0.0606029371" rpy="0 0 0" />
+      <mass
+        value="2.55809229698053" />
+      <inertia
+        ixx="0.014361205"
+        ixy="0.000933187528"
+        ixz="4.13447365e-06"
+        iyy="0.0267063081"
+        iyz="5.48257879e-05"
+        izz="0.0142912488" />
+    </inertial>
+    <visual>
+      <origin xyz="0 0 0" rpy="-0.0095184 0.0778 -1.6432" />
+      <geometry>
+        <mesh
+          filename="package://chassis_description/meshes/steering_4.STL" />
+      </geometry>
+      <material
+        name="">
+        <color
+          rgba="0.823529411764706 0.823529411764706 1 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="-0.0095184 0.0778 -1.6432" />
+      <geometry>
+        <mesh
+          filename="package://chassis_description/meshes/steering_4.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint name="steering_4_joint" type="fixed">
+    <!-- 后转向锁死：Ecu 接口只有前轮转角，后轮转向由底盘控制器内部处理 -->
+    <origin xyz="-0.23909 0.17541 0.072664" rpy="0 0 0" />
+    <parent link="Frame" />
+    <child link="steering_4" />
+  </joint>
+</robot>
