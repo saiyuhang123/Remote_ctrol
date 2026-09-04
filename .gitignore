@@ -43,3 +43,8 @@ web/dist/
 *.swp
 .DS_Store
 Thumbs.db
+
+ros2_ws/src/HK/doc
+
+# 人脸底库（个人数据不入库）
+face_db/

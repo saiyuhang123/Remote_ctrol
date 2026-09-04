@@ -26,8 +26,13 @@ from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
 from rclpy.time import Time
 from sensor_msgs.msg import LaserScan
+from std_msgs.msg import String
 
-DEFAULT_CONFIG = str(Path.home() / 'Remote_ctrol' / 'config' / 'config.yaml')
+# 配置文件候选路径（按优先级），也可用环境变量 ROBOT_CONFIG 指定
+CONFIG_CANDIDATES = [
+    Path.home() / 'ros2Project' / 'Remote_ctrol' / 'config' / 'config.yaml',
+    Path.home() / 'Remote_ctrol' / 'config' / 'config.yaml',
+]
 
 # 遥测目标坐标系：map（接 AMCL 定位后与地图图片对齐）；
 # map 系不可用时（Nav2 未启动）回退 odom
@@ -47,6 +52,7 @@ class GatewayNode(Node):
         self._max_angular = float(ctrl['max_angular'])
         self._timeout = float(ctrl['cmd_timeout'])
 
+        # Twist 是 geometry_msgs 功能包提供的一个标准消息类型，专门用来表示空间中的速度  线速度 和角速度
         self._pub = self.create_publisher(Twist, '/cmd_vel', 10)
         self._pub_initialpose = self.create_publisher(
             PoseWithCovarianceStamped, '/initialpose', 10)
@@ -73,6 +79,9 @@ class GatewayNode(Node):
         self.create_subscription(
             LaserScan, '/scan', lambda m: setattr(self, '_scan', m),
             qos_profile_sensor_data)
+        # 识别事件透传：detector_node -> 浏览器
+        self.create_subscription(
+            String, '/detection_events', self._on_detection_event, 10)
         self._tf_buffer = tf2_ros.Buffer()
         self._tf_listener = tf2_ros.TransformListener(self._tf_buffer, self)
         self.create_timer(0.1, self._make_telemetry)  # 10Hz 遥测
@@ -236,6 +245,11 @@ class GatewayNode(Node):
         except Exception:
             self._ws_clients.discard(ws)
 
+    def _on_detection_event(self, msg):
+        """detector_node 的识别事件原样透传给所有浏览器"""
+        if self._ws_loop is not None and self._ws_clients:
+            self._ws_loop.call_soon_threadsafe(self._broadcast, msg.data)
+
 
 async def _handle_client(node, ws):
     peer = ws.remote_address
@@ -281,7 +295,16 @@ def _run_ws_server(node, port):
 
 
 def main():
-    config_path = os.environ.get('ROBOT_CONFIG', DEFAULT_CONFIG)
+    config_path = os.environ.get('ROBOT_CONFIG')
+    if not config_path:
+        for cand in CONFIG_CANDIDATES:
+            if cand.exists():
+                config_path = str(cand)
+                break
+    if not config_path:
+        raise FileNotFoundError(
+            '未找到 config.yaml，请设置 ROBOT_CONFIG 环境变量，候选路径：'
+            + ', '.join(str(c) for c in CONFIG_CANDIDATES))
     with open(config_path, 'r', encoding='utf-8') as f:
         cfg = yaml.safe_load(f)
 

@@ -1,0 +1,8 @@
+# ByteTrack 自定义配置：巡检场景跟踪稳定化
+tracker_type: bytetrack
+track_high_thresh: 0.5   # 高置信检测阈值
+track_low_thresh: 0.1    # 低置信检测阈值（用于关联延续）
+new_track_thresh: 0.6    # 新建轨迹阈值
+track_buffer: 150        # 断线保留帧数（30fps 下约 5s，防遮挡断轨换 ID）
+match_thresh: 0.7        # 关联匹配阈值（调低=更容易续上旧轨迹）
+fuse_score: true

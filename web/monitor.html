@@ -57,6 +57,12 @@
   #battBar { height: 8px; background: #2a313c; border-radius: 4px; margin-top: 8px; overflow: hidden; }
   #battFill { height: 100%; width: 100%; background: #4caf50; border-radius: 4px; transition: width .5s; }
 
+  /* ---------- 识别告警 ---------- */
+  .alertItem { display: flex; gap: 8px; padding: 6px 0; border-bottom: 1px solid #262d38; align-items: center; }
+  .alertItem img { width: 64px; height: 48px; object-fit: cover; border-radius: 4px; background: #000; }
+  .alertItem .t { font-size: 11px; color: #7d8a99; }
+  .alertItem .l { font-size: 13px; color: #ffd54f; font-weight: 600; }
+
   /* ---------- 视频 ---------- */
   #videoBox { position: relative; width: 100%; aspect-ratio: 4/3; background: #000;
               border: 1px solid #2a313c; border-radius: 6px; overflow: hidden; }
@@ -122,6 +128,13 @@
         <div>电压<div class="v"><span id="gvVolt">48.0</span><span class="u">V</span></div></div>
       </div>
       <div id="battBar"><div id="battFill"></div></div>
+    </div>
+
+    <div class="card">
+      <h2>识别告警 <span id="alertCount" style="color:#4fc3f7"></span></h2>
+      <div id="alertList" style="max-height:220px;overflow-y:auto">
+        <div style="color:#6b7787;font-size:12px" id="alertEmpty">暂无识别事件</div>
+      </div>
     </div>
 
     <div class="card">
@@ -387,7 +400,28 @@ function onMessage(ev) {
       navStatus = d.nav;
       refreshNavUI();
     }
+  } else if (d.type === 'detection') {
+    addAlert(d);
   }
+}
+
+// ================= 识别告警 =================
+let alertCount = 0;
+function addAlert(d) {
+  alertCount++;
+  document.getElementById('alertCount').textContent = `(${alertCount})`;
+  document.getElementById('alertEmpty')?.remove();
+  const list = document.getElementById('alertList');
+  const item = document.createElement('div');
+  item.className = 'alertItem';
+  const time = new Date(d.ts * 1000).toTimeString().slice(0, 8);
+  const eventName = { person_face: '人脸', person: '行人', vehicle_plate: '车牌' }[d.event] || d.event;
+  item.innerHTML =
+    `<img src="${d.image}" onerror="this.style.display='none'">` +
+    `<div><div class="l">${eventName} ${d.label}</div>` +
+    `<div class="t">${time} · 置信度 ${d.score}</div></div>`;
+  list.prepend(item);
+  while (list.children.length > 30) list.lastChild.remove();
 }
 
 // 模拟电池缓慢下降（真车到货后换真实 battery_status）
