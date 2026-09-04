@@ -1,0 +1,15 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>capture_server</name>
+  <version>0.1.0</version>
+  <description>图片抓拍服务：手动/自动抓拍当前视频帧，自动保存归档（合同第10条）</description>
+  <maintainer email="dev@example.com">ubuntu</maintainer>
+  <license>Proprietary</license>
+
+  <exec_depend>rclpy</exec_depend>
+  <exec_depend>std_msgs</exec_depend>
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>

@@ -139,7 +139,10 @@
 
     <div class="card">
       <h2>视频监控（D435）
-        <button class="btn gray" id="btnVideo" style="font-size:12px;padding:3px 10px">开启</button>
+        <span style="display:flex;gap:6px">
+          <button class="btn" id="btnCapture" style="font-size:12px;padding:3px 10px">抓拍</button>
+          <button class="btn gray" id="btnVideo" style="font-size:12px;padding:3px 10px">开启</button>
+        </span>
       </h2>
       <div id="videoBox">
         <iframe id="video" allow="autoplay; fullscreen"></iframe>
@@ -199,6 +202,12 @@ function closeVideo() {
   videoOn = false;
 }
 btnVideo.onclick = () => videoOn ? closeVideo() : openVideo();
+
+// ---- 手动抓拍 ----
+document.getElementById('btnCapture').onclick = () => {
+  send({ type: 'capture', label: 'manual' });
+  mapHint.textContent = '抓拍请求已发送…';
+};
 
 // ================= 遥控指令（与 M1 相同协议） =================
 let linear = 0, angular = 0, stickActive = false;
@@ -402,6 +411,12 @@ function onMessage(ev) {
     }
   } else if (d.type === 'detection') {
     addAlert(d);
+  } else if (d.type === 'capture') {
+    if (d.ok) {
+      addAlert({ event: 'capture', label: '手动抓拍', score: 1, ts: d.ts, image: d.image });
+    } else {
+      mapHint.textContent = `抓拍失败：${d.reason || '未知原因'}`;
+    }
   }
 }
 
@@ -415,7 +430,7 @@ function addAlert(d) {
   const item = document.createElement('div');
   item.className = 'alertItem';
   const time = new Date(d.ts * 1000).toTimeString().slice(0, 8);
-  const eventName = { person_face: '人脸', person: '行人', vehicle_plate: '车牌' }[d.event] || d.event;
+  const eventName = { person_face: '人脸', person: '行人', vehicle_plate: '车牌', capture: '抓拍' }[d.event] || d.event;
   item.innerHTML =
     `<img src="${d.image}" onerror="this.style.display='none'">` +
     `<div><div class="l">${eventName} ${d.label}</div>` +

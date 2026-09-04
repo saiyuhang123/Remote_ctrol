@@ -82,6 +82,10 @@ class GatewayNode(Node):
         # 识别事件透传：detector_node -> 浏览器
         self.create_subscription(
             String, '/detection_events', self._on_detection_event, 10)
+        # 抓拍：浏览器 -> /capture_request；/capture_done -> 浏览器
+        self._pub_capture = self.create_publisher(String, '/capture_request', 10)
+        self.create_subscription(
+            String, '/capture_done', self._on_capture_done, 10)
         self._tf_buffer = tf2_ros.Buffer()
         self._tf_listener = tf2_ros.TransformListener(self._tf_buffer, self)
         self.create_timer(0.1, self._make_telemetry)  # 10Hz 遥测
@@ -250,6 +254,15 @@ class GatewayNode(Node):
         if self._ws_loop is not None and self._ws_clients:
             self._ws_loop.call_soon_threadsafe(self._broadcast, msg.data)
 
+    def request_capture(self, label='manual'):
+        """网页手动抓拍"""
+        self._pub_capture.publish(String(data=label))
+        self.get_logger().info(f'抓拍请求: {label}')
+
+    def _on_capture_done(self, msg):
+        if self._ws_loop is not None and self._ws_clients:
+            self._ws_loop.call_soon_threadsafe(self._broadcast, msg.data)
+
 
 async def _handle_client(node, ws):
     peer = ws.remote_address
@@ -278,6 +291,8 @@ async def _handle_client(node, ws):
                     float(data.get('yaw', 0.0)))
             elif msg_type == 'nav_cancel':
                 node.cancel_nav()
+            elif msg_type == 'capture':
+                node.request_capture(str(data.get('label', 'manual')))
     finally:
         node._ws_clients.discard(ws)
         node.get_logger().info(f'后台已断开: {peer}')

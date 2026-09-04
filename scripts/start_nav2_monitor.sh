@@ -28,6 +28,9 @@ bash "$ROOT/scripts/push_d435_wsl.sh" &
 # 图像识别节点（默认从 MediaMTX 拉流；离线测试用 -p video_source:=<视频文件> 覆盖）
 ros2 run detector_node detector &
 
+# 抓拍服务节点（手动抓拍/识别联动/巡逻到点抓拍共用 /capture_request 接口）
+ros2 run capture_server capture_server &
+
 trap 'kill $(jobs -p) 2>/dev/null || true' EXIT
 echo "=========================================================="
 echo " Nav2 全栈监控台已启动: http://localhost:8888/monitor.html"
