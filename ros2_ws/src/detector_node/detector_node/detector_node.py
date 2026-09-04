@@ -37,6 +37,8 @@ cv2.setNumThreads(4)
 from ultralytics import YOLO
 import hyperlpr3 as pr3
 
+from robot_common.reporter import HttpReporter
+
 YOLO_CLASSES = [0, 2, 5, 7]          # person, car, bus, truck
 FACE_SCORE_REPORT = 0.5              # 达到即上报姓名
 FACE_COLLECT_SEC = 2.5               # 人脸收集期（超时按现有最佳结果上报）
@@ -63,6 +65,12 @@ class DetectorNode(Node):
         self.declare_parameter(
             'face_db_dir',
             str(Path.home() / 'ros2Project' / 'Remote_ctrol' / 'face_db'))
+        self.declare_parameter('backend_url', 'http://127.0.0.1:8888')
+        # 识别结果入业务库（离线自动缓存补传）
+        self._reporter = HttpReporter(
+            self.get_parameter('backend_url').value,
+            cache_db=str(Path.home() / 'ros2Project' / 'Remote_ctrol' / 'data'
+                         / 'detector_cache.db'))
 
         self._src = self.get_parameter('video_source').value
         self._conf = float(self.get_parameter('conf_threshold').value)
@@ -165,6 +173,11 @@ class DetectorNode(Node):
             'score': round(float(score), 3), 'ts': int(time.time()),
             'image': f'captures/{day}/{fname}',
         }
+        # 入业务库（M2），失败自动离线缓存补传
+        self._reporter.post('/api/records/detections', {
+            'ts': payload['ts'], 'event': event, 'label': label,
+            'score': payload['score'], 'image': payload['image'],
+        })
         try:
             self._events.put_nowait(payload)
         except queue.Full:

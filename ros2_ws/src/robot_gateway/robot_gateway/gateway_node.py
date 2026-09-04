@@ -250,7 +250,7 @@ class GatewayNode(Node):
             self._ws_clients.discard(ws)
 
     def _on_detection_event(self, msg):
-        """detector_node 的识别事件原样透传给所有浏览器"""
+        """detector_node 的识别事件原样透传给所有浏览器（入库由各节点 HttpReporter 直报后端）"""
         if self._ws_loop is not None and self._ws_clients:
             self._ws_loop.call_soon_threadsafe(self._broadcast, msg.data)
 

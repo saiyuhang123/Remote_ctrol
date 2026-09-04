@@ -17,8 +17,8 @@ sleep 1
 # 遥控/遥测网关（初始定位、目标点下发）
 ros2 run robot_gateway gateway --ros-args -p use_sim_time:=true &
 
-# 网页服务
-python3 -m http.server 8888 --directory "$ROOT/web" &
+# 网页 + 业务后端（FastAPI：静态页面 + /api/* 数据接口）
+python3 -m uvicorn backend.main:app --host 0.0.0.0 --port 8888 --app-dir "$ROOT" &
 
 # 视频链：MediaMTX + D435 推流（相机未 attach 时推流脚本会退出，不影响其他功能）
 "$ROOT/bin/mediamtx" "$ROOT/deploy/mediamtx.yml" &

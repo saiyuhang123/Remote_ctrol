@@ -1,0 +1,184 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>路线与计划 — 巡检机器人</title>
+<style>
+  * { box-sizing: border-box; }
+  body { font-family: "Microsoft YaHei", sans-serif; margin: 0; background: #14171c; color: #dde3ea; }
+  header { display: flex; align-items: center; gap: 14px; padding: 10px 18px;
+           background: #1c2129; border-bottom: 1px solid #2a313c; }
+  header h1 { font-size: 17px; margin: 0; font-weight: 600; }
+  header a { color: #4fc3f7; text-decoration: none; font-size: 13px; margin-right: 10px; }
+  main { padding: 16px 18px; display: flex; flex-direction: column; gap: 14px; }
+  .card { background: #1c2129; border: 1px solid #2a313c; border-radius: 8px; padding: 14px 16px; }
+  .card h2 { font-size: 14px; margin: 0 0 12px; color: #8fa1b5; font-weight: 600; }
+  .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-bottom: 8px; }
+  input, select { background: #0d0f12; border: 1px solid #2a313c; color: #dde3ea;
+                  border-radius: 4px; padding: 6px 8px; font-size: 13px; }
+  .btn { padding: 7px 16px; font-size: 13px; border: none; border-radius: 5px; cursor: pointer;
+         background: #2d6da3; color: #fff; }
+  .btn:hover { background: #3a82bd; }
+  .btn.gray { background: #3a424e; font-size: 12px; padding: 4px 10px; }
+  .btn.danger { background: #b71c1c; font-size: 12px; padding: 4px 10px; }
+  .ptPick { padding: 4px 10px; font-size: 12px; border: 1px solid #2a313c; border-radius: 12px;
+            background: #232932; cursor: pointer; }
+  .ptPick.sel { background: #1b5e20; border-color: #4caf50; }
+  table { width: 100%; border-collapse: collapse; }
+  th, td { padding: 7px 10px; font-size: 13px; text-align: left; border-bottom: 1px solid #262d38; }
+  th { color: #8fa1b5; background: #212730; }
+  .st-running { color: #4fc3f7; } .st-success { color: #81c784; }
+  .st-failed { color: #e57373; } .st-canceled { color: #ffb74d; }
+  .hint { color: #6b7787; font-size: 12px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>路线与计划</h1>
+  <a href="/monitor.html">监控台</a>
+  <a href="/points.html">巡检点</a>
+  <a href="/records.html">记录</a>
+</header>
+
+<main>
+  <div class="card">
+    <h2>路线管理（点击点位按顺序加入路线）</h2>
+    <div class="row">
+      <input id="rName" placeholder="路线名称，如：东区日间巡检">
+      <span id="ptPicker" class="row" style="margin:0"></span>
+    </div>
+    <div class="row">
+      <span class="hint">已选顺序：</span><span id="rOrder" class="hint">（空）</span>
+      <button class="btn gray" id="rUndo">撤销最后</button>
+      <button class="btn" id="rSave">保存路线</button>
+    </div>
+    <table><thead><tr><th>ID</th><th>名称</th><th>点位顺序</th><th>操作</th></tr></thead>
+      <tbody id="routeTb"></tbody></table>
+  </div>
+
+  <div class="card">
+    <h2>计划管理</h2>
+    <div class="row">
+      <input id="pName" placeholder="计划名称">
+      <select id="pRoute"></select>
+      <select id="pType">
+        <option value="daily">每天定时</option>
+        <option value="once">执行一次</option>
+        <option value="interval_min">周期（分钟）</option>
+      </select>
+      <input id="pValue" placeholder="09:00 / 2026-09-05 09:00 / 120" style="width:190px">
+      <label class="hint"><input type="checkbox" id="pEnabled" checked>启用</label>
+      <button class="btn" id="pSave">保存计划</button>
+    </div>
+    <table><thead><tr><th>ID</th><th>名称</th><th>路线</th><th>规则</th><th>下次执行</th><th>启用</th><th>操作</th></tr></thead>
+      <tbody id="planTb"></tbody></table>
+  </div>
+
+  <div class="card">
+    <h2>任务记录 <button class="btn gray" onclick="loadTasks()" style="float:right">刷新</button></h2>
+    <table><thead><tr><th>ID</th><th>计划</th><th>路线</th><th>开始</th><th>耗时</th><th>状态</th><th>点位结果</th><th>报告</th></tr></thead>
+      <tbody id="taskTb"></tbody></table>
+  </div>
+</main>
+
+<script>
+let points = [], routes = [], plans = [];
+const fmt = t => t ? new Date(t * 1000).toLocaleString('zh-CN', { hour12: false }) : '-';
+const $ = id => document.getElementById(id);
+
+// ---------- 数据加载 ----------
+async function loadAll() {
+  points = (await (await fetch('/api/points')).json()).items;
+  routes = (await (await fetch('/api/routes')).json()).items;
+  plans = (await (await fetch('/api/plans')).json()).items;
+  renderPicker(); renderRoutes(); renderPlans();
+}
+async function loadTasks() {
+  const r = await (await fetch('/api/plans/tasks')).json();
+  const tb = $('taskTb'); tb.innerHTML = '';
+  for (const t of r.items) {
+    const dur = t.end_time ? `${Math.round(t.end_time - t.start_time)}s` : '-';
+    let detail = '-';
+    try {
+      const d = JSON.parse(t.detail || '[]');
+      detail = d.map(p => `${p.point || ''}:${(p.actions || []).length}动作`).join('；') || '-';
+    } catch {}
+    tb.innerHTML += `<tr><td>${t.id}</td><td>${t.plan_id ?? '-'}</td><td>${t.route_id ?? '-'}</td>
+      <td>${fmt(t.start_time)}</td><td>${dur}</td>
+      <td class="st-${t.status}">${t.status}</td><td class="hint">${detail}</td>
+      <td>${t.status !== 'running' ? `<a href="/api/plans/report/${t.id}" target="_blank" style="color:#4fc3f7">报告</a>` : ''}</td></tr>`;
+  }
+}
+
+// ---------- 路线 ----------
+let sel = [];
+function renderPicker() {
+  const el = $('ptPicker'); el.innerHTML = '';
+  points.forEach((p, i) => {
+    const b = document.createElement('button');
+    b.className = 'ptPick' + (sel.includes(p.id) ? ' sel' : '');
+    b.textContent = `#${i + 1} ${p.name}`;
+    b.onclick = () => { sel.push(p.id); renderPicker(); renderOrder(); };
+    el.appendChild(b);
+  });
+}
+function renderOrder() {
+  $('rOrder').textContent = sel.length
+    ? sel.map(id => { const i = points.findIndex(p => p.id === id); return `#${i + 1}`; }).join(' → ')
+    : '（空）';
+}
+$('rUndo').onclick = () => { sel.pop(); renderPicker(); renderOrder(); };
+$('rSave').onclick = async () => {
+  const name = $('rName').value.trim();
+  if (!name || sel.length === 0) { alert('填名称并选点位'); return; }
+  await fetch('/api/routes', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name, point_ids: sel }) });
+  $('rName').value = ''; sel = []; renderPicker(); renderOrder(); loadAll();
+};
+function renderRoutes() {
+  const tb = $('routeTb'); tb.innerHTML = '';
+  for (const r of routes) {
+    tb.innerHTML += `<tr><td>${r.id}</td><td>${r.name}</td>
+      <td>${(r.points || []).map(p => p.name).join(' → ')}</td>
+      <td><button class="btn danger" onclick="delRoute(${r.id})">删除</button></td></tr>`;
+  }
+  $('pRoute').innerHTML = routes.map(r => `<option value="${r.id}">${r.name}</option>`).join('');
+}
+window.delRoute = async id => { if (confirm('删除该路线？')) { await fetch(`/api/routes/${id}`, { method: 'DELETE' }); loadAll(); } };
+
+// ---------- 计划 ----------
+$('pSave').onclick = async () => {
+  const name = $('pName').value.trim();
+  const rid = parseInt($('pRoute').value);
+  if (!name || !rid || !$('pValue').value.trim()) { alert('补全计划信息'); return; }
+  const r = await (await fetch('/api/plans', { method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name, route_id: rid, schedule_type: $('pType').value,
+      schedule_value: $('pValue').value.trim(), enabled: $('pEnabled').checked }) })).json();
+  if (!r.ok) { alert('保存失败：检查时间格式'); return; }
+  $('pName').value = ''; $('pValue').value = ''; loadAll();
+};
+function typeDesc(p) {
+  return { once: '一次: ', daily: '每天: ', interval_min: '每 ' }[p.schedule_type] + p.schedule_value
+    + (p.schedule_type === 'interval_min' ? ' 分钟' : '');
+}
+function renderPlans() {
+  const tb = $('planTb'); tb.innerHTML = '';
+  for (const p of plans) {
+    tb.innerHTML += `<tr><td>${p.id}</td><td>${p.name}</td>
+      <td>${(routes.find(r => r.id === p.route_id) || {}).name || p.route_id}</td>
+      <td>${typeDesc(p)}</td><td>${fmt(p.next_run)}</td>
+      <td>${p.enabled ? '✓' : '✗'}</td>
+      <td><button class="btn gray" onclick="runNow(${p.id})">立即执行</button>
+          <button class="btn danger" onclick="delPlan(${p.id})">删除</button></td></tr>`;
+  }
+}
+window.runNow = async id => { await fetch(`/api/plans/${id}/run`, { method: 'POST' }); setTimeout(loadTasks, 1500); };
+window.delPlan = async id => { if (confirm('删除该计划？')) { await fetch(`/api/plans/${id}`, { method: 'DELETE' }); loadAll(); } };
+
+loadAll(); loadTasks();
+setInterval(loadTasks, 15000);
+</script>
+</body>
+</html>

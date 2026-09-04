@@ -9,6 +9,11 @@ ports:
   ws: 8765             # WebSocket：遥控指令 / 遥测
   web: 8888            # 管理后台页面
 
+backend:
+  url: "http://127.0.0.1:8888"   # FastAPI 业务后端（识别/抓拍记录入库）
+  report_timeout: 2.0            # 上报超时秒数
+  retry_interval: 5.0            # 失败重试间隔秒数
+
 video:
   stream_name: cam     # MediaMTX 流名，推流与拉流共用
   # 编码器按平台选择：jetson -> nvv4l2h264enc，x64 -> h264_vaapi，兜底 libx264

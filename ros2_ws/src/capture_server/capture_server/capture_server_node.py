@@ -19,6 +19,8 @@ import rclpy
 from rclpy.node import Node
 from std_msgs.msg import String
 
+from robot_common.reporter import HttpReporter
+
 MAX_DAYS = 14          # 抓拍图保留天数
 MAX_GB = 5.0           # 抓拍目录总容量上限
 MIN_FRAME_AGE = 1.0    # 缓存帧超过 1s 视为视频流断流，拒绝抓拍
@@ -35,6 +37,11 @@ class CaptureServerNode(Node):
         self._src = self.get_parameter('video_source').value
         self._cap_dir = Path(self.get_parameter('captures_dir').value)
         self._cap_dir.mkdir(parents=True, exist_ok=True)
+        self.declare_parameter('backend_url', 'http://127.0.0.1:8888')
+        self._reporter = HttpReporter(
+            self.get_parameter('backend_url').value,
+            cache_db=str(Path.home() / 'ros2Project' / 'Remote_ctrol' / 'data'
+                         / 'capture_cache.db'))
 
         self._lock = threading.Lock()
         self._latest_frame = None
@@ -88,6 +95,10 @@ class CaptureServerNode(Node):
         path = out_dir / fname
         cv2.imwrite(str(path), frame, [cv2.IMWRITE_JPEG_QUALITY, 92])
         self.get_logger().info(f'抓拍已保存: {path.name}')
+        self._reporter.post('/api/records/captures', {
+            'ts': int(time.time()), 'label': label,
+            'image': f'captures/{day}/{fname}',
+        })
         self._pub_done.publish(String(data=json.dumps({
             'type': 'capture', 'ok': True, 'label': label,
             'ts': int(time.time()), 'image': f'captures/{day}/{fname}',

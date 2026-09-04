@@ -1,0 +1,257 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>巡检点标注 — 巡检机器人</title>
+<style>
+  * { box-sizing: border-box; }
+  html, body { height: 100%; }
+  body { font-family: "Microsoft YaHei", sans-serif; margin: 0; background: #14171c; color: #dde3ea;
+         display: flex; flex-direction: column; overflow: hidden; }
+  header { flex: 0 0 52px; display: flex; align-items: center; gap: 14px; padding: 0 18px;
+           background: #1c2129; border-bottom: 1px solid #2a313c; }
+  header h1 { font-size: 17px; margin: 0; font-weight: 600; }
+  header a { color: #4fc3f7; text-decoration: none; font-size: 13px; margin-right: 10px; }
+
+  #main { flex: 1; display: flex; gap: 14px; padding: 14px; min-height: 0; }
+  #mapWrap { flex: 1; min-width: 0; position: relative; background: #0d0f12;
+             border: 1px solid #2a313c; border-radius: 8px; overflow: hidden; }
+  #mapCanvas { position: absolute; inset: 0; cursor: crosshair; }
+  #mapHint { position: absolute; left: 10px; bottom: 8px; font-size: 12px; color: #6b7787;
+             background: rgba(0,0,0,.45); padding: 2px 8px; border-radius: 4px; pointer-events: none; }
+
+  #side { flex: 0 0 clamp(300px, 22vw, 400px); display: flex; flex-direction: column; gap: 14px;
+          overflow-y: auto; min-height: 0; }
+  .card { background: #1c2129; border: 1px solid #2a313c; border-radius: 8px; padding: 12px 14px; flex: 0 0 auto; }
+  .card h2 { font-size: 13px; margin: 0 0 10px; color: #8fa1b5; font-weight: 600; }
+  .btn { padding: 7px 18px; font-size: 13px; border: none; border-radius: 5px; cursor: pointer;
+         background: #2d6da3; color: #fff; }
+  .btn:hover { background: #3a82bd; }
+  .btn.gray { background: #3a424e; } .btn.gray:hover { background: #4a5563; }
+  .btn.danger { background: #b71c1c; padding: 3px 10px; font-size: 12px; }
+  .btn.danger:hover { background: #d32f2f; }
+
+  #ptList { display: flex; flex-direction: column; gap: 8px; }
+  .ptItem { background: #232932; border-radius: 6px; padding: 8px 10px; font-size: 13px; }
+  .ptItem .nm { font-weight: 600; color: #ffd54f; }
+  .ptItem .co { color: #7d8a99; font-size: 12px; margin-top: 2px; }
+  .ptItem .ops { margin-top: 6px; display: flex; gap: 6px; }
+
+  /* 新增点位表单（地图上弹出） */
+  #form { position: absolute; display: none; background: #1c2129; border: 1px solid #3a82bd;
+          border-radius: 8px; padding: 12px; width: 240px; z-index: 10; box-shadow: 0 4px 16px rgba(0,0,0,.5); }
+  #form h3 { margin: 0 0 8px; font-size: 14px; }
+  #form input[type=text], #form input[type=number] {
+    width: 100%; background: #0d0f12; border: 1px solid #2a313c; color: #dde3ea;
+    border-radius: 4px; padding: 6px 8px; font-size: 13px; margin-bottom: 8px; }
+  #form label { font-size: 12px; color: #8fa1b5; display: block; margin-bottom: 6px; }
+  #form label input { margin-right: 4px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>巡检点标注</h1>
+  <a href="/monitor.html">监控台</a>
+  <a href="/plans.html">路线计划</a>
+  <a href="/records.html">记录</a>
+</header>
+
+<div id="main">
+  <div id="mapWrap">
+    <canvas id="mapCanvas"></canvas>
+    <div id="mapHint">滚轮缩放 · 拖拽平移 · <b>按住拖出箭头</b>添加点位（松开位置+朝向）</div>
+    <div id="form">
+      <h3>新巡检点</h3>
+      <input type="text" id="fName" placeholder="点位名称（如：1号仪表）">
+      <label>停留时长(秒) <input type="number" id="fDwell" value="10" min="0" style="width:80px"></label>
+      <label><input type="checkbox" id="fCapture" checked> 到点抓拍</label>
+      <label><input type="checkbox" id="fTts"> 到点播报</label>
+      <input type="text" id="fTtsText" placeholder="播报文本（勾选播报时生效）" style="display:none">
+      <div style="display:flex;gap:8px;justify-content:flex-end">
+        <button class="btn gray" id="fCancel">取消</button>
+        <button class="btn" id="fOk">保存</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="side">
+    <div class="card">
+      <h2>巡检点列表（<span id="ptCount">0</span>）</h2>
+      <div id="ptList"><div style="color:#6b7787;font-size:12px">暂无点位，在地图上按住拖出箭头添加</div></div>
+    </div>
+  </div>
+</div>
+
+<script>
+// ================= 地图（与监控台同款变换） =================
+const mapWrap = document.getElementById('mapWrap');
+const cv = document.getElementById('mapCanvas');
+const c2 = cv.getContext('2d');
+let meta = null, mapReady = false;
+const mapImg = new Image();
+let zoom = 1.0, panX = 0, panY = 0, baseScale = 1.0;
+
+async function loadMap() {
+  meta = await (await fetch('maps/meta.json')).json();
+  await new Promise(res => { mapImg.onload = res; mapImg.src = 'maps/patrol.png'; });
+  fitView(); mapReady = true;
+}
+function fitView() {
+  baseScale = Math.min(cv.width / meta.width, cv.height / meta.height);
+  zoom = 1.0;
+  panX = (cv.width - meta.width * baseScale) / 2;
+  panY = (cv.height - meta.height * baseScale) / 2;
+}
+new ResizeObserver(() => {
+  const w = mapWrap.clientWidth, h = mapWrap.clientHeight;
+  if (!w || !h) return;
+  cv.width = w; cv.height = h; cv.style.width = w + 'px'; cv.style.height = h + 'px';
+  if (mapReady) fitView();
+}).observe(mapWrap);
+loadMap();
+
+function m2cx(x) { return (x - meta.origin[0]) / meta.resolution * baseScale * zoom + panX; }
+function m2cy(y) { return (meta.height - (y - meta.origin[1]) / meta.resolution) * baseScale * zoom + panY; }
+function c2mx(px) { return (px - panX) / (baseScale * zoom) * meta.resolution + meta.origin[0]; }
+function c2my(py) { return meta.origin[1] + (meta.height - (py - panY) / (baseScale * zoom)) * meta.resolution; }
+
+// 缩放/平移（按住拖短=不动；拖长=加点位）
+cv.addEventListener('wheel', e => {
+  e.preventDefault();
+  if (!mapReady) return;
+  const rect = cv.getBoundingClientRect();
+  const mx = e.clientX - rect.left, my = e.clientY - rect.top;
+  const old = zoom;
+  zoom *= e.deltaY < 0 ? 1.15 : 1 / 1.15;
+  zoom = Math.max(0.3, Math.min(20, zoom));
+  panX = mx - (mx - panX) * (zoom / old);
+  panY = my - (my - panY) * (zoom / old);
+}, { passive: false });
+
+let panning = false, panStart = null, dragStart = null, dragCur = null, dragged = false;
+function canvasPos(e) { const r = cv.getBoundingClientRect(); return { x: e.clientX - r.left, y: e.clientY - r.top }; }
+cv.addEventListener('pointerdown', e => {
+  dragStart = canvasPos(e); dragCur = dragStart; dragged = false;
+  panning = true; panStart = { x: e.clientX - panX, y: e.clientY - panY };
+  cv.setPointerCapture(e.pointerId);
+});
+cv.addEventListener('pointermove', e => {
+  if (!dragStart) return;
+  dragCur = canvasPos(e);
+  if (Math.hypot(dragCur.x - dragStart.x, dragCur.y - dragStart.y) > 24) dragged = true;
+  if (!dragged && panning) { panX = e.clientX - panStart.x; panY = e.clientY - panStart.y; }
+});
+cv.addEventListener('pointerup', () => {
+  if (dragStart && dragged) {
+    // 拖出箭头 → 弹表单（位置=起点，朝向=拖拽方向）
+    const x = c2mx(dragStart.x), y = c2my(dragStart.y);
+    const yaw = Math.atan2(-(dragCur.y - dragStart.y), dragCur.x - dragStart.x);
+    openForm(dragStart.x, dragStart.y, x, y, yaw);
+  }
+  dragStart = dragCur = null; panning = false; dragged = false;
+});
+cv.addEventListener('pointercancel', () => { dragStart = dragCur = null; panning = false; dragged = false; });
+
+// ================= 点位数据 =================
+let points = [];
+async function loadPoints() {
+  const r = await (await fetch('/api/points')).json();
+  points = r.items;
+  renderList();
+}
+function renderList() {
+  document.getElementById('ptCount').textContent = points.length;
+  const el = document.getElementById('ptList');
+  el.innerHTML = points.length ? '' : '<div style="color:#6b7787;font-size:12px">暂无点位，在地图上按住拖出箭头添加</div>';
+  points.forEach((p, i) => {
+    const div = document.createElement('div');
+    div.className = 'ptItem';
+    const actDesc = p.actions.map(a =>
+      a.type === 'dwell' ? `停留${a.sec}s` : a.type === 'capture' ? '抓拍' : `播报`).join('、') || '无动作';
+    div.innerHTML = `<div class="nm">#${i + 1} ${p.name}</div>
+      <div class="co">(${p.x.toFixed(2)}, ${p.y.toFixed(2)}) 朝向 ${(p.yaw * 57.3).toFixed(0)}° · ${actDesc}</div>
+      <div class="ops"><button class="btn danger" data-id="${p.id}">删除</button></div>`;
+    div.querySelector('button').onclick = async (e) => {
+      if (!confirm(`删除点位「${p.name}」？`)) return;
+      await fetch(`/api/points/${p.id}`, { method: 'DELETE' });
+      loadPoints();
+    };
+    el.appendChild(div);
+  });
+}
+
+// ---- 新点位表单 ----
+const form = document.getElementById('form');
+let pending = null;
+function openForm(px, py, x, y, yaw) {
+  pending = { x, y, yaw };
+  form.style.left = Math.min(px + 12, cv.width - 260) + 'px';
+  form.style.top = Math.min(py + 12, cv.height - 220) + 'px';
+  form.style.display = 'block';
+  document.getElementById('fName').value = '';
+  document.getElementById('fName').focus();
+}
+document.getElementById('fTts').onchange = e => {
+  document.getElementById('fTtsText').style.display = e.target.checked ? '' : 'none';
+};
+document.getElementById('fCancel').onclick = () => { form.style.display = 'none'; pending = null; };
+document.getElementById('fOk').onclick = async () => {
+  const name = document.getElementById('fName').value.trim();
+  if (!name) { alert('请填点位名称'); return; }
+  const actions = [];
+  const dwell = parseInt(document.getElementById('fDwell').value || '0');
+  if (dwell > 0) actions.push({ type: 'dwell', sec: dwell });
+  if (document.getElementById('fCapture').checked) actions.push({ type: 'capture' });
+  if (document.getElementById('fTts').checked) {
+    actions.push({ type: 'tts', text: document.getElementById('fTtsText').value.trim() });
+  }
+  await fetch('/api/points', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name, x: pending.x, y: pending.y, yaw: pending.yaw, actions }),
+  });
+  form.style.display = 'none'; pending = null;
+  loadPoints();
+};
+
+// ================= 渲染 =================
+function render() {
+  requestAnimationFrame(render);
+  if (cv.width === 0) return;
+  c2.clearRect(0, 0, cv.width, cv.height);
+  if (!mapReady) { c2.fillStyle = '#5a6572'; c2.fillText('地图加载中…', 20, 40); return; }
+  c2.imageSmoothingEnabled = false;
+  c2.drawImage(mapImg, panX, panY, meta.width * baseScale * zoom, meta.height * baseScale * zoom);
+
+  // 已有点位：编号圆点 + 朝向短线
+  points.forEach((p, i) => {
+    const cx = m2cx(p.x), cy = m2cy(p.y);
+    c2.beginPath(); c2.arc(cx, cy, 11, 0, 7);
+    c2.fillStyle = '#2d6da3'; c2.fill();
+    c2.strokeStyle = '#7fd4ff'; c2.lineWidth = 2; c2.stroke();
+    c2.fillStyle = '#fff'; c2.font = 'bold 11px sans-serif'; c2.textAlign = 'center'; c2.textBaseline = 'middle';
+    c2.fillText(String(i + 1), cx, cy);
+    c2.beginPath(); c2.moveTo(cx, cy);
+    c2.lineTo(cx + 18 * Math.cos(p.yaw), cy - 18 * Math.sin(p.yaw));
+    c2.strokeStyle = '#ffd54f'; c2.lineWidth = 2; c2.stroke();
+  });
+
+  // 拖拽中的预览箭头
+  if (dragStart && dragCur && dragged) {
+    const dx = dragCur.x - dragStart.x, dy = dragCur.y - dragStart.y;
+    const len = Math.hypot(dx, dy), ang = Math.atan2(dy, dx);
+    c2.save();
+    c2.translate(dragStart.x, dragStart.y); c2.rotate(ang);
+    c2.beginPath(); c2.moveTo(0, 0); c2.lineTo(len, 0);
+    c2.moveTo(len - 10, -6); c2.lineTo(len, 0); c2.lineTo(len - 10, 6);
+    c2.strokeStyle = '#69f0ae'; c2.lineWidth = 3; c2.stroke();
+    c2.beginPath(); c2.arc(0, 0, 5, 0, 7); c2.fillStyle = '#69f0ae'; c2.fill();
+    c2.restore();
+  }
+}
+render();
+loadPoints();
+setInterval(loadPoints, 15000);
+</script>
+</body>
+</html>
