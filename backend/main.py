@@ -15,6 +15,7 @@ from .api_records import router as records_router
 from .api_points import router as points_router
 from .api_routes import router as routes_router
 from .api_plans import router as plans_router
+from .api_audio import router as audio_router
 
 WEB_DIR = Path.home() / 'ros2Project' / 'Remote_ctrol' / 'web'
 
@@ -23,6 +24,7 @@ app.include_router(records_router)
 app.include_router(points_router)
 app.include_router(routes_router)
 app.include_router(plans_router)
+app.include_router(audio_router)
 
 
 @app.on_event('startup')

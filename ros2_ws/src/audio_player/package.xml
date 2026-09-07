@@ -1,0 +1,15 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>audio_player</name>
+  <version>0.1.0</version>
+  <description>语音播报与智能提示：TTS 合成（edge-tts 在线/espeak-ng 离线）+ 机器人端播放</description>
+  <maintainer email="dev@example.com">ubuntu</maintainer>
+  <license>Proprietary</license>
+
+  <exec_depend>rclpy</exec_depend>
+  <exec_depend>std_msgs</exec_depend>
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>

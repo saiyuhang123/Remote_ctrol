@@ -68,6 +68,8 @@
       <label><input type="checkbox" id="fCapture" checked> 到点抓拍</label>
       <label><input type="checkbox" id="fTts"> 到点播报</label>
       <input type="text" id="fTtsText" placeholder="播报文本（勾选播报时生效）" style="display:none">
+      <label><input type="checkbox" id="fAudio"> 播放音频文件</label>
+      <select id="fAudioFile" style="display:none;width:100%;background:#0d0f12;border:1px solid #2a313c;color:#dde3ea;border-radius:4px;padding:6px;font-size:13px"></select>
       <div style="display:flex;gap:8px;justify-content:flex-end">
         <button class="btn gray" id="fCancel">取消</button>
         <button class="btn" id="fOk">保存</button>
@@ -195,6 +197,18 @@ function openForm(px, py, x, y, yaw) {
 document.getElementById('fTts').onchange = e => {
   document.getElementById('fTtsText').style.display = e.target.checked ? '' : 'none';
 };
+document.getElementById('fAudio').onchange = e => {
+  document.getElementById('fAudioFile').style.display = e.target.checked ? '' : 'none';
+  if (e.target.checked) loadAudioOptions();
+};
+async function loadAudioOptions() {
+  try {
+    const r = await (await fetch('/api/audio')).json();
+    document.getElementById('fAudioFile').innerHTML =
+      r.items.map(i => `<option value="${i.name}">${i.name}</option>`).join('')
+      || '<option value="">（先到监控台上传音频）</option>';
+  } catch {}
+}
 document.getElementById('fCancel').onclick = () => { form.style.display = 'none'; pending = null; };
 document.getElementById('fOk').onclick = async () => {
   const name = document.getElementById('fName').value.trim();
@@ -205,6 +219,10 @@ document.getElementById('fOk').onclick = async () => {
   if (document.getElementById('fCapture').checked) actions.push({ type: 'capture' });
   if (document.getElementById('fTts').checked) {
     actions.push({ type: 'tts', text: document.getElementById('fTtsText').value.trim() });
+  }
+  if (document.getElementById('fAudio').checked) {
+    const f = document.getElementById('fAudioFile').value;
+    if (f) actions.push({ type: 'audio', file: f });
   }
   await fetch('/api/points', {
     method: 'POST', headers: { 'Content-Type': 'application/json' },

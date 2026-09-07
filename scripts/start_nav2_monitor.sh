@@ -31,6 +31,9 @@ ros2 run detector_node detector &
 # 抓拍服务节点（手动抓拍/识别联动/巡逻到点抓拍共用 /capture_request 接口）
 ros2 run capture_server capture_server &
 
+# 语音播报节点（/tts_say 播报；发现人员自动提示，可用 -p alert_on_person:=false 关）
+ros2 run audio_player tts_node &
+
 trap 'kill $(jobs -p) 2>/dev/null || true' EXIT
 echo "=========================================================="
 echo " Nav2 全栈监控台已启动: http://localhost:8888/monitor.html"

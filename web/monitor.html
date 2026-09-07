@@ -159,6 +159,25 @@
     </div>
 
     <div class="card">
+      <h2>语音播报（机器人端扬声器）</h2>
+      <div style="display:flex;gap:6px">
+        <input id="ttsText" placeholder="输入要播报的文本" style="flex:1;background:#0d0f12;border:1px solid #2a313c;color:#dde3ea;border-radius:4px;padding:6px 8px;font-size:13px">
+        <button class="btn" id="btnTts">播报</button>
+      </div>
+      <div style="display:flex;gap:6px;margin-top:8px">
+        <select id="audioSel" style="flex:1;background:#0d0f12;border:1px solid #2a313c;color:#dde3ea;border-radius:4px;padding:6px;font-size:13px"></select>
+        <button class="btn" id="btnPlayAudio">播放</button>
+        <button class="btn gray" id="btnPreview">试听</button>
+      </div>
+      <div style="display:flex;gap:6px;margin-top:8px;align-items:center">
+        <input type="file" id="audioFile" accept="audio/*" style="display:none">
+        <button class="btn gray" id="btnUpload">上传音频文件</button>
+        <span id="audioHint" style="font-size:11px;color:#7d8a99"></span>
+      </div>
+      <div id="ttsState" style="font-size:12px;color:#7d8a99;margin-top:6px"></div>
+    </div>
+
+    <div class="card">
       <h2>远程遥控</h2>
       <canvas id="stick" width="200" height="200"></canvas>
       <button id="estop">急 停</button>
@@ -212,6 +231,54 @@ btnVideo.onclick = () => videoOn ? closeVideo() : openVideo();
 document.getElementById('btnCapture').onclick = () => {
   send({ type: 'capture', label: 'manual' });
   mapHint.textContent = '抓拍请求已发送…';
+};
+
+// ---- 语音播报 ----
+document.getElementById('btnTts').onclick = () => {
+  const t = document.getElementById('ttsText').value.trim();
+  if (!t) return;
+  send({ type: 'tts', text: t });
+  document.getElementById('ttsState').textContent = '已发送播报请求…';
+};
+document.getElementById('ttsText').addEventListener('keydown', e => {
+  if (e.key === 'Enter') document.getElementById('btnTts').onclick();
+});
+
+// ---- 音频文件：列表 / 机器人端播放 / 浏览器试听 / 上传 ----
+async function loadAudioList() {
+  try {
+    const r = await (await fetch('/api/audio')).json();
+    const sel = document.getElementById('audioSel');
+    sel.innerHTML = r.items.length
+      ? r.items.map(i => `<option value="${i.name}">${i.name}</option>`).join('')
+      : '<option value="">（无音频文件，请上传）</option>';
+  } catch { /* 后端未起 */ }
+}
+loadAudioList();
+
+document.getElementById('btnPlayAudio').onclick = () => {
+  const f = document.getElementById('audioSel').value;
+  if (!f) return;
+  send({ type: 'audio_play', file: f });
+  document.getElementById('ttsState').textContent = `已发送播放请求：${f}`;
+};
+document.getElementById('btnPreview').onclick = () => {
+  const f = document.getElementById('audioSel').value;
+  if (!f) return;
+  new Audio(`/audio/${f}`).play();   // 浏览器端试听（不走机器人喇叭）
+};
+document.getElementById('btnUpload').onclick = () => document.getElementById('audioFile').click();
+document.getElementById('audioFile').onchange = async e => {
+  const file = e.target.files[0];
+  if (!file) return;
+  const fd = new FormData();
+  fd.append('file', file);
+  document.getElementById('audioHint').textContent = '上传中…';
+  const r = await fetch('/api/audio/upload', { method: 'POST', body: fd });
+  const d = await r.json();
+  document.getElementById('audioHint').textContent = r.ok ? `已上传：${d.file}` : (d.detail || '上传失败');
+  loadAudioList();
+  e.target.value = '';
 };
 
 // ================= 遥控指令（与 M1 相同协议） =================
@@ -422,6 +489,9 @@ function onMessage(ev) {
     } else {
       mapHint.textContent = `抓拍失败：${d.reason || '未知原因'}`;
     }
+  } else if (d.type === 'tts') {
+    const el = document.getElementById('ttsState');
+    el.textContent = { speaking: '正在播报…', done: '播报完成', error: '播报失败' }[d.status] || d.status;
   }
 }
 

@@ -67,7 +67,7 @@ def generate_report(task_id):
     point_rows = ''
     for d in detail:
         acts = '、'.join(
-            f"{ {'dwell':'停留'+str(a.get('sec',0))+'s','capture':'抓拍','tts':'播报'}.get(a.get('type'), a.get('type','')) }"
+            f"{ {'dwell':'停留'+str(a.get('sec',0))+'s','capture':'抓拍','tts':'播报','audio':'播放音频'}.get(a.get('type'), a.get('type','')) }"
             for a in d.get('actions', []))
         point_rows += (f"<tr><td>{_esc(d.get('point',''))}</td><td>{_fmt(d.get('arrive_ts'))}</td>"
                        f"<td>{_esc(acts) or '-'}</td><td>{_esc(d.get('result',''))}</td></tr>")

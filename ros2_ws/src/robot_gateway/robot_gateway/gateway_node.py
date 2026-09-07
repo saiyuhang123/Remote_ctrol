@@ -86,6 +86,12 @@ class GatewayNode(Node):
         self._pub_capture = self.create_publisher(String, '/capture_request', 10)
         self.create_subscription(
             String, '/capture_done', self._on_capture_done, 10)
+        # 语音播报：浏览器 -> /tts_say；/tts_status -> 浏览器
+        self._pub_tts = self.create_publisher(String, '/tts_say', 10)
+        self.create_subscription(
+            String, '/tts_status', self._on_tts_status, 10)
+        # 音频文件播放：浏览器 -> /audio_play
+        self._pub_audio = self.create_publisher(String, '/audio_play', 10)
         self._tf_buffer = tf2_ros.Buffer()
         self._tf_listener = tf2_ros.TransformListener(self._tf_buffer, self)
         self.create_timer(0.1, self._make_telemetry)  # 10Hz 遥测
@@ -259,7 +265,18 @@ class GatewayNode(Node):
         self._pub_capture.publish(String(data=label))
         self.get_logger().info(f'抓拍请求: {label}')
 
+    def say(self, text):
+        """网页文本播报"""
+        text = (text or '').strip()
+        if text:
+            self._pub_tts.publish(String(data=text))
+            self.get_logger().info(f'播报请求: {text}')
+
     def _on_capture_done(self, msg):
+        if self._ws_loop is not None and self._ws_clients:
+            self._ws_loop.call_soon_threadsafe(self._broadcast, msg.data)
+
+    def _on_tts_status(self, msg):
         if self._ws_loop is not None and self._ws_clients:
             self._ws_loop.call_soon_threadsafe(self._broadcast, msg.data)
 
@@ -293,6 +310,10 @@ async def _handle_client(node, ws):
                 node.cancel_nav()
             elif msg_type == 'capture':
                 node.request_capture(str(data.get('label', 'manual')))
+            elif msg_type == 'tts':
+                node.say(str(data.get('text', '')))
+            elif msg_type == 'audio_play':
+                node._pub_audio.publish(String(data=str(data.get('file', ''))))
     finally:
         node._ws_clients.discard(ws)
         node.get_logger().info(f'后台已断开: {peer}')

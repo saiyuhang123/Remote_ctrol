@@ -80,6 +80,8 @@ async def _execute_point(p):
             rec['actions'].append({'type': 'capture', 'ok': True})
         elif a.get('type') == 'tts':
             rec['actions'].append({'type': 'tts', 'text': a.get('text', ''), 'ok': True})
+        elif a.get('type') == 'audio':
+            rec['actions'].append({'type': 'audio', 'file': a.get('file', ''), 'ok': True})
     return rec
 
 

@@ -48,3 +48,6 @@ ros2_ws/src/HK/doc
 
 # 人脸底库（个人数据不入库）
 face_db/
+
+# 上传的音频文件
+web/audio/
