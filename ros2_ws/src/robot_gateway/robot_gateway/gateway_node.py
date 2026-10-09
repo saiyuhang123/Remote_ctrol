@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""遥控网关节点：浏览器 WebSocket 指令 -> /cmd_vel。
+"""遥控网关节点：浏览器 WebSocket 指令 -> /cmd_vel_teleop。
 
 安全机制（方案 4.3 节）：
 - 心跳失控保护：超过 cmd_timeout 未收到指令即发布零速度；
@@ -26,16 +26,17 @@ from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
 from rclpy.time import Time
 from sensor_msgs.msg import LaserScan
-from std_msgs.msg import String
+from std_msgs.msg import Bool, String
 
 # 配置文件候选路径（按优先级），也可用环境变量 ROBOT_CONFIG 指定
 CONFIG_CANDIDATES = [
-    Path.home() / 'ros2Project' / 'Remote_ctrol' / 'config' / 'config.yaml',
+    Path(os.environ.get('ROBOT_PROJECT_ROOT', str(Path.home() / 'Remote_ctrol')))
+    / 'config' / 'config.yaml',
     Path.home() / 'Remote_ctrol' / 'config' / 'config.yaml',
 ]
 
-# 遥测目标坐标系：map（接 AMCL 定位后与地图图片对齐）；
-# map 系不可用时（Nav2 未启动）回退 odom
+# 遥测目标坐标系：map（FAST-LIO 全局定位后与地图图片对齐）；
+# map 系不可用时回退 odom，遥测显式标注 frame，页面不能叠到地图上。
 TARGET_FRAME = 'map'
 FALLBACK_FRAME = 'odom'
 
@@ -53,7 +54,11 @@ class GatewayNode(Node):
         self._timeout = float(ctrl['cmd_timeout'])
 
         # Twist 是 geometry_msgs 功能包提供的一个标准消息类型，专门用来表示空间中的速度  线速度 和角速度
-        self._pub = self.create_publisher(Twist, '/cmd_vel', 10)
+        ros_cfg = cfg.get('ros', {})
+        self._base_frame = ros_cfg.get('base_frame', 'base_link')
+        self._pub = self.create_publisher(Twist, ros_cfg.get('cmd_vel_topic', '/cmd_vel_teleop'), 10)
+        self._pub_estop = self.create_publisher(Bool, '/emergency_stop', 10)
+        self._estopped = False
         self._pub_initialpose = self.create_publisher(
             PoseWithCovarianceStamped, '/initialpose', 10)
         self._lock = threading.Lock()
@@ -74,10 +79,10 @@ class GatewayNode(Node):
         self._nav_goal_handle = None
         self._nav_status = 'idle'  # idle/sent/driving/succeeded/aborted/canceled/rejected/error
         self.create_subscription(
-            Odometry, '/odom', lambda m: setattr(self, '_odom', m),
+            Odometry, ros_cfg.get('odom_topic', '/odom'), lambda m: setattr(self, '_odom', m),
             qos_profile_sensor_data)
         self.create_subscription(
-            LaserScan, '/scan', lambda m: setattr(self, '_scan', m),
+            LaserScan, ros_cfg.get('scan_topic', '/scan'), lambda m: setattr(self, '_scan', m),
             qos_profile_sensor_data)
         # 识别事件透传：detector_node -> 浏览器
         self.create_subscription(
@@ -106,16 +111,19 @@ class GatewayNode(Node):
             self._angular = _clamp(angular, self._max_angular)
             self._last_cmd_time = time.monotonic()
             self._stale_logged = False
+            self._estopped = False
 
     def estop(self):
         with self._lock:
             self._linear = 0.0
             self._angular = 0.0
             self._last_cmd_time = 0.0
+            self._estopped = True
+        self.cancel_nav()
         self.get_logger().warn('收到急停指令')
 
     def set_initial_pose(self, x, y, yaw):
-        """网页下发的初始定位（AMCL /initialpose）"""
+        """网页下发 FAST-LIO 的地图初始位姿 /initialpose。"""
         msg = PoseWithCovarianceStamped()
         msg.header.frame_id = 'map'
         msg.header.stamp = self.get_clock().now().to_msg()
@@ -132,6 +140,17 @@ class GatewayNode(Node):
 
     # ---- Nav2 目标点下发 / 取消 ----
     def send_nav_goal(self, x, y, yaw):
+        with self._lock:
+            if self._estopped:
+                self._nav_status = 'estopped'
+                self.get_logger().warn('急停保持中，请先用手动控制解除急停')
+                return
+        try:
+            self._tf_buffer.lookup_transform(TARGET_FRAME, self._base_frame, Time())
+        except Exception:
+            self._nav_status = 'unlocalized'
+            self.get_logger().warn('地图定位未就绪，请先设置初始位姿并等待匹配成功')
+            return
         if not self._nav_client.server_is_ready():
             self._nav_status = 'error'
             self.get_logger().error('Nav2 未就绪，目标点下发失败')
@@ -155,6 +174,12 @@ class GatewayNode(Node):
             self.get_logger().warn('导航目标被拒绝')
             return
         self._nav_goal_handle = handle
+        with self._lock:
+            if self._estopped:
+                handle.cancel_goal_async()
+                self._nav_status = 'canceling'
+                handle.get_result_async().add_done_callback(self._on_nav_result)
+                return
         self._nav_status = 'driving'
         handle.get_result_async().add_done_callback(self._on_nav_result)
 
@@ -178,11 +203,12 @@ class GatewayNode(Node):
             just_stale = stale and not self._stale_logged
             if stale:
                 self._stale_logged = True
-            # 闲置静默：从未收到指令、或刹车已持续 2s 以上，则停止发布，
-            # 把 /cmd_vel 让给 Nav2（正式的优先级仲裁由 twist_mux 接管，此为过渡方案）
+            # 手动速度在超时后短暂归零；然后让 twist_mux 选择导航输入。
             silent = stale and (
                 self._last_cmd_time == 0.0
                 or time.monotonic() - self._last_cmd_time > self._timeout + 2.0)
+            estopped = self._estopped
+        self._pub_estop.publish(Bool(data=estopped))
         if just_stale:
             self.get_logger().warn('指令超时，自动刹车')
         if silent:
@@ -208,7 +234,7 @@ class GatewayNode(Node):
         for cand in (TARGET_FRAME, FALLBACK_FRAME):
             try:
                 tf_base = self._tf_buffer.lookup_transform(
-                    cand, 'Frame', Time())
+                    cand, self._base_frame, Time())
                 frame = cand
                 break
             except Exception:
@@ -237,7 +263,7 @@ class GatewayNode(Node):
                             round(ty + lx * sin_t + ly * cos_t, 3)])
             angle += self._scan.angle_increment
 
-        payload = json.dumps({'type': 'telemetry', 'pose': pose, 'scan': pts,
+        payload = json.dumps({'type': 'telemetry', 'frame': frame, 'pose': pose, 'scan': pts,
                               'speed': round(tw.linear.x, 3),
                               'turn': round(tw.angular.z, 3),
                               'nav': self._nav_status})

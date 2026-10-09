@@ -36,9 +36,10 @@ lidar:
       pcap_path: /home/robosense/lidar.pcap #The path of pcap file
 
     ros:
-      ros_frame_id: rslidar                           #Frame id of packet message and point cloud message
+      ros_frame_id: velodyne                          #Matches the existing base_link -> velodyne TF
+      ros_point_cloud_format: velodyne                #Direct XYZIRT output for FAST-LIO; native restores timestamp/FLOAT64
       ros_recv_packet_topic: /rslidar_packets          #Topic used to receive lidar packets from ROS
       ros_send_packet_topic: /rslidar_packets          #Topic used to send lidar packets through ROS
       ros_send_imu_data_topic: /rslidar_imu_data         #Topic used to send imu data through ROS
-      ros_send_point_cloud_topic: /rslidar_points      #Topic used to send point cloud through ROS
-      ros_queue_length: 100                            #Topic QoS history depth
+      ros_send_point_cloud_topic: /velodyne_points     #No rs_to_velodyne process is needed
+      ros_queue_length: 5                              #Keep only recent scans

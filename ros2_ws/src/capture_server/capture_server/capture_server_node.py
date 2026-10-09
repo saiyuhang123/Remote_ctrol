@@ -20,6 +20,7 @@ from rclpy.node import Node
 from std_msgs.msg import String
 
 from robot_common.reporter import HttpReporter
+from robot_common.paths import PROJECT_ROOT
 
 MAX_DAYS = 14          # 抓拍图保留天数
 MAX_GB = 5.0           # 抓拍目录总容量上限
@@ -32,7 +33,7 @@ class CaptureServerNode(Node):
         self.declare_parameter('video_source', 'rtsp://127.0.0.1:8554/cam')
         self.declare_parameter(
             'captures_dir',
-            str(Path.home() / 'ros2Project' / 'Remote_ctrol' / 'web' / 'captures'))
+            str(PROJECT_ROOT / 'web' / 'captures'))
 
         self._src = self.get_parameter('video_source').value
         self._cap_dir = Path(self.get_parameter('captures_dir').value)
@@ -40,8 +41,7 @@ class CaptureServerNode(Node):
         self.declare_parameter('backend_url', 'http://127.0.0.1:8888')
         self._reporter = HttpReporter(
             self.get_parameter('backend_url').value,
-            cache_db=str(Path.home() / 'ros2Project' / 'Remote_ctrol' / 'data'
-                         / 'capture_cache.db'))
+            cache_db=str(PROJECT_ROOT / 'data' / 'capture_cache.db'))
 
         self._lock = threading.Lock()
         self._latest_frame = None

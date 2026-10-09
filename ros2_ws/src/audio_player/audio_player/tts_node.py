@@ -20,6 +20,7 @@ from pathlib import Path
 import rclpy
 from rclpy.node import Node
 from std_msgs.msg import String
+from robot_common.paths import PROJECT_ROOT
 
 VOICE = 'zh-CN-XiaoxiaoNeural'   # edge-tts 中文女声
 ALERT_COOLDOWN = 30.0            # 识别播报冷却（秒）
@@ -33,7 +34,7 @@ class TtsNode(Node):
         self.declare_parameter('alert_text', '发现人员，请注意')
         self.declare_parameter(
             'cache_dir',
-            str(Path.home() / 'ros2Project' / 'Remote_ctrol' / 'data' / 'tts_cache'))
+            str(PROJECT_ROOT / 'data' / 'tts_cache'))
 
         self._voice = self.get_parameter('voice').value
         self._alert_on_person = bool(self.get_parameter('alert_on_person').value)
@@ -49,7 +50,7 @@ class TtsNode(Node):
             String, '/audio_play', self._on_audio_play, 10)
         self.declare_parameter(
             'audio_dir',
-            str(Path.home() / 'ros2Project' / 'Remote_ctrol' / 'web' / 'audio'))
+            str(PROJECT_ROOT / 'web' / 'audio'))
         self._audio_dir = Path(self.get_parameter('audio_dir').value)
         self._audio_dir.mkdir(parents=True, exist_ok=True)
         self.create_subscription(

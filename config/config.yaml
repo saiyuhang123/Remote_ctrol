@@ -5,6 +5,12 @@ control:
   max_angular: 1.0     # 角速度上限 rad/s
   cmd_timeout: 1.0     # 心跳超时秒数，超时自动刹车
 
+ros:
+  base_frame: base_link
+  odom_topic: /odom
+  scan_topic: /scan
+  cmd_vel_topic: /cmd_vel_teleop  # 通过 twist_mux 与 /cmd_vel_auto 仲裁后才输出 /cmd_vel
+
 ports:
   ws: 8765             # WebSocket：遥控指令 / 遥测
   web: 8888            # 管理后台页面
@@ -17,5 +23,5 @@ backend:
 video:
   stream_name: cam     # MediaMTX 流名，推流与拉流共用
   # 编码器按平台选择：jetson -> nvv4l2h264enc，x64 -> h264_vaapi，兜底 libx264
-  # 当前无摄像头阶段统一用 libx264 测试源，此字段 M4 接入摄像头时启用
+  # 推流脚本目前使用 libx264 软编码；硬件编码器需按实际平台接入
   encoder: libx264

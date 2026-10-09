@@ -13,7 +13,6 @@ from fastapi.responses import RedirectResponse
 from pydantic import BaseModel
 
 from . import db
-from . import scheduler
 
 router = APIRouter(prefix='/api/plans', tags=['plans'])
 
@@ -92,8 +91,7 @@ def run_now(pid: int):
     rows = db.query('SELECT * FROM plan WHERE id=?', (pid,))
     if not rows:
         raise HTTPException(404, '计划不存在')
-    task_id = scheduler.start_task(rows[0])
-    return {'ok': True, 'task_id': task_id}
+    raise HTTPException(501, '实机巡检执行器尚未接入，当前仅支持管理点位、路线和计划')
 
 
 # ---- 任务记录 ----

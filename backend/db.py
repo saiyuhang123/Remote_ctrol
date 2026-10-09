@@ -3,7 +3,7 @@ import sqlite3
 import threading
 from pathlib import Path
 
-DB_PATH = Path.home() / 'ros2Project' / 'Remote_ctrol' / 'data' / 'robot.db'
+DB_PATH = Path(__file__).resolve().parents[1] / 'data' / 'robot.db'
 
 _local = threading.local()
 

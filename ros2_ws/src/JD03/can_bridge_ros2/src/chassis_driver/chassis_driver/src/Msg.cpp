@@ -247,7 +247,7 @@ void VehicleStatusMsg::createMessage()
 {
     this->rosMsg_vehicle_status.shift_level = shiftLevel();
 
-    // this->rosMsg_vehicle_status.cur_speed = speed();
+    this->rosMsg_vehicle_status.cur_speed = speed(); // Actual decoded speed, m/s
 
     this->rosMsg_vehicle_status.cur_steer = wheelAngle();
 

@@ -10,6 +10,7 @@ import queue
 import sqlite3
 import threading
 import time
+from pathlib import Path
 
 import requests
 
@@ -24,6 +25,7 @@ class HttpReporter:
         threading.Thread(target=self._worker, daemon=True).start()
 
     def _init_db(self):
+        Path(self.cache_db).parent.mkdir(parents=True, exist_ok=True)
         with sqlite3.connect(self.cache_db) as c:
             c.execute('''CREATE TABLE IF NOT EXISTS cache(
                 id INTEGER PRIMARY KEY AUTOINCREMENT,

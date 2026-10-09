@@ -1,6 +1,6 @@
 #!/bin/bash
 # 摄像头推流：自动探测 UVC 彩色摄像头（优先 MJPG，其次 YUYV），720p 推到本机 MediaMTX
-# 找不到摄像头时退出码 1，由 start_m1.sh 回退到测试源
+# 找不到摄像头时退出码 1，启动器报告故障
 # 编码器后续按 config/config.yaml 的 video.encoder 切换硬编，M1 阶段统一 libx264 软编
 set -e
 DEV="" FMT=""

@@ -1,6 +1,6 @@
 std_msgs/Header header
 
-float32 cur_speed  # 当前速度(km/h)
+float32 cur_speed  # 当前速度(m/s，Msg.cpp::speed() 的实际解码单位)
 float32 cur_steer # 当前转向角度(°)
 
 float32 left_wheel_speed    # 左轮速度

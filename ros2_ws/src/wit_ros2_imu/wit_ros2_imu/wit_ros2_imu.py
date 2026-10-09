@@ -4,6 +4,7 @@ import struct
 import numpy as np
 import rclpy
 import threading
+import time
 from enum import Enum
 from rclpy.node import Node
 from sensor_msgs.msg import Imu
@@ -28,6 +29,14 @@ class imuDriverNode(Node):
         self.declare_parameter("baudrate", 230400)
         self.declare_parameter("protocol", "RS485_HIGH")
         self.declare_parameter("modbusID", 0x50)
+        self.publish_rate = float(self.declare_parameter("publish_rate", 100.).value)
+        self.print_debug = self.declare_parameter("print_debug", False).value
+        self.frame_id = self.declare_parameter("frame_id", "imu_link").value
+        self._last_acc_update = self._last_gyro_update = self._last_angle_update = 0.
+        self._last_published_gyro = 0.
+        self._gyro_stamp = None
+        if self.publish_rate <= 0:
+            raise ValueError("publish_rate must be positive")
 
         self.port = self.get_parameter("port").value
         self.baudrate = self.get_parameter("baudrate").value
@@ -71,8 +80,9 @@ class imuDriverNode(Node):
         self.imuRpyPublisher = self.create_publisher(ImuData, "imu/ImuDataWithRPY", 10)
 
         # 定时器
-        self.create_timer(1.0 / 100, self.publishTimerCallback)  # 200Hz 发布
-        self.create_timer(0.1, self.printMsg)       # 终端打印
+        self.create_timer(1.0 / self.publish_rate, self.publishTimerCallback)
+        if self.print_debug:
+            self.create_timer(0.1, self.printMsg)
 
         # 启动串口阻塞读取线程
         self.readerRunning = True
@@ -216,10 +226,14 @@ class imuDriverNode(Node):
             with self.dataLock:
                 if dataType == 0x51:
                     self.accData = np.array(values)
+                    self._last_acc_update = time.monotonic()
                 elif dataType == 0x52:
                     self.gyroData = np.array(values)
+                    self._last_gyro_update = time.monotonic()
+                    self._gyro_stamp = self.get_clock().now().to_msg()
                 elif dataType == 0x53:
                     self.angleData = np.array(values)
+                    self._last_angle_update = time.monotonic()
                 elif dataType == 0x54:
                     self.magData = np.array(values)
         else:
@@ -230,8 +244,11 @@ class imuDriverNode(Node):
                 with self.dataLock:
                     if dataType == 0x51:
                         self.accData = np.array(values)
+                        self._last_acc_update = time.monotonic()
                     elif dataType == 0x52:
                         self.gyroData = np.array(values)
+                        self._last_gyro_update = time.monotonic()
+                        self._gyro_stamp = self.get_clock().now().to_msg()
                     elif dataType == 0x54:
                         self.magData = np.array(values)
 
@@ -264,10 +281,14 @@ class imuDriverNode(Node):
             with self.dataLock:
                 if dataType == 0x51:
                     self.accData = np.array(values)
+                    self._last_acc_update = time.monotonic()
                 elif dataType == 0x52:
                     self.gyroData = np.array(values)
+                    self._last_gyro_update = time.monotonic()
+                    self._gyro_stamp = self.get_clock().now().to_msg()
                 elif dataType == 0x53:
                     self.angleData = np.array(values)
+                    self._last_angle_update = time.monotonic()
                 elif dataType == 0x54:
                     self.magData = np.array(values)
         else:
@@ -278,8 +299,11 @@ class imuDriverNode(Node):
                 with self.dataLock:
                     if dataType == 0x51:
                         self.accData = np.array(values)
+                        self._last_acc_update = time.monotonic()
                     elif dataType == 0x52:
                         self.gyroData = np.array(values)
+                        self._last_gyro_update = time.monotonic()
+                        self._gyro_stamp = self.get_clock().now().to_msg()
                     elif dataType == 0x54:
                         self.magData = np.array(values)
 
@@ -323,12 +347,16 @@ class imuDriverNode(Node):
             with self.dataLock:
                 if addr == 0x34:
                     self.accData = np.array(values)
+                    self._last_acc_update = time.monotonic()
                 elif addr == 0x37:
                     self.gyroData = np.array(values)
+                    self._last_gyro_update = time.monotonic()
+                    self._gyro_stamp = self.get_clock().now().to_msg()
                 elif addr == 0x3A:
                     self.magData = np.array(values)
                 elif addr == 0x3D:
                     self.angleData = np.array(values)
+                    self._last_angle_update = time.monotonic()
         else:
             if addr == 0x3D:  # 角度
                 if len(data) != 12:
@@ -352,6 +380,7 @@ class imuDriverNode(Node):
 
                 with self.dataLock:
                     self.angleData = np.array([angleX, angleY, angleZ])
+                    self._last_angle_update = time.monotonic()
             else:
                 if len(data) != 6:
                     self.modbusIndex = (self.modbusIndex + 1) % len(self.modbusAddrList)
@@ -361,8 +390,11 @@ class imuDriverNode(Node):
                 with self.dataLock:
                     if addr == 0x34:
                         self.accData = np.array(values)
+                        self._last_acc_update = time.monotonic()
                     elif addr == 0x37:
                         self.gyroData = np.array(values)
+                        self._last_gyro_update = time.monotonic()
+                        self._gyro_stamp = self.get_clock().now().to_msg()
                     elif addr == 0x3A:
                         self.magData = np.array(values)
 
@@ -383,6 +415,13 @@ class imuDriverNode(Node):
         gyroScale = 2000.0 / 32768.0
 
         with self.dataLock:
+            now = time.monotonic()
+            if (now-self._last_acc_update > .2 or now-self._last_gyro_update > .2
+                    or self._last_gyro_update == self._last_published_gyro):
+                return
+            self._last_published_gyro = self._last_gyro_update
+            sample_stamp = self._gyro_stamp
+            orientation_valid = now-self._last_angle_update <= .2
             accData = self.accData.copy()
             gyroData = self.gyroData.copy()
             angleData = self.angleData.copy()
@@ -406,8 +445,8 @@ class imuDriverNode(Node):
         quaternion = self.eulerToQuaternion(roll, pitch, yaw)
 
         imuMsg = Imu()
-        imuMsg.header.stamp = self.get_clock().now().to_msg()
-        imuMsg.header.frame_id = "imu_link"
+        imuMsg.header.stamp = sample_stamp
+        imuMsg.header.frame_id = self.frame_id
 
         imuMsg.linear_acceleration.x = float(ax)
         imuMsg.linear_acceleration.y = float(ay)
@@ -422,7 +461,10 @@ class imuDriverNode(Node):
         imuMsg.orientation.z = quaternion[2]
         imuMsg.orientation.w = quaternion[3]
 
-        # 协方差未知
+        if not orientation_valid:
+            imuMsg.orientation_covariance[0] = -1.0
+
+        # 其余协方差未知，需按实机噪声标定
 
         imuMsg.angular_velocity_covariance[8]= 0.02
 

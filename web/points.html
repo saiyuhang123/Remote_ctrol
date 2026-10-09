@@ -85,19 +85,25 @@
   </div>
 </div>
 
+<script src="map-loader.js"></script>
 <script>
 // ================= 地图（与监控台同款变换） =================
 const mapWrap = document.getElementById('mapWrap');
 const cv = document.getElementById('mapCanvas');
 const c2 = cv.getContext('2d');
 let meta = null, mapReady = false;
+let mapStatus = '地图加载中…';
 const mapImg = new Image();
 let zoom = 1.0, panX = 0, panY = 0, baseScale = 1.0;
 
 async function loadMap() {
-  meta = await (await fetch('maps/meta.json')).json();
-  await new Promise(res => { mapImg.onload = res; mapImg.src = 'maps/patrol.png'; });
-  fitView(); mapReady = true;
+  try {
+    meta = await loadSiteMap(mapImg);
+    fitView(); mapReady = true;
+  } catch (error) {
+    mapStatus = error.message || '实机地图加载失败';
+    document.getElementById('mapHint').textContent = mapStatus;
+  }
 }
 function fitView() {
   baseScale = Math.min(cv.width / meta.width, cv.height / meta.height);
@@ -134,6 +140,7 @@ cv.addEventListener('wheel', e => {
 let panning = false, panStart = null, dragStart = null, dragCur = null, dragged = false;
 function canvasPos(e) { const r = cv.getBoundingClientRect(); return { x: e.clientX - r.left, y: e.clientY - r.top }; }
 cv.addEventListener('pointerdown', e => {
+  if (!mapReady) return;
   dragStart = canvasPos(e); dragCur = dragStart; dragged = false;
   panning = true; panStart = { x: e.clientX - panX, y: e.clientY - panY };
   cv.setPointerCapture(e.pointerId);
@@ -237,7 +244,7 @@ function render() {
   requestAnimationFrame(render);
   if (cv.width === 0) return;
   c2.clearRect(0, 0, cv.width, cv.height);
-  if (!mapReady) { c2.fillStyle = '#5a6572'; c2.fillText('地图加载中…', 20, 40); return; }
+  if (!mapReady) { c2.fillStyle = '#5a6572'; c2.fillText(mapStatus, 20, 40); return; }
   c2.imageSmoothingEnabled = false;
   c2.drawImage(mapImg, panX, panY, meta.width * baseScale * zoom, meta.height * baseScale * zoom);
 

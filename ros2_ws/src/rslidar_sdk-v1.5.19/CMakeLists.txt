@@ -5,7 +5,7 @@ project(rslidar_sdk)
 #=======================================
 # Custom Point Type (XYZI,XYZIRT, XYZIF, XYZIRTF)
 #=======================================
-set(POINT_TYPE XYZIRT)
+set(POINT_TYPE XYZIRT CACHE STRING "Decoded point type (XYZI, XYZIRT, XYZIF, XYZIRTF)")
 
 option(ENABLE_TRANSFORM "Enable transform functions" OFF)
 if(${ENABLE_TRANSFORM})
@@ -136,7 +136,7 @@ if(rclcpp_FOUND)
 
   add_definitions(-DROS2_FOUND)
   include_directories(${rclcpp_INCLUDE_DIRS})
-  set(CMAKE_CXX_STANDARD 14)
+  set(CMAKE_CXX_STANDARD 17)
 
   find_package(ament_cmake REQUIRED)
   find_package(sensor_msgs REQUIRED)
@@ -167,6 +167,10 @@ include_directories(${rs_driver_INCLUDE_DIRS})
 add_executable(rslidar_sdk_node
                node/rslidar_sdk_node.cpp
                src/manager/node_manager.cpp)
+
+if(DISABLE_PCAP_PARSE)
+  target_compile_definitions(rslidar_sdk_node PRIVATE DISABLE_PCAP_PARSE)
+endif()
 
 target_link_libraries(rslidar_sdk_node                   
                       ${YAML_CPP_LIBRARIES}
@@ -199,6 +203,7 @@ if(rclcpp_FOUND)
     DESTINATION lib/${PROJECT_NAME})
 
   install(DIRECTORY
+    config
     launch
     rviz
     DESTINATION share/${PROJECT_NAME})

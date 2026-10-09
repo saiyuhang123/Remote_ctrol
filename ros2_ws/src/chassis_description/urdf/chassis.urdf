@@ -5,7 +5,7 @@
 <robot
   name="chassis">
   <link
-    name="Frame">
+    name="base_link">
     <inertial>
       <origin
         xyz="0.0928281919478462 -0.00673923092999855 0.151666421008473"
@@ -268,7 +268,7 @@
   <joint name="steering_1_joint" type="revolute">
     <!-- 坐标系已掰直：rpy=0，纯 Z 轴转向（阿克曼插件按此推算几何） -->
     <origin xyz="0.23696 -0.18808 0.072721" rpy="0 0 0" />
-    <parent link="Frame" />
+    <parent link="base_link" />
     <child link="steering_1" />
     <axis xyz="0 0 1" />
     <limit lower="-0.53" upper="0.53" effort="50" velocity="2" />
@@ -309,7 +309,7 @@
   <joint name="steering_2_joint" type="revolute">
     <!-- 坐标系已掰直：rpy=0，纯 Z 轴转向（阿克曼插件按此推算几何） -->
     <origin xyz="0.26138 0.15232 0.072721" rpy="0 0 0" />
-    <parent link="Frame" />
+    <parent link="base_link" />
     <child link="steering_2" />
     <axis xyz="0 0 1" />
     <limit lower="-0.53" upper="0.53" effort="50" velocity="2" />
@@ -350,7 +350,7 @@
   <joint name="steering_3_joint" type="fixed">
     <!-- 后转向锁死：Ecu 接口只有前轮转角，后轮转向由底盘控制器内部处理 -->
     <origin xyz="-0.26168 -0.13947 0.072664" rpy="0 0 0" />
-    <parent link="Frame" />
+    <parent link="base_link" />
     <child link="steering_3" />
   </joint>
   <link name="steering_4">
@@ -389,7 +389,7 @@
   <joint name="steering_4_joint" type="fixed">
     <!-- 后转向锁死：Ecu 接口只有前轮转角，后轮转向由底盘控制器内部处理 -->
     <origin xyz="-0.23909 0.17541 0.072664" rpy="0 0 0" />
-    <parent link="Frame" />
+    <parent link="base_link" />
     <child link="steering_4" />
   </joint>
 </robot>

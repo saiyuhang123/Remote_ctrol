@@ -1,6 +1,6 @@
 """巡检报告生成（HTML）。
 
-任务结束时由调度器自动调用；也可通过 GET /api/report/{task_id} 手动生成/查看。
+通过 GET /api/plans/report/{task_id} 生成/查看已有任务的报告。
 报告文件落盘 web/reports/task_<id>.html（静态可访问，便于后台浏览/下载）。
 """
 import html as html_lib
@@ -10,7 +10,7 @@ from pathlib import Path
 
 from . import db
 
-REPORTS_DIR = Path.home() / 'ros2Project' / 'Remote_ctrol' / 'web' / 'reports'
+REPORTS_DIR = Path(__file__).resolve().parents[1] / 'web' / 'reports'
 
 _STATUS_CN = {'success': '成功', 'failed': '失败', 'canceled': '已取消', 'running': '进行中'}
 

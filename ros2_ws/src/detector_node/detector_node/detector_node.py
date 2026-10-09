@@ -38,6 +38,7 @@ from ultralytics import YOLO
 import hyperlpr3 as pr3
 
 from robot_common.reporter import HttpReporter
+from robot_common.paths import PROJECT_ROOT
 
 YOLO_CLASSES = [0, 2, 5, 7]          # person, car, bus, truck
 FACE_SCORE_REPORT = 0.5              # 达到即上报姓名
@@ -61,16 +62,15 @@ class DetectorNode(Node):
         self.declare_parameter('infer_height', 480)
         self.declare_parameter(
             'captures_dir',
-            str(Path.home() / 'ros2Project' / 'Remote_ctrol' / 'web' / 'captures'))
+            str(PROJECT_ROOT / 'web' / 'captures'))
         self.declare_parameter(
             'face_db_dir',
-            str(Path.home() / 'ros2Project' / 'Remote_ctrol' / 'face_db'))
+            str(PROJECT_ROOT / 'face_db'))
         self.declare_parameter('backend_url', 'http://127.0.0.1:8888')
         # 识别结果入业务库（离线自动缓存补传）
         self._reporter = HttpReporter(
             self.get_parameter('backend_url').value,
-            cache_db=str(Path.home() / 'ros2Project' / 'Remote_ctrol' / 'data'
-                         / 'detector_cache.db'))
+            cache_db=str(PROJECT_ROOT / 'data' / 'detector_cache.db'))
 
         self._src = self.get_parameter('video_source').value
         self._conf = float(self.get_parameter('conf_threshold').value)

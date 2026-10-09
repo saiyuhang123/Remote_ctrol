@@ -268,11 +268,80 @@ inline void DestinationPointCloudRos::sendImuData(const std::shared_ptr<ImuData>
   #include <sensor_msgs/msg/imu.hpp>
 #endif
 #include <sstream>
+#include <cmath>
+#include <cstdint>
+#include <cstring>
+#include <stdexcept>
 
 namespace robosense
 {
 namespace lidar
 {
+
+#if defined(POINT_TYPE_XYZIRT) || defined(POINT_TYPE_XYZIRTF)
+// Serialize the decoded points directly into FAST-LIO's Velodyne schema.
+// Keep acquisition order, even for organized input: FAST-LIO uses the last
+// retained point's offset to determine the end of a scan.
+inline sensor_msgs::msg::PointCloud2 toVelodyneRosMsg(
+    const LidarPointCloudMsg& rs_msg, const std::string& frame_id)
+{
+  sensor_msgs::msg::PointCloud2 ros_msg;
+  addPointField(ros_msg, "x", 1, sensor_msgs::msg::PointField::FLOAT32, 0);
+  addPointField(ros_msg, "y", 1, sensor_msgs::msg::PointField::FLOAT32, 4);
+  addPointField(ros_msg, "z", 1, sensor_msgs::msg::PointField::FLOAT32, 8);
+  addPointField(ros_msg, "intensity", 1, sensor_msgs::msg::PointField::FLOAT32, 16);
+  addPointField(ros_msg, "ring", 1, sensor_msgs::msg::PointField::UINT16, 20);
+  addPointField(ros_msg, "time", 1, sensor_msgs::msg::PointField::FLOAT32, 24);
+#ifdef POINT_TYPE_XYZIRTF
+  addPointField(ros_msg, "feature", 1, sensor_msgs::msg::PointField::UINT8, 28);
+#endif
+  ros_msg.header.frame_id = frame_id;
+  ros_msg.height = 1;
+  ros_msg.point_step = 32;
+  ros_msg.is_bigendian = false;
+  ros_msg.is_dense = true;
+
+  // The first incomplete frame can have an uninitialized decoder start time.
+  // Use its first firing timestamp rather than an epoch-sized point offset.
+  double scan_start = rs_msg.timestamp;
+  if ((!std::isfinite(scan_start) || scan_start <= 0.0) && !rs_msg.points.empty())
+    scan_start = rs_msg.points.front().timestamp;
+  if (!std::isfinite(scan_start) || scan_start < 0.0)
+    throw std::runtime_error("Invalid RoboSense scan start timestamp");
+
+  const int64_t stamp_ns = static_cast<int64_t>(std::llround(scan_start * 1e9));
+  ros_msg.header.stamp.sec = static_cast<int32_t>(stamp_ns / 1000000000LL);
+  ros_msg.header.stamp.nanosec = static_cast<uint32_t>(stamp_ns % 1000000000LL);
+  ros_msg.data.resize(rs_msg.points.size() * ros_msg.point_step);
+
+  size_t count = 0;
+  for (const auto& point : rs_msg.points)
+  {
+    const double relative_time = point.timestamp - scan_start;
+    if (!std::isfinite(point.x) || !std::isfinite(point.y) ||
+        !std::isfinite(point.z) || !std::isfinite(relative_time) || relative_time < 0.0)
+      continue;
+
+    uint8_t* out = ros_msg.data.data() + count * ros_msg.point_step;
+    const float intensity = static_cast<float>(point.intensity);
+    const float time = static_cast<float>(relative_time);  // seconds, not microseconds
+    std::memcpy(out + 0, &point.x, sizeof(float));
+    std::memcpy(out + 4, &point.y, sizeof(float));
+    std::memcpy(out + 8, &point.z, sizeof(float));
+    std::memcpy(out + 16, &intensity, sizeof(float));
+    std::memcpy(out + 20, &point.ring, sizeof(uint16_t));
+    std::memcpy(out + 24, &time, sizeof(float));
+#ifdef POINT_TYPE_XYZIRTF
+    std::memcpy(out + 28, &point.feature, sizeof(uint8_t));
+#endif
+    ++count;
+  }
+  ros_msg.width = static_cast<uint32_t>(count);
+  ros_msg.row_step = ros_msg.width * ros_msg.point_step;
+  ros_msg.data.resize(ros_msg.row_step);
+  return ros_msg;
+}
+#endif
 
 inline sensor_msgs::msg::PointCloud2 toRosMsg(const LidarPointCloudMsg& rs_msg, const std::string& frame_id, bool send_by_rows)
 {
@@ -445,10 +514,25 @@ private:
 #endif
   std::string frame_id_;
   bool send_by_rows_;
+  std::string point_cloud_format_;
 };
 
 inline void DestinationPointCloudRos::init(const YAML::Node& config)
 {
+  yamlRead<std::string>(config["ros"], "ros_point_cloud_format", point_cloud_format_, "native");
+  if (point_cloud_format_ != "native" && point_cloud_format_ != "velodyne")
+    throw std::runtime_error("ros_point_cloud_format must be native or velodyne");
+  if (point_cloud_format_ == "velodyne")
+  {
+#if !defined(POINT_TYPE_XYZIRT) && !defined(POINT_TYPE_XYZIRTF)
+    throw std::runtime_error("Velodyne output requires POINT_TYPE=XYZIRT or XYZIRTF");
+#endif
+    bool ts_first_point;
+    yamlRead<bool>(config["driver"], "ts_first_point", ts_first_point, false);
+    if (!ts_first_point)
+      throw std::runtime_error("Velodyne output requires driver.ts_first_point=true");
+  }
+
   yamlRead<bool>(config["ros"], 
       "ros_send_by_rows", send_by_rows_, false);
 
@@ -486,6 +570,15 @@ inline void DestinationPointCloudRos::init(const YAML::Node& config)
 
 inline void DestinationPointCloudRos::sendPointCloud(const LidarPointCloudMsg& msg)
 {
+#if defined(POINT_TYPE_XYZIRT) || defined(POINT_TYPE_XYZIRTF)
+  if (point_cloud_format_ == "velodyne")
+  {
+    auto cloud = toVelodyneRosMsg(msg, frame_id_);
+    if (cloud.width != 0)
+      pub_->publish(cloud);
+    return;
+  }
+#endif
   pub_->publish(toRosMsg(msg, frame_id_, send_by_rows_));
 }
 #ifdef ENABLE_IMU_DATA_PARSE

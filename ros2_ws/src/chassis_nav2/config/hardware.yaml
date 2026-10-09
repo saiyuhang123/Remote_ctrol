@@ -1,0 +1,69 @@
+# 新 JD03 车：填写实测数据后才能启动定位/建图；drivers 模式不需要外参。
+# 坐标约定：base_link 原点采用 JD03 URDF 原 Frame 原点，x 前、y 左、z 上。
+# base_from_* 表示传感器坐标 -> base_link；translation 单位 m，rpy 单位 rad。
+sensor_calibration:
+  confirmed: false
+  base_from_lidar:
+    translation: null
+    rpy: null
+  base_from_imu:
+    translation: null
+    rpy: null
+  time_offset_lidar_to_imu: 0.0  # 尚未测量，需实测确认时间偏差
+
+imu:
+  port: /dev/ttyCH341USB0       # 沿用旧启动记录；在本机核对，优先使用 /dev/serial/by-id/
+  baudrate: 921600
+  protocol: RS485_HIGH
+  modbusID: 80
+  publish_rate: 100.0
+  print_debug: false
+
+scan:
+  min_height: 0.1             # base_link 坐标下的截取高度，需按新车及地面检查
+  max_height: 1.5
+  range_min: 0.3
+  range_max: 15.0
+  angle_increment: 0.008726646 # 0.5 degree
+  scan_time: 0.1
+
+robot_geometry:
+  confirmed: false
+  wheel_base: null            # 新 JD03 实测轴距
+  max_steering_deg: null      # 驱动编码限制 27°；需核对实车有效转角
+  footprint: null             # [[前左x,y],[前右x,y],[后右x,y],[后左x,y]]，base_link 下 m
+
+# 纯轮速里程计独立确认，不要求雷达/IMU 外参或 footprint 已完成。
+wheel_odometry:
+  confirmed: false
+  rear_axle_translation: null # 后轴中心相对 base_link 的 [x,y]，m；不能假定原 CAD 原点在后轴
+  speed_scale: 1.0            # cur_speed 解码为 m/s，实测距离校准比例；假设为后轴纵向速度
+  steering_scale: 1.0         # cur_steer 实际前轮角度的校准比例
+  steering_bias_deg: 0.0      # cur_steer 加此零位偏差，再应用 feedback_steering_sign
+  max_feedback_gap: 0.5       # 反馈间隔超过此值，不推算丢失期间的位移
+  stamp_source: receipt      # 厂家 header 未填；使用本机接收时间。填好采样时间后可改 header
+  speed_stddev: 0.05          # 估计噪声，m/s；需按实际反馈调整
+  steering_stddev_deg: 1.0
+  lateral_velocity_stddev: 0.02
+
+chassis:
+  confirmed: false           # 核对通信参数、转向正负和速度单位后设 true
+  command_steering_sign: -1.0
+  feedback_steering_sign: -1.0 # 厂商 wheelAngle() 右转为正，ROS yaw 左转为正
+  max_speed: 0.3
+  cmd_timeout: 0.5
+  driver:
+    canbus_type: 1
+    main_can_id: 2
+    debug_can_id: 1
+    can_eth_card: enp1s0
+    can1_remote_ip: 192.168.1.10
+    can1_remote_port: 4001
+    can2_remote_ip: 192.168.1.10
+    can2_remote_port: 4002
+    local_ip: 192.168.1.102
+    local_port: 8002
+    debug_mode: false
+    show_sending_msg: false
+    car_type: JD03
+    vehicle_weight: 30.0

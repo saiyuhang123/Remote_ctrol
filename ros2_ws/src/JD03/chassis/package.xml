@@ -14,7 +14,6 @@ for chassis robot</p>
   <depend>robot_state_publisher</depend>
   <depend>rviz</depend>
   <depend>joint_state_publisher_gui</depend>
-  <depend>gazebo</depend>
   <export>
     <architecture_independent />
   </export>

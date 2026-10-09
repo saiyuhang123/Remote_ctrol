@@ -59,6 +59,7 @@
 
   <div class="card">
     <h2>计划管理</h2>
+    <p class="hint">实机巡检执行器尚未接入，当前保存的计划不会自动执行。</p>
     <div class="row">
       <input id="pName" placeholder="计划名称">
       <select id="pRoute"></select>
@@ -170,11 +171,10 @@ function renderPlans() {
       <td>${(routes.find(r => r.id === p.route_id) || {}).name || p.route_id}</td>
       <td>${typeDesc(p)}</td><td>${fmt(p.next_run)}</td>
       <td>${p.enabled ? '✓' : '✗'}</td>
-      <td><button class="btn gray" onclick="runNow(${p.id})">立即执行</button>
+      <td><button class="btn gray" disabled title="实机巡检执行器尚未接入">待接入执行器</button>
           <button class="btn danger" onclick="delPlan(${p.id})">删除</button></td></tr>`;
   }
 }
-window.runNow = async id => { await fetch(`/api/plans/${id}/run`, { method: 'POST' }); setTimeout(loadTasks, 1500); };
 window.delPlan = async id => { if (confirm('删除该计划？')) { await fetch(`/api/plans/${id}`, { method: 'DELETE' }); loadAll(); } };
 
 loadAll(); loadTasks();

@@ -2,14 +2,36 @@
 <package format="3">
   <name>chassis_nav2</name>
   <version>0.1.0</version>
-  <description>JD03 底盘仿真 Nav2 接入（建图/定位/巡航）</description>
+  <description>RoboSense/Wit FAST-LIO2 建图定位、JD03 控制与 Nav2 实机集成</description>
   <maintainer email="dev@example.com">ubuntu</maintainer>
   <license>Proprietary</license>
 
   <buildtool_depend>ament_cmake</buildtool_depend>
+  <buildtool_depend>ament_cmake_python</buildtool_depend>
 
-  <exec_depend>chassis_gazebo</exec_depend>
-  <exec_depend>slam_toolbox</exec_depend>
+  <exec_depend>ament_index_python</exec_depend>
+  <exec_depend>launch</exec_depend>
+  <exec_depend>launch_ros</exec_depend>
+  <exec_depend>nav2_common</exec_depend>
+  <exec_depend>rviz2</exec_depend>
+  <exec_depend>fast_lio_localization</exec_depend>
+  <exec_depend>rslidar_sdk</exec_depend>
+  <exec_depend>wit_ros2_imu</exec_depend>
+  <exec_depend>chassis_description</exec_depend>
+  <exec_depend>chassis_driver</exec_depend>
+  <exec_depend>yunle_msgs</exec_depend>
+  <exec_depend>pcd2pgm</exec_depend>
+  <exec_depend>rclpy</exec_depend>
+  <exec_depend>nav_msgs</exec_depend>
+  <exec_depend>geometry_msgs</exec_depend>
+  <exec_depend>std_msgs</exec_depend>
+  <exec_depend>tf2_ros</exec_depend>
+  <exec_depend>python3-numpy</exec_depend>
+  <exec_depend>python3-yaml</exec_depend>
+  <exec_depend>robot_state_publisher</exec_depend>
+  <exec_depend>robot_localization</exec_depend>
+  <exec_depend>pointcloud_to_laserscan</exec_depend>
+  <exec_depend>twist_mux</exec_depend>
   <exec_depend>nav2_bringup</exec_depend>
   <exec_depend>nav2_smac_planner</exec_depend>
   <exec_depend>nav2_regulated_pure_pursuit_controller</exec_depend>

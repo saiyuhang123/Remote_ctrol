@@ -1,0 +1,402 @@
+"""Offline regression checks; run after building, without connecting hardware."""
+import importlib.util
+import math
+from pathlib import Path
+import tempfile
+import threading
+import time
+from types import SimpleNamespace
+import unittest
+from unittest.mock import patch
+import numpy as np
+import yaml
+from PIL import Image
+from builtin_interfaces.msg import Time
+from geometry_msgs.msg import PoseWithCovarianceStamped, Twist
+from nav_msgs.msg import Odometry
+from std_msgs.msg import Bool
+from chassis_nav2.geometry import transform, inverse, quaternion, ackermann_command
+from chassis_nav2.wheel_odometry import WheelOdometry
+from chassis_nav2 import bringup
+
+SRC = Path(__file__).resolve().parents[2]
+ROOT = SRC.parents[1]
+
+
+def load(path):
+    spec = importlib.util.spec_from_file_location(path.stem, path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def pose(matrix, ns=1000000000):
+    msg = Odometry()
+    msg.header.stamp = Time(sec=ns//1000000000, nanosec=ns % 1000000000)
+    msg.header.frame_id, msg.child_frame_id = 'lio_odom', 'imu_link'
+    p, q = msg.pose.pose.position, msg.pose.pose.orientation
+    p.x, p.y, p.z = map(float, matrix[:3, 3])
+    q.x, q.y, q.z, q.w = quaternion(matrix)
+    return msg
+
+
+class Capture:
+    def __init__(self):
+        self.messages = []
+    def publish(self, msg):
+        self.messages.append(msg)
+    def sendTransform(self, msg):
+        self.messages.append(msg)
+
+
+class IntegrationTests(unittest.TestCase):
+    def hardware(self):
+        hw = yaml.safe_load((SRC/'chassis_nav2/config/hardware.yaml').read_text())
+        hw['sensor_calibration'].update(confirmed=True,
+            base_from_lidar={'translation': [.4, -.1, .7], 'rpy': [0., 0., .2]},
+            base_from_imu={'translation': [.1, .2, .3], 'rpy': [.1, -.1, .3]})
+        hw['robot_geometry'].update(confirmed=True, wheel_base=.5, max_steering_deg=27.,
+                                    footprint=[[.5, .36], [.5, -.36], [-.5, -.36], [-.5, .36]])
+        hw['chassis']['confirmed'] = True
+        hw['wheel_odometry'].update(confirmed=True, rear_axle_translation=[-.25, 0.])
+        return hw
+
+    def test_new_mounting_requires_calibration_and_composes_correctly(self):
+        fresh = yaml.safe_load((SRC/'chassis_nav2/config/hardware.yaml').read_text())
+        with self.assertRaises(ValueError):
+            bringup.calibrations(fresh)
+        base_lidar, base_imu = bringup.calibrations(self.hardware())
+        imu_lidar = inverse(base_imu) @ base_lidar
+        point = np.array([2., -1., .4, 1.])
+        np.testing.assert_allclose(base_imu @ imu_lidar @ point, base_lidar @ point, atol=1e-12)
+        np.testing.assert_allclose(base_imu @ inverse(base_imu), np.eye(4), atol=1e-12)
+        for angle in [math.pi, -math.pi, 1.5]:
+            m = transform([0., 0., 0.], [angle, 0., 0.])
+            np.testing.assert_allclose(np.linalg.norm(quaternion(m)), 1., atol=1e-12)
+
+    def test_jd03_units_reverse_and_no_in_place_rotation(self):
+        motor, steer, gear, brake = ackermann_command(.2, .1, .5, 27., .3)
+        self.assertAlmostEqual(motor, .72)
+        self.assertLess(steer, 0.)
+        self.assertEqual((gear, brake), (1, False))
+        reverse = ackermann_command(-.2, .1, .5, 27., .3)
+        self.assertGreater(reverse[1], 0.)
+        self.assertEqual(reverse[2], 3)
+        self.assertEqual(ackermann_command(0., .5, .5, 27., .3), (0., 0., 1, True))
+        self.assertTrue(ackermann_command(float('nan'), 0., .5, 27., .3)[3])
+        limited = ackermann_command(2., 10., .5, 27., .3)
+        self.assertAlmostEqual(limited[0], 1.08)
+        self.assertEqual(abs(limited[1]), 27.)
+
+    def test_lio_body_offset_velocity_and_duplicate_stamp(self):
+        cls = load(SRC/'chassis_nav2/scripts/lio_odometry.py').LioOdometry
+        node = cls.__new__(cls)
+        base_body = transform([.2, -.1, .3], [0., 0., .2])
+        node.body_from_base, node.previous = inverse(base_body), None
+        node.odom_frame, node.comparison = 'odom', None
+        node.publisher, node.tf = Capture(), Capture()
+        base0 = transform([1., 2., .1], [0., 0., .4])
+        node.receive(pose(base0 @ base_body))
+        out = node.publisher.messages[-1]
+        np.testing.assert_allclose([out.pose.pose.position.x, out.pose.pose.position.y, out.pose.pose.position.z], base0[:3, 3])
+        node.receive(pose(base0 @ base_body))
+        self.assertEqual(len(node.publisher.messages), 1)
+        base1 = base0.copy()
+        base1[:3, 3] += base0[:3, :3] @ [.02, 0., 0.]
+        node.receive(pose(base1 @ base_body, 1100000000))
+        self.assertAlmostEqual(node.publisher.messages[-1].twist.twist.linear.x, .2)
+        self.assertEqual(node.tf.messages[-1].child_frame_id, 'base_link')
+
+    def test_jd03_stop_is_immediate_and_latched(self):
+        cls = load(SRC/'chassis_nav2/scripts/jd03_bridge.py').JD03Bridge
+        node = cls.__new__(cls)
+        node.wheel_base, node.max_steering_deg, node.max_speed = .5, 27., .3
+        node.command_steering_sign, node.cmd_timeout, node.estopped = -1., .5, False
+        node.ecu_pub, node.feedback_time = Capture(), time.monotonic()
+        node.command = time.monotonic(), .2, .1
+        node.get_clock = lambda: SimpleNamespace(now=lambda: SimpleNamespace(to_msg=lambda: Time()))
+        node.send()
+        self.assertFalse(node.ecu_pub.messages[-1].brake)
+        node.emergency_stop(Bool(data=True))
+        self.assertTrue(node.ecu_pub.messages[-1].brake)
+        node.receive(Twist())
+        node.send()
+        self.assertTrue(node.ecu_pub.messages[-1].brake)
+        node.estopped = False
+        node.command, node.feedback_time = (time.monotonic()-2, .2, 0.), time.monotonic()
+        node.send()
+        self.assertTrue(node.ecu_pub.messages[-1].brake)
+
+    def test_wheel_odometry_straight_reverse_and_exact_turn(self):
+        straight = WheelOdometry(.5, [0., 0.])
+        reverse = WheelOdometry(.5, [0., 0.])
+        turning = WheelOdometry(.5, [0., 0.])
+        for i in range(6):
+            a = straight.update(1+i*.2, 1., 0., 1)
+            b = reverse.update(1+i*.2, 1., 0., 3)
+            c = turning.update(1+i*.2, 1., math.atan(.5), 1)
+        np.testing.assert_allclose(a[0], [1., 0., 0.], atol=1e-12)
+        np.testing.assert_allclose(b[0], [-1., 0., 0.], atol=1e-12)
+        np.testing.assert_allclose(c[0], [math.sin(1.), 1-math.cos(1.), 1.], atol=1e-12)
+        self.assertGreater(c[2][0, 0], 0.)
+        np.testing.assert_allclose(c[2], c[2].T, atol=1e-12)
+        self.assertGreaterEqual(np.linalg.eigvalsh(c[2]).min(), -1e-12)
+
+    def test_wheel_odometry_base_lever_arm_and_lateral_velocity(self):
+        rear = np.array([-.25, .1])
+        model = WheelOdometry(.5, rear)
+        first = model.update(1., 1., math.atan(.5), 1)
+        np.testing.assert_allclose(first[0], [0., 0., 0.], atol=1e-12)
+        for i in range(1, 6):
+            sample = model.update(1+i*.2, 1., math.atan(.5), 1)
+        rotation = transform([0., 0., 0.], [0., 0., 1.])[:2, :2]
+        wanted = rear + [math.sin(1.), 1-math.cos(1.)] - rotation @ rear
+        np.testing.assert_allclose(sample[0][:2], wanted, atol=1e-12)
+        np.testing.assert_allclose(sample[1], [1.1, .25, 1.], atol=1e-12)
+
+    def test_wheel_odometry_drops_bad_samples_and_does_not_invent_missing_motion(self):
+        model = WheelOdometry(.5, [0., 0.])
+        self.assertIsNone(model.update(1., 1., 0., 2))  # Unknown coasting direction.
+        model.update(1., 1., 0., 1)
+        sample = model.update(1.1, 1., 0., 2)
+        self.assertAlmostEqual(sample[1][0], 1.)  # Neutral can coast.
+        for t, v, a, gear in [(1.1, 1., 0., 1), (1., 1., 0., 1),
+                              (1.2, float('nan'), 0., 1), (1.2, 1., math.pi/2, 1),
+                              (1.2, 1., 0., 0)]:
+            self.assertIsNone(model.update(t, v, a, gear))
+        gap = model.update(3., 1., 0., 1)
+        np.testing.assert_allclose(gap[0], sample[0], atol=1e-12)
+        self.assertTrue(gap[-1])
+        self.assertGreater(gap[2][0, 0], sample[2][0, 0])
+
+    def test_wheel_ros_message_uses_measured_speed_even_when_braking(self):
+        from yunle_msgs.msg import VehicleStatus
+        cls = load(SRC/'chassis_nav2/scripts/jd03_odometry.py').JD03Odometry
+        node = cls.__new__(cls)
+        node.stamp_source, node.feedback_steering_sign = 'header', -1.
+        node.speed_scale, node.steering_scale, node.steering_bias_deg = 1., 1., 0.
+        node.odom_frame, node.base_frame = 'odom', 'base_link'
+        node.publisher, node.comparison, node.tf = Capture(), Capture(), None
+        node.integrator = WheelOdometry(.5, [0., 0.])
+        node.get_logger = lambda: SimpleNamespace(warning=lambda *a: None)
+        feedback = VehicleStatus(cur_speed=.2, cur_steer=0., shift_level=1, p_status=True)
+        feedback.header.stamp = Time(sec=1)
+        node.receive(feedback)
+        feedback.header.stamp = Time(sec=1, nanosec=100000000)
+        node.receive(feedback)
+        output = node.publisher.messages[-1]
+        self.assertAlmostEqual(output.pose.pose.position.x, .02, places=6)
+        self.assertAlmostEqual(output.twist.twist.linear.x, .2, places=6)
+        self.assertEqual(output.header.frame_id, 'odom')
+        self.assertEqual(node.comparison.messages[-1].header.frame_id, 'wheel_odom')
+        node.receive(feedback)
+        self.assertEqual(len(node.publisher.messages), 2)
+        self.assertEqual(output.pose.covariance[14], 1e3)
+
+    def test_standalone_wheel_entry_needs_no_sensor_calibration_and_defaults_to_no_tf(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d)/'hardware.yaml'
+            hw = self.hardware()
+            hw['sensor_calibration']['confirmed'] = False
+            hw['robot_geometry']['confirmed'] = False
+            hw['robot_geometry']['footprint'] = None
+            path.write_text(yaml.safe_dump(hw))
+            args = {'hardware_file':str(path), 'start_chassis':'false', 'use_as_odom':'false'}
+            with patch.object(bringup, 'Node', side_effect=lambda **kwargs: kwargs):
+                nodes = bringup.configure_chassis_odometry(SimpleNamespace(launch_configurations=args))
+                self.assertEqual(len(nodes), 1)
+                params = nodes[0]['parameters'][0]
+                self.assertEqual(params['odom_topic'], '/odom_wheel')
+                self.assertIs(params['publish_tf'], False)
+                args['use_as_odom'] = 'true'
+                params = bringup.configure_chassis_odometry(SimpleNamespace(launch_configurations=args))[0]['parameters'][0]
+                self.assertEqual(params['odom_topic'], '/odom')
+                self.assertIs(params['publish_tf'], True)
+                hw['wheel_odometry']['confirmed'] = False
+                path.write_text(yaml.safe_dump(hw))
+                with self.assertRaises(ValueError):
+                    bringup.configure_chassis_odometry(SimpleNamespace(launch_configurations=args))
+
+    def test_gateway_rejects_unlocalized_goals_and_cancels_late_accept_on_stop(self):
+        cls = load(SRC/'robot_gateway/robot_gateway/gateway_node.py').GatewayNode
+        node = cls.__new__(cls)
+        node._lock, node._estopped = threading.Lock(), True
+        node.get_logger = lambda: SimpleNamespace(warn=lambda *a: None, info=lambda *a: None)
+        node.send_nav_goal(1., 2., 0.)
+        self.assertEqual(node._nav_status, 'estopped')
+        node._estopped = False
+        def missing(*args):
+            raise LookupError('No successful map localization yet')
+        node._tf_buffer = SimpleNamespace(lookup_transform=missing)
+        node.send_nav_goal(1., 2., 0.)
+        self.assertEqual(node._nav_status, 'unlocalized')
+        canceled = []
+        node._estopped = True
+        handle = SimpleNamespace(accepted=True, cancel_goal_async=lambda: canceled.append(True),
+                                 get_result_async=lambda: SimpleNamespace(add_done_callback=lambda cb: None))
+        node._on_nav_response(SimpleNamespace(result=lambda: handle))
+        self.assertTrue(canceled)
+        self.assertEqual(node._nav_status, 'canceling')
+
+    def test_fusion_waits_for_icp_and_corrects_imu_offset(self):
+        cls = load(SRC/'FAST_LIO_LOCALIZATION_ROS2/scripts/transform_fusion.py').TransformFusionNode
+        node = cls.__new__(cls)
+        node.lock, node.tf_broadcaster, node.pub_localization = threading.Lock(), Capture(), Capture()
+        node.base_from_body = transform([.2, 0., .4], [0., 0., .1])
+        lio_body = transform([1., 2., 0.], [0., 0., .3])
+        node.cur_odom_fastlio, node.cur_map_to_odom_fl = pose(lio_body), None
+        node.timer_callback()
+        self.assertFalse(node.tf_broadcaster.messages)
+        map_lio = transform([3., -2., .1], [0., 0., -.2])
+        ekf_base = transform([.4, -.3, .2], [0., 0., .1])
+        tf = SimpleNamespace(transform=SimpleNamespace(translation=SimpleNamespace(
+            x=.4, y=-.3, z=.2), rotation=SimpleNamespace(**dict(zip(('x','y','z','w'), quaternion(ekf_base))))))
+        node.tf_buffer = SimpleNamespace(lookup_transform=lambda *args: tf)
+        node.get_clock = lambda: SimpleNamespace(now=lambda: SimpleNamespace(to_msg=lambda: Time()))
+        node.broadcast_lio_frame = True
+        node.cur_map_to_odom_fl = pose(map_lio)
+        node.timer_callback()
+        wanted = map_lio @ lio_body @ inverse(node.base_from_body) @ inverse(ekf_base)
+        actual = node.tf_to_mat(node.tf_broadcaster.messages[0])
+        np.testing.assert_allclose(actual, wanted, atol=1e-12)
+        self.assertEqual(node.tf_broadcaster.messages[1].child_frame_id, 'lio_odom')
+        self.assertEqual(node.pub_localization.messages[-1].child_frame_id, 'base_link')
+
+    def test_initial_pose_is_base_pose_not_lio_world_origin(self):
+        cls = load(SRC/'FAST_LIO_LOCALIZATION_ROS2/scripts/global_localization.py').GlobalLocalizationNode
+        node = cls.__new__(cls)
+        node.global_map, node.cur_scan_odom, node.pending_initial_pose = None, None, None
+        node.get_logger = lambda: SimpleNamespace(info=lambda *a: None, warn=lambda *a: None)
+        node.initialized, node.freq_localization = True, 1.
+        node.base_from_body = transform([.3, -.1, .4], [0., 0., .2])
+        node.initial_base_z = -.4
+        initial = PoseWithCovarianceStamped()
+        initial.header.frame_id = 'map'
+        initial.pose.pose.position.x, initial.pose.pose.position.y = 10., -2.
+        initial.pose.pose.orientation.w = 1.
+        received = []
+        node.global_localization = lambda guess: received.append(guess) or True
+        node.cb_init_pose(initial)
+        self.assertFalse(received)
+        node.global_map = object()
+        current = transform([2., 1., .1], [0., 0., .6])
+        node.cur_scan_odom = pose(current)
+        node._try_initial_pose()
+        base_pose = transform([10., -2., -.4], [0., 0., 0.])
+        np.testing.assert_allclose(received[0] @ current @ inverse(node.base_from_body), base_pose, atol=1e-12)
+
+    def test_web_map_preserves_image_geometry(self):
+        exporter = load(ROOT/'scripts/export_web_map.py')
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d)
+            Image.new('L', (3, 2), 205).save(p/'actual.pgm')
+            cfg = {'image':'actual.pgm', 'resolution':.07, 'origin':[-2., 3., 0.]}
+            (p/'map.yaml').write_text(yaml.safe_dump(cfg))
+            result = exporter.export(p/'map.yaml', p/'web')
+            self.assertEqual((result['width'], result['height']), (3, 2))
+            self.assertEqual(result['origin'], cfg['origin'])
+            self.assertEqual(result['resolution'], .07)
+            with Image.open(p/'web/site.png') as img:
+                self.assertEqual(img.size, (3, 2))
+            cfg['origin'][2] = .1
+            (p/'map.yaml').write_text(yaml.safe_dump(cfg))
+            with self.assertRaises(ValueError):
+                exporter.export(p/'map.yaml', p/'web')
+
+    def test_imu_requires_new_samples_and_keeps_reception_time(self):
+        module = load(SRC/'wit_ros2_imu/wit_ros2_imu/wit_ros2_imu.py')
+        cls = module.imuDriverNode
+        node = cls.__new__(cls)
+        node.dataLock = threading.Lock()
+        node.accData, node.gyroData = np.array([0., 0., 2048.]), np.zeros(3)
+        node.angleData, node.magData = np.zeros(3), np.zeros(3)
+        node.protocol, node.frame_id = module.protocolType.RS485_HIGH, 'imu_link'
+        node.imuPublisher, node.imuRpyPublisher = Capture(), Capture()
+        node._last_acc_update = node._last_gyro_update = node._last_angle_update = 0.
+        node._last_published_gyro, node._gyro_stamp = 0., None
+        with patch.object(module.time, 'monotonic', return_value=10.):
+            node.publishImu()
+            self.assertFalse(node.imuPublisher.messages)
+            node._last_acc_update, node._last_gyro_update = 9.99, 9.98
+            node._gyro_stamp = Time(sec=123, nanosec=456)
+            node.publishImu()
+            actual = node.imuPublisher.messages[-1]
+            self.assertEqual(actual.header.stamp, node._gyro_stamp)
+            self.assertAlmostEqual(actual.linear_acceleration.z, 9.80665)
+            self.assertEqual(actual.orientation_covariance[0], -1.)
+            node.publishImu()
+            self.assertEqual(len(node.imuPublisher.messages), 1)
+            node._last_acc_update, node._last_gyro_update = 9., 9.99
+            node.publishImu()
+            self.assertEqual(len(node.imuPublisher.messages), 1)
+
+    def test_nav2_uses_measured_footprint_and_turning_radius(self):
+        from launch import LaunchContext
+        with patch.object(bringup, 'share', return_value=SRC/'chassis_nav2'), patch.object(
+                bringup, 'Node', side_effect=lambda **kwargs: kwargs):
+            hw = self.hardware()
+            nodes = bringup.navigation_nodes('/tmp/test-only-map.yaml', hw,
+                                             str(SRC/'chassis_nav2/config/nav2.yaml'))
+            rewritten = nodes[0]['parameters'][0].perform(LaunchContext())
+            params = yaml.safe_load(Path(rewritten).read_text())
+            try:
+                radius = params['planner_server']['ros__parameters']['GridBased']['minimum_turning_radius']
+                self.assertAlmostEqual(radius, .5/math.tan(math.radians(27.)))
+                costmap = params['local_costmap']['local_costmap']['ros__parameters']
+                self.assertEqual(__import__('json').loads(costmap['footprint']), hw['robot_geometry']['footprint'])
+                self.assertEqual(costmap['robot_base_frame'], 'base_link')
+                self.assertIs(costmap['use_sim_time'], False)
+                bt = Path(params['bt_navigator']['ros__parameters']['default_nav_to_pose_bt_xml'])
+                self.assertTrue(bt.is_file())
+            finally:
+                Path(rewritten).unlink()
+
+    def test_bringup_has_one_tf_authority_and_no_2d_or_amcl(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d)
+            (p/'hardware.yaml').write_text(yaml.safe_dump(self.hardware()))
+            (p/'site.pcd').write_text('test-only PCD placeholder; no runtime nodes start')
+            (p/'site.yaml').write_text('image: site.pgm\nresolution: 0.05\norigin: [0,0,0]\n')
+            args = {'hardware_file':str(p/'hardware.yaml'), 'mode':'localization',
+                    'start_sensors':'true', 'start_chassis':'false', 'enable_control':'false',
+                    'odom_source':'lio', 'rviz':'false', 'pcd_map':str(p/'site.pcd'),
+                    'lidar_config':str(SRC/'rslidar_sdk-v1.5.19/config/config.yaml'),
+                    'nav2_params':str(SRC/'chassis_nav2/config/nav2.yaml'), 'map':str(p/'site.yaml')}
+            paths = {'chassis_nav2':SRC/'chassis_nav2', 'chassis_description':SRC/'chassis_description',
+                     'fast_lio_localization':SRC/'FAST_LIO_LOCALIZATION_ROS2'}
+            def node(**kwargs):
+                return kwargs
+            with patch.object(bringup, 'share', side_effect=lambda name: paths[name]), patch.object(bringup, 'Node', side_effect=node):
+                nodes = bringup.configure(SimpleNamespace(launch_configurations=args))
+                packages = [n['package'] for n in nodes]
+                self.assertNotIn('hi_ros2', packages)
+                self.assertNotIn('nav2_amcl', packages)
+                self.assertNotIn('robot_localization', packages)
+                self.assertEqual(packages.count('rslidar_sdk'), 1)
+                self.assertEqual(sum(n.get('executable') == 'lio_odometry.py' for n in nodes), 1)
+                args['odom_source'] = 'wheel_imu'
+                nodes = bringup.configure(SimpleNamespace(launch_configurations=args))
+                self.assertEqual(sum(n['package'] == 'robot_localization' for n in nodes), 1)
+                lio = next(n for n in nodes if n.get('executable') == 'lio_odometry.py')
+                self.assertIs(lio['parameters'][0]['publish_tf'], False)
+                self.assertEqual(lio['parameters'][0]['odom_topic'], '/odom_lio')
+                args['odom_source'] = 'wheel'
+                nodes = bringup.configure(SimpleNamespace(launch_configurations=args))
+                self.assertFalse(any(n['package'] == 'robot_localization' for n in nodes))
+                wheel = next(n for n in nodes if n.get('executable') == 'jd03_odometry.py')
+                self.assertIs(wheel['parameters'][0]['publish_tf'], True)
+                self.assertEqual(wheel['parameters'][0]['odom_topic'], '/odom')
+                args['odom_source'], args['compare_wheel_odometry'] = 'lio', 'true'
+                nodes = bringup.configure(SimpleNamespace(launch_configurations=args))
+                wheel = next(n for n in nodes if n.get('executable') == 'jd03_odometry.py')
+                self.assertIs(wheel['parameters'][0]['publish_tf'], False)
+                self.assertEqual(wheel['parameters'][0]['odom_topic'], '/odom_wheel')
+                args['odom_source'], args['mode'] = 'lio', 'navigation'
+                nodes = bringup.configure(SimpleNamespace(launch_configurations=args))
+                self.assertFalse(any(n['package'] == 'nav2_amcl' for n in nodes))
+                smoother = next(n for n in nodes if n.get('executable') == 'velocity_smoother')
+                self.assertIn(('cmd_vel_smoothed', '/cmd_vel_auto'), smoother['remappings'])
+
+
+if __name__ == '__main__':
+    unittest.main(verbosity=2)

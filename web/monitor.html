@@ -112,8 +112,8 @@
     <canvas id="mapCanvas"></canvas>
     <div id="mapHint">滚轮缩放 · 拖拽平移</div>
     <div style="position:absolute;top:10px;right:10px;display:flex;gap:8px">
-      <button class="btn" id="btnPose">初始定位</button>
-      <button class="btn" id="btnGoal" style="background:#2e7d32">目标点</button>
+      <button class="btn" id="btnPose" disabled>初始定位</button>
+      <button class="btn" id="btnGoal" style="background:#2e7d32" disabled>目标点</button>
       <button class="btn gray" id="btnNavCancel" style="display:none">取消导航</button>
     </div>
   </div>
@@ -122,17 +122,17 @@
     <div class="card">
       <h2>车辆状态</h2>
       <div class="gauges">
-        <div>速度<div class="v"><span id="gvSpeed">0.00</span><span class="u">m/s</span></div></div>
-        <div>转向<div class="v"><span id="gvTurn">0.00</span><span class="u">rad/s</span></div></div>
+        <div>速度<div class="v"><span id="gvSpeed">-</span><span class="u">m/s</span></div></div>
+        <div>转向<div class="v"><span id="gvTurn">-</span><span class="u">rad/s</span></div></div>
         <div>位置<div class="v small"><span id="gvPos">-</span></div></div>
         <div>朝向<div class="v small"><span id="gvYaw">-</span></div></div>
       </div>
-      <h2 style="margin-top:12px">电池（模拟）</h2>
+      <h2 style="margin-top:12px">电池（未接入）</h2>
       <div class="gauges">
-        <div>电量<div class="v"><span id="gvBatt">100</span><span class="u">%</span></div></div>
-        <div>电压<div class="v"><span id="gvVolt">48.0</span><span class="u">V</span></div></div>
+        <div>电量<div class="v"><span id="gvBatt">-</span><span class="u">%</span></div></div>
+        <div>电压<div class="v"><span id="gvVolt">-</span><span class="u">V</span></div></div>
       </div>
-      <div id="battBar"><div id="battFill"></div></div>
+      <div id="battBar"><div id="battFill" style="width:0"></div></div>
     </div>
 
     <div class="card">
@@ -143,7 +143,7 @@
     </div>
 
     <div class="card">
-      <h2>视频监控（D435）
+      <h2>视频监控
         <span style="display:flex;gap:6px">
           <button class="btn" id="btnCapture" style="font-size:12px;padding:3px 10px">抓拍</button>
           <button class="btn gray" id="btnVideo" style="font-size:12px;padding:3px 10px">开启</button>
@@ -186,6 +186,7 @@
   </div>
 </div>
 
+<script src="map-loader.js"></script>
 <script>
 const host = location.hostname;
 
@@ -338,14 +339,21 @@ const c2 = cv.getContext('2d');
 let meta = null;
 const mapImg = new Image();
 let mapReady = false;
+let mapStatus = '地图加载中…';
 
 let zoom = 1.0, panX = 0, panY = 0, baseScale = 1.0;
 
 async function loadMap() {
-  meta = await (await fetch('maps/meta.json')).json();
-  await new Promise(res => { mapImg.onload = res; mapImg.src = 'maps/patrol.png'; });
-  fitView();
-  mapReady = true;
+  try {
+    meta = await loadSiteMap(mapImg);
+    fitView();
+    mapReady = true;
+    btnPose.disabled = btnGoal.disabled = false;
+    refreshNavUI();
+  } catch (error) {
+    mapStatus = error.message || '实机地图加载失败';
+    mapHint.textContent = mapStatus;
+  }
 }
 function fitView() {
   baseScale = Math.min(cv.width / meta.width, cv.height / meta.height);
@@ -382,6 +390,7 @@ const mapHint = document.getElementById('mapHint');
 let navStatus = 'idle';
 
 function setPickMode(mode) {
+  if (!mapReady) return;
   pickMode = mode;
   poseStart = poseCur = null;
   btnPose.textContent = pickMode === 'pose' ? '取消' : '初始定位';
@@ -401,11 +410,13 @@ const NAV_STATUS_TEXT = {
   succeeded: '已到达目标点', aborted: '导航失败',
   canceled: '导航已取消', rejected: '目标被拒绝', error: 'Nav2 未就绪',
   canceling: '正在取消…',
+  unlocalized: '请先设置初始位姿，等待地图定位成功',
+  estopped: '急停保持中，手动控制可解除',
 };
 function refreshNavUI() {
   btnNavCancel.style.display = (navStatus === 'driving' || navStatus === 'sent') ? '' : 'none';
   const t = NAV_STATUS_TEXT[navStatus] || navStatus;
-  if (!pickMode) mapHint.textContent = t || '滚轮缩放 · 拖拽平移';
+  if (!pickMode) mapHint.textContent = !mapReady ? mapStatus : (t || '滚轮缩放 · 拖拽平移');
 }
 
 // ---- 缩放/平移 ----
@@ -427,6 +438,7 @@ function canvasPos(e) {
   return { x: e.clientX - rect.left, y: e.clientY - rect.top };
 }
 cv.addEventListener('pointerdown', e => {
+  if (!mapReady) return;
   if (pickMode) {
     poseStart = canvasPos(e); poseCur = poseStart;
   } else {
@@ -465,17 +477,17 @@ cv.addEventListener('pointercancel', endPan);
 // ---- 遥测 ----
 let robotPose = null;
 let scanPts = [];
-let simBatt = 100;
 
 function onMessage(ev) {
   let d;
   try { d = JSON.parse(ev.data); } catch { return; }
   if (d.type === 'telemetry') {
-    robotPose = d.pose;
-    scanPts = d.scan;
-    document.getElementById('gvSpeed').textContent = (d.speed ?? 0).toFixed(2);
-    document.getElementById('gvTurn').textContent = (d.turn ?? 0).toFixed(2);
-    document.getElementById('gvPos').textContent = `${d.pose.x.toFixed(2)}, ${d.pose.y.toFixed(2)}`;
+    robotPose = d.frame === 'map' ? d.pose : null;
+    scanPts = d.frame === 'map' ? d.scan : [];
+    document.getElementById('gvSpeed').textContent = Number.isFinite(d.speed) ? d.speed.toFixed(2) : '-';
+    document.getElementById('gvTurn').textContent = Number.isFinite(d.turn) ? d.turn.toFixed(2) : '-';
+    document.getElementById('gvPos').textContent = d.frame === 'map'
+      ? `${d.pose.x.toFixed(2)}, ${d.pose.y.toFixed(2)}` : '等待地图定位';
     document.getElementById('gvYaw').textContent = `${(d.pose.yaw * 57.2958).toFixed(1)}°`;
     if (d.nav !== undefined && d.nav !== navStatus) {
       navStatus = d.nav;
@@ -514,16 +526,6 @@ function addAlert(d) {
   while (list.children.length > 30) list.lastChild.remove();
 }
 
-// 模拟电池缓慢下降（真车到货后换真实 battery_status）
-setInterval(() => {
-  simBatt = Math.max(0, simBatt - 0.001);
-  document.getElementById('gvBatt').textContent = simBatt.toFixed(1);
-  document.getElementById('gvVolt').textContent = (44 + simBatt * 0.048).toFixed(1);
-  const f = document.getElementById('battFill');
-  f.style.width = simBatt + '%';
-  f.style.background = simBatt > 30 ? '#4caf50' : '#d32f2f';
-}, 1000);
-
 // ---- 渲染循环 ----
 function render() {
   requestAnimationFrame(render);
@@ -531,7 +533,7 @@ function render() {
   c2.clearRect(0, 0, cv.width, cv.height);
   if (!mapReady) {
     c2.fillStyle = '#5a6572'; c2.font = '16px sans-serif';
-    c2.fillText('地图加载中…', 20, 40);
+    c2.fillText(mapStatus, 20, 40);
     return;
   }
   c2.imageSmoothingEnabled = false;

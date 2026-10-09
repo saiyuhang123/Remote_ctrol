@@ -9,7 +9,7 @@ from fastapi import APIRouter, HTTPException, UploadFile, File
 
 router = APIRouter(prefix='/api/audio', tags=['audio'])
 
-AUDIO_DIR = Path.home() / 'ros2Project' / 'Remote_ctrol' / 'web' / 'audio'
+AUDIO_DIR = Path(__file__).resolve().parents[1] / 'web' / 'audio'
 ALLOWED_EXT = {'.mp3', '.wav', '.ogg', '.m4a', '.aac', '.flac'}
 MAX_MB = 20
 
