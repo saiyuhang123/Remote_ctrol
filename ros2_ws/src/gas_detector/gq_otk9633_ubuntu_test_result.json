@@ -1,0 +1,70 @@
+{
+  "timestamp": "2026-10-10T13:31:00+0800",
+  "port": "/dev/gq_otk9633",
+  "baudrate": 2400,
+  "address": 1,
+  "parity": "N",
+  "read_only": true,
+  "continuous_reads": [
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0
+  ],
+  "snapshot": {
+    "address": 1,
+    "raw_value": 0,
+    "value_scaled": 0.0,
+    "decimals": 1,
+    "decimal_scaling_verified": false,
+    "unit_code": 0,
+    "unit": "%LEL",
+    "type_code": 0,
+    "state_code": 0,
+    "state": "normal",
+    "range_raw": 1000,
+    "low_alarm_raw": 150,
+    "high_alarm_raw": 150,
+    "raw_registers": {
+      "value": 0,
+      "state": 0,
+      "type_unit": 0,
+      "precision": 256,
+      "range": 1000,
+      "low_alarm": 150,
+      "high_alarm": 150
+    }
+  },
+  "reopened_reads": [
+    0,
+    0,
+    0
+  ],
+  "passed": true,
+  "watch_cli": {
+    "command": "watch --interval 1 --count 3",
+    "exit_code": 0,
+    "snapshots_received": 3,
+    "raw_values": [
+      0,
+      0,
+      0
+    ],
+    "states": [
+      "normal",
+      "normal",
+      "normal"
+    ],
+    "timestamps": [
+      "2026-10-10T13:31:15+0800",
+      "2026-10-10T13:31:17+0800",
+      "2026-10-10T13:31:20+0800"
+    ]
+  }
+}

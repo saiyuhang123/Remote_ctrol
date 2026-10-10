@@ -1,0 +1,2 @@
+# This detector's USB-RS485 adapter; do not match the CH340 IMU.
+SUBSYSTEM=="tty", ATTRS{idVendor}=="1a86", ATTRS{idProduct}=="55d3", ATTRS{serial}=="5CDB375485", SYMLINK+="gq_otk9633", GROUP="dialout", MODE="0660", TAG+="uaccess", ENV{ID_MM_DEVICE_IGNORE}="1"
