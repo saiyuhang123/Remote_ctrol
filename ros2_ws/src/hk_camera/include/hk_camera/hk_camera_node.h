@@ -37,8 +37,10 @@ namespace hk_camera
  *   - ip (string)        : 相机 IP, 默认 192.168.1.64
  *   - port (int)         : 端口, 默认 8000
  *   - username (string)  : 用户名, 默认 admin
- *   - password (string)  : 密码, 默认 a1234567
+ *   - password (string)  : 密码, 默认 zmdl@603
  *   - channel (int)      : 通道号, 默认 1
+ *   - auto_login (bool)  : 启动时登录, 节点默认 false, launch 默认 true
+ *   - auto_stream (bool) : 自动登录后取流, 默认 true
  */
 class HKCameraNode : public rclcpp::Node
 {

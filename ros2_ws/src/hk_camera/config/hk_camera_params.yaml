@@ -4,7 +4,7 @@ hk_camera_node:
     ip: "192.168.1.64"
     port: 8000
     username: "admin"
-    password: "a1234567"
+    password: "zmdl@603"
     channel: 1
     auto_login: true           # 启动时自动登录
     auto_stream: true          # 登录后自动开始取流

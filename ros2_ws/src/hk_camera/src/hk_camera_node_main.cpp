@@ -11,16 +11,24 @@
  */
 
 #include <rclcpp/rclcpp.hpp>
+#include <QCoreApplication>
 #include "hk_camera/hk_camera_node.h"
 #include "hk_camera/hk_camera.h"
 
 int main(int argc, char* argv[])
 {
     rclcpp::init(argc, argv);
+    QCoreApplication app(argc, argv);
 
     // 初始化 HK SDK
     auto* camera = hk_camera::HKCamera::instance();
-    camera->init();
+    if (!camera->init())
+    {
+        RCLCPP_ERROR(rclcpp::get_logger("hk_camera_node"),
+                    "HK SDK initialization failed: %d", camera->getLastError());
+        rclcpp::shutdown();
+        return 1;
+    }
 
     // 创建并启动 ROS2 节点
     auto node = std::make_shared<hk_camera::HKCameraNode>("hk_camera_node");
@@ -30,7 +38,7 @@ int main(int argc, char* argv[])
     rclcpp::spin(node);
 
     // 清理
-    camera->cleanup();
+    node.reset();
     rclcpp::shutdown();
 
     return 0;

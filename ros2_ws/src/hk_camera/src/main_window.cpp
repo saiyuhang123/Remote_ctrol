@@ -80,7 +80,7 @@ void MainWindow::setupUI()
     ip_edit_   = new QLineEdit("192.168.1.64");
     port_edit_ = new QLineEdit("8000");
     user_edit_ = new QLineEdit("admin");
-    pass_edit_ = new QLineEdit("a1234567");
+    pass_edit_ = new QLineEdit("zmdl@603");
     pass_edit_->setEchoMode(QLineEdit::Password);
     ip_edit_->setMaximumHeight(26);   port_edit_->setMaximumHeight(26);
     user_edit_->setMaximumHeight(26); pass_edit_->setMaximumHeight(26);

@@ -102,6 +102,10 @@ int main(int argc, char* argv[])
         g_ros_thread->join();
     }
     rclcpp::shutdown();
+    // Release ROS objects before static SDK/ROS state is destroyed. The window's
+    // remaining node reference is released by its destructor before QApplication.
+    g_ros_thread.reset();
+    g_node.reset();
 
     return ret;
 }

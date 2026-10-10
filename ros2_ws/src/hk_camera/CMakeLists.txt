@@ -75,23 +75,24 @@ get_filename_component(HK_SDK_INCLUDE_DIR_ABS "${HK_SDK_INCLUDE_DIR}" ABSOLUTE)
 message(STATUS "HK SDK libs:    ${HK_SDK_LIB_DIR_ABS}")
 message(STATUS "HK SDK headers:  ${HK_SDK_INCLUDE_DIR_ABS}")
 
-add_library(hcnetsdk SHARED IMPORTED)
-set_target_properties(hcnetsdk PROPERTIES
-  IMPORTED_LOCATION "${HK_SDK_LIB_DIR_ABS}/libhcnetsdk.so"
-  INTERFACE_INCLUDE_DIRECTORIES "${HK_SDK_INCLUDE_DIR_ABS}"
-)
+# SDK libraries are loaded locally at runtime to avoid tinyxml2 ABI collisions
+# with ROS/Fast DDS. Verify that the complete library set is available.
+if(NOT EXISTS "${HK_SDK_LIB_DIR_ABS}/libhcnetsdk.so")
+  message(FATAL_ERROR "Missing Hikvision SDK: ${HK_SDK_LIB_DIR_ABS}/libhcnetsdk.so")
+endif()
+foreach(HK_LIB_NAME
+  HCAlarm HCGeneralCfgMgr HCIndustry HCPreview PlayCtrl AudioProcess
+  analyzedata StreamTransClient)
+  find_library(HK_LIB_${HK_LIB_NAME}
+    NAMES ${HK_LIB_NAME}
+    PATHS "${HK_SDK_LIB_DIR_ABS}" "${HK_SDK_LIB_DIR_ABS}/HCNetSDKCom"
+    NO_DEFAULT_PATH REQUIRED)
+endforeach()
 
-# 辅助 SDK 库 (直接链接 .so 文件路径)
-set(HK_EXTRA_LIBS
-  "${HK_SDK_LIB_DIR_ABS}/libHCAlarm.so"
-  "${HK_SDK_LIB_DIR_ABS}/libHCGeneralCfgMgr.so"
-  "${HK_SDK_LIB_DIR_ABS}/libHCIndustry.so"
-  "${HK_SDK_LIB_DIR_ABS}/libHCPreview.so"
-  "${HK_SDK_LIB_DIR_ABS}/libPlayCtrl.so"
-  "${HK_SDK_LIB_DIR_ABS}/libAudioProcess.so"
-  "${HK_SDK_LIB_DIR_ABS}/libanalyzedata.so"
-  "${HK_SDK_LIB_DIR_ABS}/libStreamTransClient.so"
-)
+function(configure_hk_sdk_target target)
+  target_compile_definitions(${target} PRIVATE
+    HK_SDK_LIB_DIR="${HK_SDK_LIB_DIR_ABS}")
+endfunction()
 
 # 公共头文件路径
 set(COMMON_INCLUDE_DIRS
@@ -104,6 +105,7 @@ set(COMMON_INCLUDE_DIRS
 # ============================================================
 set(HK_CAMERA_SRCS
   src/hk_camera.cpp
+  src/hk_sdk_loader.cpp
 )
 
 set(HK_DECODER_SRCS
@@ -131,12 +133,12 @@ add_executable(hk_camera_node
   include/hk_camera/hk_camera_node.h
   include/hk_camera/hk_decoder.h         # 含 Q_OBJECT, 需要 MOC
 )
+configure_hk_sdk_target(hk_camera_node)
 target_include_directories(hk_camera_node PRIVATE ${COMMON_INCLUDE_DIRS})
 target_link_libraries(hk_camera_node
-  hcnetsdk
+  ${CMAKE_DL_LIBS}
   Qt5::Core
   Qt5::Gui
-  ${HK_EXTRA_LIBS}
 )
 ament_target_dependencies(hk_camera_node
   rclcpp
@@ -169,15 +171,15 @@ if(BUILD_HK_GUI)
     include/hk_camera/hk_decoder.h         # 含 Q_OBJECT, 需要 MOC
     src/main_window.h                      # 含 Q_OBJECT, 需要 MOC
   )
+  configure_hk_sdk_target(hk_camera_gui)
   target_include_directories(hk_camera_gui PRIVATE
     ${COMMON_INCLUDE_DIRS}
     ${CMAKE_CURRENT_SOURCE_DIR}/src   # for main_window.h
     ${CMAKE_CURRENT_BINARY_DIR}/rosidl_generator_cpp
   )
   target_link_libraries(hk_camera_gui
-    hcnetsdk
+    ${CMAKE_DL_LIBS}
     Qt5::Widgets
-    ${HK_EXTRA_LIBS}
     ${cpp_typesupport_target}
   )
   ament_target_dependencies(hk_camera_gui
@@ -216,6 +218,12 @@ install(DIRECTORY
   config/
   DESTINATION share/${PROJECT_NAME}/config
 )
+
+install(DIRECTORY launch/ DESTINATION share/${PROJECT_NAME}/launch)
+
+install(DIRECTORY "${HK_SDK_LIB_DIR_ABS}/"
+  DESTINATION lib/${PROJECT_NAME}/hk_sdk
+  FILES_MATCHING PATTERN "*.so" PATTERN "*.so.*")
 
 # ============================================================
 # Ament 导出

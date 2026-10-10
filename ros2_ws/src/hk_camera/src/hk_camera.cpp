@@ -1,4 +1,7 @@
 #include "hk_camera/hk_camera.h"
+#include "hk_sdk_loader.h"
+#include <QCoreApplication>
+#include <QDir>
 #include <cstring>
 
 namespace hk_camera
@@ -35,8 +38,28 @@ bool HKCamera::init()
 {
     if (initialized_) return true;
 
-    NET_DVR_Init();
-    NET_DVR_SetLogToFile(3, (char*)"./hk_log");
+    QString sdk_dir = QCoreApplication::applicationDirPath() + "/hk_sdk";
+    if (!QDir(sdk_dir).exists()) sdk_dir = QString::fromUtf8(HK_SDK_LIB_DIR);
+
+    NET_DVR_LOCAL_SDK_PATH sdk_path = {};
+    const QByteArray path = QDir(sdk_dir).absolutePath().toUtf8();
+    if (path.size() >= static_cast<int>(sizeof(sdk_path.sPath))) return false;
+    if (!sdk::load(path.constData())) return false;
+    std::strncpy(sdk_path.sPath, path.constData(), sizeof(sdk_path.sPath) - 1);
+    QByteArray crypto_path = path + "/libcrypto.so.3";
+    QByteArray ssl_path = path + "/libssl.so.3";
+    if (!HK_SDK_CALL(NET_DVR_SetSDKInitCfg)(NET_SDK_INIT_CFG_SDK_PATH, &sdk_path) ||
+        !HK_SDK_CALL(NET_DVR_SetSDKInitCfg)(NET_SDK_INIT_CFG_LIBEAY_PATH, crypto_path.data()) ||
+        !HK_SDK_CALL(NET_DVR_SetSDKInitCfg)(NET_SDK_INIT_CFG_SSLEAY_PATH, ssl_path.data()) ||
+        !HK_SDK_CALL(NET_DVR_Init)())
+    {
+        emit errorOccurred(HK_SDK_CALL(NET_DVR_GetLastError)(), "SDK initialization failed");
+        return false;
+    }
+    HK_SDK_CALL(NET_DVR_SetConnectTime)(4000, 1);
+    HK_SDK_CALL(NET_DVR_SetRecvTimeOut)(6000);
+    char log_path[] = "./hk_log";
+    HK_SDK_CALL(NET_DVR_SetLogToFile)(3, log_path, TRUE);
 
     initialized_ = true;
     return true;
@@ -46,7 +69,7 @@ bool HKCamera::cleanup()
 {
     if (!initialized_) return true;
 
-    NET_DVR_Cleanup();
+    HK_SDK_CALL(NET_DVR_Cleanup)();
     initialized_ = false;
     return true;
 }
@@ -57,7 +80,7 @@ bool HKCamera::cleanup()
 
 int HKCamera::login(const CameraLoginInfo& info)
 {
-    if (!initialized_) init();
+    if (!initialized_ && !init()) return -1;
 
     NET_DVR_USER_LOGIN_INFO login_info = {0};
     NET_DVR_DEVICEINFO_V40   dev_info = {0};
@@ -65,14 +88,14 @@ int HKCamera::login(const CameraLoginInfo& info)
     login_info.bUseAsynLogin = false;
     login_info.wPort         = info.port;
     strncpy(login_info.sDeviceAddress, info.ip.c_str(), NET_DVR_DEV_ADDRESS_MAX_LEN - 1);
-    strncpy(login_info.sUserName, info.username.c_str(), NAME_LEN - 1);
-    strncpy(login_info.sPassword, info.password.c_str(), NAME_LEN - 1);
+    strncpy(login_info.sUserName, info.username.c_str(), sizeof(login_info.sUserName) - 1);
+    strncpy(login_info.sPassword, info.password.c_str(), sizeof(login_info.sPassword) - 1);
 
-    int user_id = NET_DVR_Login_V40(&login_info, &dev_info);
+    int user_id = HK_SDK_CALL(NET_DVR_Login_V40)(&login_info, &dev_info);
 
     if (user_id < 0)
     {
-        int err = NET_DVR_GetLastError();
+        int err = HK_SDK_CALL(NET_DVR_GetLastError)();
         emit errorOccurred(err, QString("Login failed: %1").arg(err));
         return -1;
     }
@@ -83,7 +106,7 @@ int HKCamera::login(const CameraLoginInfo& info)
 bool HKCamera::logout(int user_id)
 {
     if (user_id < 0) return false;
-    return NET_DVR_Logout_V30(user_id);
+    return HK_SDK_CALL(NET_DVR_Logout_V30)(user_id);
 }
 
 bool HKCamera::isLoggedIn(int user_id) const
@@ -110,16 +133,16 @@ int HKCamera::startRealPlay(int user_id, int channel, bool blocked)
            user_id, channel, blocked ? 1 : 0);
     fflush(stdout);
 
-    int handle = NET_DVR_RealPlay_V40(user_id, &preview_info,
+    int handle = HK_SDK_CALL(NET_DVR_RealPlay_V40)(user_id, &preview_info,
         s_realDataCallback, this);
 
     printf("[HK] startRealPlay result: handle=%d, err=%d\n",
-           handle, NET_DVR_GetLastError());
+           handle, HK_SDK_CALL(NET_DVR_GetLastError)());
     fflush(stdout);
 
     if (handle < 0)
     {
-        int err = NET_DVR_GetLastError();
+        int err = HK_SDK_CALL(NET_DVR_GetLastError)();
         emit errorOccurred(err, QString("StartRealPlay failed: %1").arg(err));
     }
 
@@ -129,7 +152,7 @@ int HKCamera::startRealPlay(int user_id, int channel, bool blocked)
 bool HKCamera::stopRealPlay(int play_handle)
 {
     if (play_handle < 0) return false;
-    return NET_DVR_StopRealPlay(play_handle);
+    return HK_SDK_CALL(NET_DVR_StopRealPlay)(play_handle);
 }
 
 // ============================================================
@@ -143,7 +166,7 @@ bool HKCamera::captureJPEG(int user_id, int channel, int quality,
     jpeg_param.wPicQuality = static_cast<WORD>(quality);  // 0=best, 2=worst
     jpeg_param.wPicSize    = 0;   // 原始分辨率
 
-    return NET_DVR_CaptureJPEGPicture(user_id, channel,
+    return HK_SDK_CALL(NET_DVR_CaptureJPEGPicture)(user_id, channel,
         &jpeg_param, (char*)save_path.c_str());
 }
 
@@ -161,17 +184,17 @@ int HKCamera::findFiles(int user_id, int channel,
     cond.struStartTime          = start;
     cond.struStopTime           = end;
 
-    return NET_DVR_FindFile_V50(user_id, &cond);
+    return HK_SDK_CALL(NET_DVR_FindFile_V50)(user_id, &cond);
 }
 
 int HKCamera::findNextFile(int find_handle, NET_DVR_FINDDATA_V50& file_data)
 {
-    return NET_DVR_FindNextFile_V50(find_handle, &file_data);
+    return HK_SDK_CALL(NET_DVR_FindNextFile_V50)(find_handle, &file_data);
 }
 
 bool HKCamera::findClose(int find_handle)
 {
-    return NET_DVR_FindClose_V30(find_handle);
+    return HK_SDK_CALL(NET_DVR_FindClose_V30)(find_handle);
 }
 
 int HKCamera::playBackByTime(int user_id, int channel,
@@ -183,7 +206,7 @@ int HKCamera::playBackByTime(int user_id, int channel,
     vod_param.struIDInfo.dwChannel = channel;
     vod_param.hWnd              = 0;
 
-    return NET_DVR_PlayBackByTime_V40(user_id, &vod_param);
+    return HK_SDK_CALL(NET_DVR_PlayBackByTime_V40)(user_id, &vod_param);
 }
 
 // ============================================================
@@ -199,18 +222,18 @@ int HKCamera::setupAlarmChan(int user_id)
     alarm_param.byAlarmInfoType     = 1;
     alarm_param.bySupport           = 4;  // 按位: bit2=1
 
-    int handle = NET_DVR_SetupAlarmChan_V50(user_id, &alarm_param,
+    int handle = HK_SDK_CALL(NET_DVR_SetupAlarmChan_V50)(user_id, &alarm_param,
         nullptr, 0);
 
     if (handle < 0)
     {
-        int err = NET_DVR_GetLastError();
+        int err = HK_SDK_CALL(NET_DVR_GetLastError)();
         emit errorOccurred(err, QString("SetupAlarmChan failed: %1").arg(err));
         return -1;
     }
 
     // 注册报警回调
-    NET_DVR_SetDVRMessageCallBack_V51(0,
+    HK_SDK_CALL(NET_DVR_SetDVRMessageCallBack_V51)(0,
         s_alarmCallback, this);
 
     return handle;
@@ -219,12 +242,12 @@ int HKCamera::setupAlarmChan(int user_id)
 bool HKCamera::closeAlarmChan(int alarm_handle)
 {
     if (alarm_handle < 0) return false;
-    return NET_DVR_CloseAlarmChan_V30(alarm_handle);
+    return HK_SDK_CALL(NET_DVR_CloseAlarmChan_V30)(alarm_handle);
 }
 
 int HKCamera::startListenAlarm(const std::string& local_ip, uint16_t port)
 {
-    return NET_DVR_StartListen_V30(
+    return HK_SDK_CALL(NET_DVR_StartListen_V30)(
         const_cast<char*>(local_ip.c_str()), port,
         s_alarmCallback, this);
 }
@@ -235,12 +258,12 @@ int HKCamera::startListenAlarm(const std::string& local_ip, uint16_t port)
 
 int HKCamera::startVoiceCom(int user_id)
 {
-    int handle = NET_DVR_StartVoiceCom_MR_V30(user_id, 0,
+    int handle = HK_SDK_CALL(NET_DVR_StartVoiceCom_MR_V30)(user_id, 0,
         s_voiceDataCallback, this);
 
     if (handle < 0)
     {
-        int err = NET_DVR_GetLastError();
+        int err = HK_SDK_CALL(NET_DVR_GetLastError)();
         emit errorOccurred(err, QString("StartVoiceCom failed: %1").arg(err));
     }
 
@@ -250,7 +273,7 @@ int HKCamera::startVoiceCom(int user_id)
 bool HKCamera::stopVoiceCom(int voice_handle)
 {
     if (voice_handle < 0) return false;
-    return NET_DVR_StopVoiceCom(voice_handle);
+    return HK_SDK_CALL(NET_DVR_StopVoiceCom)(voice_handle);
 }
 
 // ============================================================
@@ -259,12 +282,12 @@ bool HKCamera::stopVoiceCom(int voice_handle)
 
 bool HKCamera::ptzControl(int user_id, int channel, DWORD command, DWORD stop)
 {
-    return NET_DVR_PTZControl_Other(user_id, channel, command, stop);
+    return HK_SDK_CALL(NET_DVR_PTZControl_Other)(user_id, channel, command, stop);
 }
 
 bool HKCamera::ptzPreset(int user_id, int channel, DWORD cmd, DWORD index)
 {
-    return NET_DVR_PTZPreset_Other(user_id, channel, cmd, index);
+    return HK_SDK_CALL(NET_DVR_PTZPreset_Other)(user_id, channel, cmd, index);
 }
 
 // ============================================================
@@ -273,18 +296,18 @@ bool HKCamera::ptzPreset(int user_id, int channel, DWORD cmd, DWORD index)
 
 bool HKCamera::ptzGotoPreset(int user_id, int channel, int preset_no)
 {
-    return NET_DVR_PTZPreset_Other(user_id, channel, GOTO_PRESET, preset_no);
+    return HK_SDK_CALL(NET_DVR_PTZPreset_Other)(user_id, channel, GOTO_PRESET, preset_no);
 }
 
 bool HKCamera::ptzSetPreset(int user_id, int channel, int preset_no)
 {
-    return NET_DVR_PTZPreset_Other(user_id, channel, SET_PRESET, preset_no);
+    return HK_SDK_CALL(NET_DVR_PTZPreset_Other)(user_id, channel, SET_PRESET, preset_no);
 }
 
 bool HKCamera::ptzControlWithSpeed(int user_id, int channel,
                                     DWORD command, DWORD speed, DWORD stop)
 {
-    return NET_DVR_PTZControlWithSpeed_Other(user_id, channel, command, stop, speed);
+    return HK_SDK_CALL(NET_DVR_PTZControlWithSpeed_Other)(user_id, channel, command, stop, speed);
 }
 
 // ============================================================
@@ -295,7 +318,7 @@ bool HKCamera::ptzCruiseAddPoint(int user_id, int channel,
                                   int route, int point_index, int preset_no)
 {
     // FILL_PRE_SEQ(30): 将预置点加入巡航路线
-    return NET_DVR_PTZCruise_Other(user_id, channel,
+    return HK_SDK_CALL(NET_DVR_PTZCruise_Other)(user_id, channel,
         FILL_PRE_SEQ, (BYTE)route, (BYTE)point_index, (WORD)preset_no);
 }
 
@@ -303,7 +326,7 @@ bool HKCamera::ptzCruiseSetDwell(int user_id, int channel,
                                    int route, int point_index, int dwell_sec)
 {
     // SET_SEQ_DWELL(31): 设置巡航点驻留时间
-    return NET_DVR_PTZCruise_Other(user_id, channel,
+    return HK_SDK_CALL(NET_DVR_PTZCruise_Other)(user_id, channel,
         SET_SEQ_DWELL, (BYTE)route, (BYTE)point_index, (WORD)dwell_sec);
 }
 
@@ -311,7 +334,7 @@ bool HKCamera::ptzCruiseSetSpeed(int user_id, int channel,
                                    int route, int point_index, int speed)
 {
     // SET_SEQ_SPEED(32): 设置巡航点转速
-    return NET_DVR_PTZCruise_Other(user_id, channel,
+    return HK_SDK_CALL(NET_DVR_PTZCruise_Other)(user_id, channel,
         SET_SEQ_SPEED, (BYTE)route, (BYTE)point_index, (WORD)speed);
 }
 
@@ -319,28 +342,28 @@ bool HKCamera::ptzCruiseClearPoint(int user_id, int channel,
                                      int route, int point_index)
 {
     // CLE_PRE_SEQ(33): 从巡航路线中删除某个预置点
-    return NET_DVR_PTZCruise_Other(user_id, channel,
+    return HK_SDK_CALL(NET_DVR_PTZCruise_Other)(user_id, channel,
         CLE_PRE_SEQ, (BYTE)route, (BYTE)point_index, 0);
 }
 
 bool HKCamera::ptzCruiseDeleteRoute(int user_id, int channel, int route)
 {
     // DEL_SEQ(43): 删除整条巡航路线
-    return NET_DVR_PTZCruise_Other(user_id, channel,
+    return HK_SDK_CALL(NET_DVR_PTZCruise_Other)(user_id, channel,
         DEL_SEQ, (BYTE)route, 0, 0);
 }
 
 bool HKCamera::ptzCruiseStart(int user_id, int channel, int route)
 {
     // RUN_SEQ(37): 启动巡航
-    return NET_DVR_PTZCruise_Other(user_id, channel,
+    return HK_SDK_CALL(NET_DVR_PTZCruise_Other)(user_id, channel,
         RUN_SEQ, (BYTE)route, 0, 0);
 }
 
 bool HKCamera::ptzCruiseStop(int user_id, int channel, int route)
 {
     // STOP_SEQ(38): 停止巡航
-    return NET_DVR_PTZCruise_Other(user_id, channel,
+    return HK_SDK_CALL(NET_DVR_PTZCruise_Other)(user_id, channel,
         STOP_SEQ, (BYTE)route, 0, 0);
 }
 
@@ -349,7 +372,7 @@ bool HKCamera::ptzCruiseQuery(int user_id, int channel, int route,
                                std::vector<int>& speeds)
 {
     NET_DVR_CRUISE_RET cruise_ret = {0};
-    if (!NET_DVR_GetPTZCruise(user_id, channel, route, &cruise_ret))
+    if (!HK_SDK_CALL(NET_DVR_GetPTZCruise)(user_id, channel, route, &cruise_ret))
         return false;
 
     presets.clear();
@@ -371,17 +394,17 @@ bool HKCamera::ptzCruiseSetRoute(int user_id, int channel, int route,
                                   const std::vector<int>& presets, int dwell_sec, int speed)
 {
     // 先删除旧路线 (忽略失败, 可能路线本来就不存在)
-    NET_DVR_PTZCruise_Other(user_id, channel, DEL_SEQ, (BYTE)route, 0, 0);
+    HK_SDK_CALL(NET_DVR_PTZCruise_Other)(user_id, channel, DEL_SEQ, (BYTE)route, 0, 0);
 
     // 逐个添加预置点
     bool all_ok = true;
     for (int i = 0; i < static_cast<int>(presets.size()); i++)
     {
-        if (!NET_DVR_PTZCruise_Other(user_id, channel,
+        if (!HK_SDK_CALL(NET_DVR_PTZCruise_Other)(user_id, channel,
                 FILL_PRE_SEQ, (BYTE)route, (BYTE)i, (WORD)presets[i]))
         {
             printf("[Cruise] FILL_PRE_SEQ failed: route=%d, idx=%d, preset=%d, err=%d\n",
-                   route, i, presets[i], NET_DVR_GetLastError());
+                   route, i, presets[i], HK_SDK_CALL(NET_DVR_GetLastError)());
             all_ok = false;
         }
     }
@@ -397,17 +420,17 @@ bool HKCamera::ptzCruiseSetRoute(int user_id, int channel, int route,
     }
     cruise_para.byEnableThisCruise = 1;
 
-    if (!NET_DVR_SetDVRConfig(user_id, NET_DVR_SET_CRUISE, channel,
+    if (!HK_SDK_CALL(NET_DVR_SetDVRConfig)(user_id, NET_DVR_SET_CRUISE, channel,
                                &cruise_para, sizeof(NET_DVR_CRUISE_PARA)))
     {
         printf("[Cruise] NET_DVR_SET_CRUISE failed: route=%d, err=%d\n",
-               route, NET_DVR_GetLastError());
+               route, HK_SDK_CALL(NET_DVR_GetLastError)());
         // 配置 API 失败时, 回退用 SET_SEQ_DWELL 逐个设置
         for (int i = 0; i < static_cast<int>(presets.size()); i++)
         {
-            NET_DVR_PTZCruise_Other(user_id, channel,
+            HK_SDK_CALL(NET_DVR_PTZCruise_Other)(user_id, channel,
                 SET_SEQ_DWELL, (BYTE)route, (BYTE)i, (WORD)dwell_sec);
-            NET_DVR_PTZCruise_Other(user_id, channel,
+            HK_SDK_CALL(NET_DVR_PTZCruise_Other)(user_id, channel,
                 SET_SEQ_SPEED, (BYTE)route, (BYTE)i, (WORD)speed);
         }
     }
@@ -418,7 +441,7 @@ bool HKCamera::ptzCruiseSetRoute(int user_id, int channel, int route,
 bool HKCamera::ptzClearAllPresets(int user_id, int channel)
 {
     // CLE_ALL_PRESET(53): 清除所有预置点
-    return NET_DVR_PTZPreset_Other(user_id, channel, CLE_ALL_PRESET, 0);
+    return HK_SDK_CALL(NET_DVR_PTZPreset_Other)(user_id, channel, CLE_ALL_PRESET, 0);
 }
 
 // ============================================================
@@ -429,13 +452,13 @@ bool HKCamera::getFocusMode(int user_id, int channel, NET_DVR_FOCUSMODE_CFG& cfg
 {
     cfg.dwSize = sizeof(NET_DVR_FOCUSMODE_CFG);
     DWORD ret_len = 0;
-    return NET_DVR_GetDVRConfig(user_id, NET_DVR_GET_FOCUSMODECFG, channel,
+    return HK_SDK_CALL(NET_DVR_GetDVRConfig)(user_id, NET_DVR_GET_FOCUSMODECFG, channel,
                                 &cfg, sizeof(NET_DVR_FOCUSMODE_CFG), &ret_len);
 }
 
 bool HKCamera::setFocusMode(int user_id, int channel, const NET_DVR_FOCUSMODE_CFG& cfg)
 {
-    return NET_DVR_SetDVRConfig(user_id, NET_DVR_SET_FOCUSMODECFG, channel,
+    return HK_SDK_CALL(NET_DVR_SetDVRConfig)(user_id, NET_DVR_SET_FOCUSMODECFG, channel,
                                 const_cast<NET_DVR_FOCUSMODE_CFG*>(&cfg),
                                 sizeof(NET_DVR_FOCUSMODE_CFG));
 }
@@ -446,7 +469,7 @@ bool HKCamera::setAutoFocusMode(int user_id, int channel, BYTE autoFocusMode)
     NET_DVR_FOCUSMODE_CFG cfg = {0};
     cfg.dwSize = sizeof(NET_DVR_FOCUSMODE_CFG);
     DWORD ret_len = 0;
-    if (!NET_DVR_GetDVRConfig(user_id, NET_DVR_GET_FOCUSMODECFG, channel,
+    if (!HK_SDK_CALL(NET_DVR_GetDVRConfig)(user_id, NET_DVR_GET_FOCUSMODECFG, channel,
                               &cfg, sizeof(NET_DVR_FOCUSMODE_CFG), &ret_len))
     {
         // 读取失败时, 构造默认配置
@@ -456,7 +479,7 @@ bool HKCamera::setAutoFocusMode(int user_id, int channel, BYTE autoFocusMode)
 
     cfg.byFocusMode     = 0;  // 自动
     cfg.byAutoFocusMode = autoFocusMode;  // 0=关闭, 1=A, 2=B, 3=AB, 4=C
-    return NET_DVR_SetDVRConfig(user_id, NET_DVR_SET_FOCUSMODECFG, channel,
+    return HK_SDK_CALL(NET_DVR_SetDVRConfig)(user_id, NET_DVR_SET_FOCUSMODECFG, channel,
                                 &cfg, sizeof(NET_DVR_FOCUSMODE_CFG));
 }
 
@@ -466,7 +489,7 @@ bool HKCamera::setManualFocus(int user_id, int channel, DWORD focusPos)
     NET_DVR_FOCUSMODE_CFG cfg = {0};
     cfg.dwSize = sizeof(NET_DVR_FOCUSMODE_CFG);
     DWORD ret_len = 0;
-    if (!NET_DVR_GetDVRConfig(user_id, NET_DVR_GET_FOCUSMODECFG, channel,
+    if (!HK_SDK_CALL(NET_DVR_GetDVRConfig)(user_id, NET_DVR_GET_FOCUSMODECFG, channel,
                               &cfg, sizeof(NET_DVR_FOCUSMODE_CFG), &ret_len))
     {
         memset(&cfg, 0, sizeof(cfg));
@@ -475,7 +498,7 @@ bool HKCamera::setManualFocus(int user_id, int channel, DWORD focusPos)
 
     cfg.byFocusMode = 1;       // 手动
     cfg.dwFocusPos  = focusPos; // [0x1000, 0xC000]
-    return NET_DVR_SetDVRConfig(user_id, NET_DVR_SET_FOCUSMODECFG, channel,
+    return HK_SDK_CALL(NET_DVR_SetDVRConfig)(user_id, NET_DVR_SET_FOCUSMODECFG, channel,
                                 &cfg, sizeof(NET_DVR_FOCUSMODE_CFG));
 }
 
@@ -487,7 +510,7 @@ template<typename T>
 bool HKCamera::getDVRConfig(int user_id, DWORD command, int channel,
                              T* params, DWORD* ret_len)
 {
-    return NET_DVR_GetDVRConfig(user_id, command, channel,
+    return HK_SDK_CALL(NET_DVR_GetDVRConfig)(user_id, command, channel,
         params, sizeof(T), ret_len);
 }
 
@@ -495,7 +518,7 @@ template<typename T>
 bool HKCamera::setDVRConfig(int user_id, DWORD command, int channel,
                              const T* params)
 {
-    return NET_DVR_SetDVRConfig(user_id, command, channel,
+    return HK_SDK_CALL(NET_DVR_SetDVRConfig)(user_id, command, channel,
         const_cast<T*>(params), sizeof(T));
 }
 
@@ -518,7 +541,7 @@ SdkAbility HKCamera::getSDKAbility()
     SdkAbility ability = {0};
     NET_DVR_SDKABL sdk_abl = {0};
 
-    if (NET_DVR_GetSDKAbility(&sdk_abl))
+    if (HK_SDK_CALL(NET_DVR_GetSDKAbility)(&sdk_abl))
     {
         ability.max_real_play_count = sdk_abl.dwMaxRealPlayNum;
     }
@@ -528,7 +551,7 @@ SdkAbility HKCamera::getSDKAbility()
 
 std::string HKCamera::getSDKVersion()
 {
-    unsigned int ver = NET_DVR_GetSDKBuildVersion();
+    unsigned int ver = HK_SDK_CALL(NET_DVR_GetSDKBuildVersion)();
     char buf[64];
     snprintf(buf, sizeof(buf), "V%d.%d.%d.%d",
         (0xff000000 & ver) >> 24,
@@ -540,7 +563,7 @@ std::string HKCamera::getSDKVersion()
 
 int HKCamera::getLastError()
 {
-    return NET_DVR_GetLastError();
+    return sdk::isLoaded() ? HK_SDK_CALL(NET_DVR_GetLastError)() : -1;
 }
 
 // ============================================================

@@ -17,7 +17,7 @@ namespace hk_camera
  * @brief 基于 OpenCV RTSP 的视频解码器
  *
  * 不依赖 PlayM4/libPlayCtrl — 直接用 OpenCV 的 FFmpeg 后端从 RTSP 取流解码。
- * 在独立 std::thread 中循环读取, 通过 Qt 信号投递到主线程。
+ * 在独立 std::thread 中循环读取, 通过 Qt 信号显示或发布视频帧。
  *
  * 用法:
  *   decoder = new HKDecoder;
@@ -43,9 +43,7 @@ signals:
 
 private:
     void captureLoop();
-    void captureLoopHW();     // GStreamer 硬解码路径
     static std::string buildRtspUrl(const CameraLoginInfo& info, int channel);
-    static std::string buildGstPipeline(const std::string& url);
 
     std::atomic<bool>    running_{false};
     std::thread           thread_;

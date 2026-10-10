@@ -1,6 +1,7 @@
 #include "hk_camera/hk_camera_node.h"
 #include <cv_bridge/cv_bridge.h>
 #include <opencv2/opencv.hpp>
+#include <stdexcept>
 
 namespace hk_camera
 {
@@ -9,6 +10,8 @@ HKCameraNode::HKCameraNode(const std::string& name)
     : Node(name)
 {
     camera_  = HKCamera::instance();
+    // The GUI creates this node without the headless entry point's SDK setup.
+    if (!camera_->init()) throw std::runtime_error("HK SDK initialization failed");
     decoder_ = new HKDecoder();  // HKCameraNode 不是 QObject, 不传 parent
 
     loadParameters();
@@ -19,6 +22,18 @@ HKCameraNode::HKCameraNode(const std::string& name)
 
     RCLCPP_INFO(get_logger(), "HKCameraNode initialized (SDK %s)",
                 camera_->getSDKVersion().c_str());
+
+    if (get_parameter("auto_login").as_bool())
+    {
+        auto response = std::make_shared<std_srvs::srv::Trigger::Response>();
+        onLogin(nullptr, response);
+        if (response->success && get_parameter("auto_stream").as_bool())
+        {
+            onStartStream(nullptr, response);
+            if (!response->success)
+                RCLCPP_ERROR(get_logger(), "%s", response->message.c_str());
+        }
+    }
 }
 
 HKCameraNode::~HKCameraNode()
@@ -39,8 +54,10 @@ void HKCameraNode::loadParameters()
     declare_parameter("ip",       "192.168.1.64");
     declare_parameter("port",     8000);
     declare_parameter("username", "admin");
-    declare_parameter("password", "a1234567");
+    declare_parameter("password", "zmdl@603");
     declare_parameter("channel",  1);
+    declare_parameter("auto_login", false);
+    declare_parameter("auto_stream", true);
 
     login_info_.ip       = get_parameter("ip").as_string();
     login_info_.port     = static_cast<uint16_t>(get_parameter("port").as_int());
@@ -209,7 +226,12 @@ void HKCameraNode::onLogin(
     const std_srvs::srv::Trigger::Request::SharedPtr,
     std_srvs::srv::Trigger::Response::SharedPtr res)
 {
-    camera_->init();
+    if (user_id_ >= 0)
+    {
+        res->success = true;
+        res->message = "Already logged in, user_id=" + std::to_string(user_id_);
+        return;
+    }
     user_id_ = camera_->login(login_info_);
 
     if (user_id_ >= 0)

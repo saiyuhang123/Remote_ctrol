@@ -11,8 +11,9 @@
 
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, LogInfo
-from launch.substitutions import LaunchConfiguration, TextSubstitution
+from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
+from launch_ros.parameter_descriptions import ParameterValue
 
 
 def generate_launch_description():
@@ -30,7 +31,7 @@ def generate_launch_description():
         description='设备用户名'
     )
     password_arg = DeclareLaunchArgument(
-        'password', default_value='a1234567',
+        'password', default_value='zmdl@603',
         description='设备密码'
     )
     channel_arg = DeclareLaunchArgument(
@@ -39,7 +40,11 @@ def generate_launch_description():
     )
     auto_login_arg = DeclareLaunchArgument(
         'auto_login', default_value='true',
-        description='启动时自动登录并取流'
+        description='启动时自动登录'
+    )
+    auto_stream_arg = DeclareLaunchArgument(
+        'auto_stream', default_value='true',
+        description='自动登录成功后开始取流'
     )
     enable_gui_arg = DeclareLaunchArgument(
         'enable_gui', default_value='false',
@@ -54,10 +59,12 @@ def generate_launch_description():
         output='screen',
         parameters=[{
             'ip': LaunchConfiguration('ip'),
-            'port': LaunchConfiguration('port'),
+            'port': ParameterValue(LaunchConfiguration('port'), value_type=int),
             'username': LaunchConfiguration('username'),
             'password': LaunchConfiguration('password'),
-            'channel': LaunchConfiguration('channel'),
+            'channel': ParameterValue(LaunchConfiguration('channel'), value_type=int),
+            'auto_login': ParameterValue(LaunchConfiguration('auto_login'), value_type=bool),
+            'auto_stream': ParameterValue(LaunchConfiguration('auto_stream'), value_type=bool),
         }],
     )
 
@@ -68,6 +75,7 @@ def generate_launch_description():
         password_arg,
         channel_arg,
         auto_login_arg,
+        auto_stream_arg,
         enable_gui_arg,
         LogInfo(msg=['Starting HKCamera node...']),
         hk_node,
