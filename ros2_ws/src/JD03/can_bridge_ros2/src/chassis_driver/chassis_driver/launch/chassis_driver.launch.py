@@ -20,7 +20,7 @@ def generate_launch_description():
                 {'debug_can_id': 1},
 
                 # EthCan_UDP
-                {'can_eth_card': 'enp1s0'},
+                {'can_eth_card': 'eno1'},
                 {'can1_remote_ip': '192.168.1.10'},
                 {'can1_remote_port': 4001},
                 {'can2_remote_ip': '192.168.1.10'},
