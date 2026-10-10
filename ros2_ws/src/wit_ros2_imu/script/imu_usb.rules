@@ -1,2 +1,4 @@
-KERNEL=="ttyUSB*", ATTRS{idVendor}=="1a86", ATTRS{idProduct}=="7523", MODE:="0777", SYMLINK+="imu_usb"
+# CH340 IMU: stable serial alias, independent of ttyUSB numbering.
+# Give the robot user access after reconnects, including existing login sessions.
+SUBSYSTEM=="tty", ATTRS{idVendor}=="1a86", ATTRS{idProduct}=="7523", OWNER="jkbot", GROUP="dialout", MODE="0660", TAG+="uaccess", SYMLINK+="imu_usb"
 

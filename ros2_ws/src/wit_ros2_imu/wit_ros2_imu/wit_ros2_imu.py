@@ -7,6 +7,7 @@ import threading
 import time
 from enum import Enum
 from rclpy.node import Node
+from rclpy.executors import ExternalShutdownException
 from sensor_msgs.msg import Imu
 from imu_msg.msg import ImuData
 
@@ -32,6 +33,7 @@ class imuDriverNode(Node):
         self.publish_rate = float(self.declare_parameter("publish_rate", 100.).value)
         self.print_debug = self.declare_parameter("print_debug", False).value
         self.frame_id = self.declare_parameter("frame_id", "imu_link").value
+        self.rs485_batch_read = self.declare_parameter("rs485_batch_read", True).value
         self._last_acc_update = self._last_gyro_update = self._last_angle_update = 0.
         self._last_published_gyro = 0.
         self._gyro_stamp = None
@@ -105,7 +107,8 @@ class imuDriverNode(Node):
             if self.readerRunning:
                 self.get_logger().error("Serial error in reader thread")
         except Exception as e:
-            self.get_logger().error(f"Reader thread error: {e}")
+            if self.readerRunning:
+                self.get_logger().error(f"Reader thread error: {e}")
 
     def _readTTLCAN(self):
         """TTL/CAN 模式：阻塞读取连续数据流"""
@@ -123,22 +126,27 @@ class imuDriverNode(Node):
             self.parseBuffer()
 
     def _readRS485(self):
-        """RS485 模式：发送 Modbus 命令 → 阻塞读取响应 → 下一个地址"""
+        """合并读取连续寄存器，减少 RS485 响应等待；不支持时退回分组读取。"""
+        batch_read = self.rs485_batch_read
+        batch_failures = 0
         while self.readerRunning:
             # --- 发送 Modbus 命令 ---
-            addr = self.modbusAddrList[self.modbusIndex]
+            addr = 0x34 if batch_read else self.modbusAddrList[self.modbusIndex]
             self.currentRequestAddr = addr
 
-            if self.protocol == protocolType.RS485_HIGH and addr == 0x3D:
-                cmd = self.buildModbusReadCmd(addr, 6)
+            if batch_read:
+                register_count = 15 if self.protocol == protocolType.RS485_HIGH else 12
+            elif self.protocol == protocolType.RS485_HIGH and addr == 0x3D:
+                register_count = 6
             else:
-                cmd = self.buildModbusReadCmd(addr, 3)
+                register_count = 3
 
-            self.serialPort.write(cmd)
+            self.serialPort.write(self.buildModbusReadCmd(addr, register_count))
 
             # --- 临时设置超时，等待响应 ---
             self.serialPort.timeout = 0.05  # 50ms
 
+            valid_response = False
             try:
                 # 读取响应头（ID + 功能码 + 字节数）
                 header = self.serialPort.read(3)
@@ -154,6 +162,10 @@ class imuDriverNode(Node):
                     continue
 
                 byteCount = header[2]
+                if byteCount != register_count * 2:
+                    self.serialPort.reset_input_buffer()
+                    self.modbusIndex = (self.modbusIndex + 1) % len(self.modbusAddrList)
+                    continue
                 remaining = byteCount + 2  # 数据 + CRC
 
                 # 读取数据和 CRC
@@ -172,6 +184,7 @@ class imuDriverNode(Node):
 
                 if recvCRC == calcCRC:
                     self.handleModbusFrame(frame)
+                    valid_response = True
                 # CRC 错误：忽略，进入下一个地址
                 else:
                     self.modbusIndex = (self.modbusIndex + 1) % len(self.modbusAddrList)
@@ -179,6 +192,14 @@ class imuDriverNode(Node):
             finally:
                 # 恢复阻塞模式
                 self.serialPort.timeout = None
+                if batch_read:
+                    batch_failures = 0 if valid_response else batch_failures + 1
+                    if batch_failures >= 3:
+                        batch_read = False
+                        self.modbusIndex = 0
+                        self.serialPort.reset_input_buffer()
+                        self.get_logger().warning(
+                            "RS485 batch read failed; falling back to grouped reads")
 
     # ==========================================================
     # buffer解析 (仅 TTL/CAN 使用)
@@ -337,6 +358,25 @@ class imuDriverNode(Node):
 
         addr = self.currentRequestAddr
 
+        # 一次读取 0x34 起的全部测量值，同时更新加速度和角速度。
+        expected_batch_bytes = 30 if self.protocol == protocolType.RS485_HIGH else 24
+        if addr == 0x34 and len(data) == expected_batch_bytes:
+            acc = np.array(struct.unpack(">hhh", data[0:6]))
+            gyro = np.array(struct.unpack(">hhh", data[6:12]))
+            mag = np.array(struct.unpack(">hhh", data[12:18]))
+            if self.protocol == protocolType.RS485_HIGH:
+                angle = self._decodeHighAngles(data[18:30])
+            else:
+                angle = np.array(struct.unpack(">hhh", data[18:24]))
+            with self.dataLock:
+                self.accData, self.gyroData = acc, gyro
+                self.magData, self.angleData = mag, angle
+                received = time.monotonic()
+                self._last_acc_update = self._last_gyro_update = received
+                self._last_angle_update = received
+                self._gyro_stamp = self.get_clock().now().to_msg()
+            return
+
         if self.protocol == protocolType.RS485_STD:
             if len(data) != 6:
                 self.modbusIndex = (self.modbusIndex + 1) % len(self.modbusAddrList)
@@ -363,23 +403,8 @@ class imuDriverNode(Node):
                     self.modbusIndex = (self.modbusIndex + 1) % len(self.modbusAddrList)
                     return
 
-                def parse32(offset):
-                    raw = (
-                        (data[offset+2] << 24) |
-                        (data[offset+3] << 16) |
-                        (data[offset+0] << 8)  |
-                        data[offset+1]
-                    )
-                    if raw & 0x80000000:
-                        raw -= 0x100000000
-                    return raw
-
-                angleX = parse32(0)
-                angleY = parse32(4)
-                angleZ = parse32(8)
-
                 with self.dataLock:
-                    self.angleData = np.array([angleX, angleY, angleZ])
+                    self.angleData = self._decodeHighAngles(data)
                     self._last_angle_update = time.monotonic()
             else:
                 if len(data) != 6:
@@ -483,6 +508,14 @@ class imuDriverNode(Node):
     # ==========================================================
     # 工具函数
     # ==========================================================
+    @staticmethod
+    def _decodeHighAngles(data):
+        # 每轴为低 16 位寄存器在前，每个寄存器内部为大端序。
+        words = struct.unpack(">6H", data)
+        values = [(words[i+1] << 16) | words[i] for i in (0, 2, 4)]
+        return np.array([value - 0x100000000 if value & 0x80000000 else value
+                         for value in values])
+
     def buildModbusReadCmd(self, addr, length):
         frame = bytearray()
         frame.append(self.modbusID)
@@ -542,10 +575,12 @@ class imuDriverNode(Node):
         self.readerRunning = False
         if self.serialPort and self.serialPort.is_open:
             self.serialPort.close()           # 关闭串口使阻塞的 read() 抛出异常，退出线程
-            self.get_logger().info("Serial port closed")
+            if rclpy.ok():
+                self.get_logger().info("Serial port closed")
         if hasattr(self, 'readerThread') and self.readerThread.is_alive():
             self.readerThread.join(timeout=1.0)
-            self.get_logger().info("Reader thread joined")
+            if rclpy.ok():
+                self.get_logger().info("Reader thread joined")
 
 def main():
 
@@ -554,13 +589,12 @@ def main():
 
     try:
         rclpy.spin(node)
-    except KeyboardInterrupt:
+    except (KeyboardInterrupt, ExternalShutdownException):
         pass
     finally:
         node.shutdown()      # 关闭串口、停止线程
-        rclpy.spin_once(node, timeout_sec=0.1)  # 确保回调退出
         node.destroy_node()
-        rclpy.shutdown()
+        rclpy.try_shutdown()
 
 if __name__ == "__main__":
     main()

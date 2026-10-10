@@ -12,8 +12,8 @@ sensor_calibration:
   time_offset_lidar_to_imu: 0.0  # 尚未测量，需实测确认时间偏差
 
 imu:
-  port: /dev/ttyCH341USB0       # 沿用旧启动记录；在本机核对，优先使用 /dev/serial/by-id/
-  baudrate: 921600
+  port: /dev/imu_usb           # CH340 固定别名，由 wit_ros2_imu/script/imu_usb.rules 创建
+  baudrate: 230400
   protocol: RS485_HIGH
   modbusID: 80
   publish_rate: 100.0
