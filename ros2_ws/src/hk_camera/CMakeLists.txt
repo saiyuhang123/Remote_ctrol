@@ -34,12 +34,13 @@ find_package(ocr_interfaces REQUIRED)
 # 自定义消息/服务
 rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/CameraAlarm.msg"
+  "msg/FaceCapture.msg"
   "msg/MissionWaypoint.msg"
   "msg/MissionStatus.msg"
   "srv/CapturePicture.srv"
   "srv/SetPTZPose.srv"
   "srv/RunMission.srv"
-  DEPENDENCIES builtin_interfaces sensor_msgs geometry_msgs
+  DEPENDENCIES builtin_interfaces sensor_msgs geometry_msgs std_msgs
   ADD_LINTER_TESTS
 )
 
@@ -106,6 +107,7 @@ set(COMMON_INCLUDE_DIRS
 set(HK_CAMERA_SRCS
   src/hk_camera.cpp
   src/hk_sdk_loader.cpp
+  src/face_capture.cpp
 )
 
 set(HK_DECODER_SRCS
@@ -229,4 +231,10 @@ install(DIRECTORY "${HK_SDK_LIB_DIR_ABS}/"
 # Ament 导出
 # ============================================================
 ament_export_dependencies(rosidl_default_runtime)
+if(BUILD_TESTING)
+  find_package(ament_cmake_gtest REQUIRED)
+  ament_add_gtest(test_face_capture test/test_face_capture.cpp src/face_capture.cpp)
+  target_include_directories(test_face_capture PRIVATE ${COMMON_INCLUDE_DIRS} ${OpenCV_INCLUDE_DIRS})
+  target_link_libraries(test_face_capture ${OpenCV_LIBS})
+endif()
 ament_package()

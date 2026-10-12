@@ -3,6 +3,8 @@
 #include <QCoreApplication>
 #include <QDir>
 #include <cstring>
+#include <chrono>
+#include <QXmlStreamReader>
 
 namespace hk_camera
 {
@@ -23,6 +25,7 @@ HKCamera::HKCamera(QObject* parent)
     // 注册跨线程信号参数类型 (必须在 connect 之前调用)
     qRegisterMetaType<hk_camera::VideoFrame>("hk_camera::VideoFrame");
     qRegisterMetaType<hk_camera::AlarmEvent>("hk_camera::AlarmEvent");
+    qRegisterMetaType<hk_camera::FaceCaptureEvent>("hk_camera::FaceCaptureEvent");
 }
 
 HKCamera::~HKCamera()
@@ -215,12 +218,18 @@ int HKCamera::playBackByTime(int user_id, int channel,
 
 int HKCamera::setupAlarmChan(int user_id)
 {
+    // Register first: devices may send an event before SetupAlarmChan returns.
+    if (!HK_SDK_CALL(NET_DVR_SetDVRMessageCallBack_V51)(0, s_alarmCallback, this))
+    {
+        emit errorOccurred(getLastError(), "Alarm callback registration failed");
+        return -1;
+    }
     NET_DVR_SETUPALARM_PARAM_V50 alarm_param = {0};
     alarm_param.dwSize              = sizeof(alarm_param);
-    alarm_param.byRetAlarmTypeV40   = TRUE;
+    alarm_param.byRetAlarmTypeV40   = FALSE; // Existing normal alarm parser uses V30.
     alarm_param.byRetDevInfoVersion = TRUE;
     alarm_param.byAlarmInfoType     = 1;
-    alarm_param.bySupport           = 4;  // 按位: bit2=1
+    alarm_param.byAlarmTypeURL      = 0; // Request native binary JPEG buffers.
 
     int handle = HK_SDK_CALL(NET_DVR_SetupAlarmChan_V50)(user_id, &alarm_param,
         nullptr, 0);
@@ -232,11 +241,49 @@ int HKCamera::setupAlarmChan(int user_id)
         return -1;
     }
 
-    // 注册报警回调
-    HK_SDK_CALL(NET_DVR_SetDVRMessageCallBack_V51)(0,
-        s_alarmCallback, this);
-
     return handle;
+}
+
+std::vector<uint8_t> HKCamera::findFaceBackground(int user_id, uint32_t face_id)
+{
+    // Retrieve the same event by ID; never draw an old rectangle on a new RTSP frame.
+    std::vector<uint8_t> jpeg(16 * 1024 * 1024);
+    DWORD size = static_cast<DWORD>(jpeg.size());
+    if (!HK_SDK_CALL(NET_DVR_FindBackgroundPic)(user_id, face_id, jpeg.data(), &size) ||
+        size == 0 || size > jpeg.size()) return {};
+    jpeg.resize(size);
+    return jpeg;
+}
+
+std::array<uint32_t, 2> HKCamera::videoSize(int user_id, int channel)
+{
+    std::string request = "GET /ISAPI/Streaming/channels/" + std::to_string(channel * 100 + 1);
+    std::vector<char> buffer(64 * 1024);
+    NET_DVR_XML_CONFIG_INPUT input{};
+    input.dwSize = sizeof(input);
+    input.lpRequestUrl = request.data();
+    input.dwRequestUrlLen = request.size();
+    input.dwRecvTimeOut = 3000;
+    NET_DVR_XML_CONFIG_OUTPUT output{};
+    output.dwSize = sizeof(output);
+    output.lpOutBuffer = buffer.data();
+    output.dwOutBufferSize = buffer.size();
+    if (!HK_SDK_CALL(NET_DVR_STDXMLConfig)(user_id, &input, &output) ||
+        output.dwReturnedXMLSize > buffer.size()) return {};
+    auto size = output.dwReturnedXMLSize;
+    while (size && buffer[size - 1] == '\0') --size;
+    QXmlStreamReader xml(QByteArray(buffer.data(), size));
+    std::array<uint32_t, 2> dimensions{};
+    while (!xml.atEnd())
+    {
+        xml.readNext();
+        if (!xml.isStartElement()) continue;
+        if (xml.name() == "videoResolutionWidth") dimensions[0] = xml.readElementText().toUInt();
+        else if (xml.name() == "videoResolutionHeight") dimensions[1] = xml.readElementText().toUInt();
+    }
+    if (xml.hasError() || !dimensions[0] || !dimensions[1] ||
+        dimensions[0] > 32768 || dimensions[1] > 32768) return {};
+    return dimensions;
 }
 
 bool HKCamera::closeAlarmChan(int alarm_handle)
@@ -603,16 +650,40 @@ void CALLBACK HKCamera::s_alarmCallback(LONG command, NET_DVR_ALARMER* alarmer,
     auto* self = static_cast<HKCamera*>(user);
     if (!self) return;
 
+    if (command == COMM_UPLOAD_FACESNAP_RESULT)
+    {
+        try
+        {
+            FaceCaptureEvent face;
+            std::string error;
+            if (!copyFaceCapture(alarm_info, len, face, error))
+            {
+                emit self->errorOccurred(-1, QString::fromStdString(error));
+                return;
+            }
+            if (alarmer && alarmer->byUserIDValid) face.user_id = alarmer->lUserID;
+            face.received_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                std::chrono::system_clock::now().time_since_epoch()).count();
+            emit self->faceCaptured(face);
+        }
+        catch (const std::exception& error)
+        {
+            emit self->errorOccurred(-1, QString::fromUtf8(error.what()));
+        }
+        return;
+    }
+
     AlarmEvent event;
+    if (alarmer && alarmer->byUserIDValid) event.user_id = alarmer->lUserID;
     event.command   = command;
     event.timestamp  = QDateTime::currentMSecsSinceEpoch();
 
-    if (command == COMM_ALARM_V30 && alarm_info && len > 0)
+    if (command == COMM_ALARM_V30 && alarm_info && len >= sizeof(NET_DVR_ALARMINFO_V30))
     {
         NET_DVR_ALARMINFO_V30 alarm;
         memcpy(&alarm, alarm_info, sizeof(NET_DVR_ALARMINFO_V30));
         event.alarm_type = alarm.dwAlarmType;
-        memcpy(event.channels, alarm.byChannel, sizeof(event.channels));
+        for (size_t i = 0; i < 16; ++i) event.channels[i] = alarm.byChannel[i];
     }
 
     emit self->alarmReceived(event);

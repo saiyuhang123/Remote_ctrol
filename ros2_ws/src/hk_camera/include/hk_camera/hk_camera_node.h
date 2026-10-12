@@ -5,10 +5,14 @@
 #include <sensor_msgs/msg/image.hpp>
 #include <std_msgs/msg/string.hpp>
 #include <std_srvs/srv/trigger.hpp>
+#include <atomic>
+#include <deque>
+#include <mutex>
 
 #include "hk_camera/hk_camera.h"
 #include "hk_camera/hk_decoder.h"
 #include "hk_camera/msg/camera_alarm.hpp"
+#include "hk_camera/msg/face_capture.hpp"
 #include "hk_camera/srv/capture_picture.hpp"
 #include "hk_camera/srv/set_ptz_pose.hpp"
 
@@ -21,6 +25,8 @@ namespace hk_camera
  * Pub:
  *   - /hk_camera/image_raw    (sensor_msgs/Image)  视频帧
  *   - /hk_camera/alarm         (hk_camera/CameraAlarm) 报警事件
+ *   - /hk_camera/face_capture  (hk_camera/FaceCapture) 人脸坐标和图片路径
+ *   - /hk_camera/face_image    (sensor_msgs/Image) 带框场景图
  *   - /hk_camera/status        (std_msgs/String)    设备状态
  *
  * Sub:
@@ -41,6 +47,8 @@ namespace hk_camera
  *   - channel (int)      : 通道号, 默认 1
  *   - auto_login (bool)  : 启动时登录, 节点默认 false, launch 默认 true
  *   - auto_stream (bool) : 自动登录后取流, 默认 true
+ *   - enable_face_capture (bool): 登录后布防接收人脸抓拍, 默认 true
+ *   - face_capture_dir (string): 抓拍图片及坐标保存目录
  */
 class HKCameraNode : public rclcpp::Node
 {
@@ -59,6 +67,9 @@ private:
     void connectCameraSignals();
     void onDecodedImage(const QImage& image);
     void onAlarm(const AlarmEvent& alarm);
+    void onFaceCapture(const FaceCaptureEvent& event);
+    void processFaceCaptures();
+    bool startAlarmReception();
 
     // ---- Service callbacks ----
     void onCapturePicture(
@@ -91,15 +102,28 @@ private:
     HKCamera*              camera_  = nullptr;   // Qt 单例 (非拥有)
     HKDecoder*             decoder_ = nullptr;
     CameraLoginInfo        login_info_;
-    int                    user_id_     = -1;
+    std::atomic<int>       user_id_{-1};
     int                    alarm_handle_ = -1;
     int                    channel_     = 1;
+    bool                   enable_face_capture_ = true;
+    std::string            face_capture_dir_;
+    size_t                 face_queue_limit_ = 8;
+    std::atomic<bool>      accept_faces_{false};
+    std::mutex             face_mutex_;
+    std::deque<FaceCaptureEvent> face_queue_;
+    std::atomic<uint64_t>  face_dropped_{0};
+    uint64_t               face_sequence_ = 0;
+    std::array<uint32_t, 2> face_coordinate_size_{};
+    rclcpp::TimerBase::SharedPtr face_timer_;
+    std::vector<QMetaObject::Connection> camera_connections_;
 
     OnSetParametersCallbackHandle::SharedPtr param_cb_handle_;
 
     // ---- 发布器 ----
     rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr     image_pub_;
     rclcpp::Publisher<msg::CameraAlarm>::SharedPtr            alarm_pub_;
+    rclcpp::Publisher<msg::FaceCapture>::SharedPtr            face_pub_;
+    rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr      face_image_pub_;
     rclcpp::Publisher<std_msgs::msg::String>::SharedPtr       status_pub_;
 
     // ---- 订阅器 ----

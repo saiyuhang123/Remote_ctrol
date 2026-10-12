@@ -14,6 +14,7 @@ from launch.actions import DeclareLaunchArgument, LogInfo
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 from launch_ros.parameter_descriptions import ParameterValue
+from pathlib import Path
 
 
 def generate_launch_description():
@@ -46,6 +47,14 @@ def generate_launch_description():
         'auto_stream', default_value='true',
         description='自动登录成功后开始取流'
     )
+    enable_face_capture_arg = DeclareLaunchArgument(
+        'enable_face_capture', default_value='true',
+        description='登录后接收相机原生人脸抓拍报警并保存图片'
+    )
+    face_capture_dir_arg = DeclareLaunchArgument(
+        'face_capture_dir', default_value=str(Path.home() / 'Remote_ctrol/captures/hk_faces'),
+        description='人脸小图、背景图、带框图和坐标 JSON 的保存目录'
+    )
     enable_gui_arg = DeclareLaunchArgument(
         'enable_gui', default_value='false',
         description='是否启动 Qt GUI (需编译时启用 BUILD_HK_GUI)'
@@ -65,6 +74,8 @@ def generate_launch_description():
             'channel': ParameterValue(LaunchConfiguration('channel'), value_type=int),
             'auto_login': ParameterValue(LaunchConfiguration('auto_login'), value_type=bool),
             'auto_stream': ParameterValue(LaunchConfiguration('auto_stream'), value_type=bool),
+            'enable_face_capture': ParameterValue(LaunchConfiguration('enable_face_capture'), value_type=bool),
+            'face_capture_dir': LaunchConfiguration('face_capture_dir'),
         }],
     )
 
@@ -76,6 +87,8 @@ def generate_launch_description():
         channel_arg,
         auto_login_arg,
         auto_stream_arg,
+        enable_face_capture_arg,
+        face_capture_dir_arg,
         enable_gui_arg,
         LogInfo(msg=['Starting HKCamera node...']),
         hk_node,

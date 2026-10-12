@@ -2,6 +2,7 @@
 #include <cv_bridge/cv_bridge.h>
 #include <opencv2/opencv.hpp>
 #include <stdexcept>
+#include <QDir>
 
 namespace hk_camera
 {
@@ -19,6 +20,8 @@ HKCameraNode::HKCameraNode(const std::string& name)
     setupSubscribers();
     setupServices();
     connectCameraSignals();
+    face_timer_ = create_wall_timer(std::chrono::milliseconds(100),
+                                  [this] { processFaceCaptures(); });
 
     RCLCPP_INFO(get_logger(), "HKCameraNode initialized (SDK %s)",
                 camera_->getSDKVersion().c_str());
@@ -38,6 +41,9 @@ HKCameraNode::HKCameraNode(const std::string& name)
 
 HKCameraNode::~HKCameraNode()
 {
+    accept_faces_ = false;
+    face_timer_->cancel();
+    for (const auto& connection : camera_connections_) QObject::disconnect(connection);
     decoder_->stop();
     if (alarm_handle_ >= 0) camera_->closeAlarmChan(alarm_handle_);
     if (user_id_ >= 0)      camera_->logout(user_id_);
@@ -58,12 +64,22 @@ void HKCameraNode::loadParameters()
     declare_parameter("channel",  1);
     declare_parameter("auto_login", false);
     declare_parameter("auto_stream", true);
+    declare_parameter("enable_face_capture", true);
+    declare_parameter("face_capture_dir", (QDir::homePath() +
+                      "/Remote_ctrol/captures/hk_faces").toStdString());
+    declare_parameter("face_queue_limit", 8);
 
     login_info_.ip       = get_parameter("ip").as_string();
     login_info_.port     = static_cast<uint16_t>(get_parameter("port").as_int());
     login_info_.username = get_parameter("username").as_string();
     login_info_.password = get_parameter("password").as_string();
     channel_             = get_parameter("channel").as_int();
+    enable_face_capture_ = get_parameter("enable_face_capture").as_bool();
+    face_capture_dir_ = get_parameter("face_capture_dir").as_string();
+    const auto queue_limit = get_parameter("face_queue_limit").as_int();
+    if (face_capture_dir_.empty() || queue_limit < 1 || queue_limit > 64)
+        throw std::invalid_argument("face_capture_dir must be nonempty; face_queue_limit must be 1..64");
+    face_queue_limit_ = static_cast<size_t>(queue_limit);
 
     // 参数变更回调
     param_cb_handle_ = add_on_set_parameters_callback(
@@ -98,6 +114,10 @@ void HKCameraNode::setupPublishers()
         "/hk_camera/alarm", 10);
     status_pub_ = create_publisher<std_msgs::msg::String>(
         "/hk_camera/status", 10);
+    face_pub_ = create_publisher<msg::FaceCapture>(
+        "/hk_camera/face_capture", rclcpp::QoS(10).reliable().transient_local());
+    face_image_pub_ = create_publisher<sensor_msgs::msg::Image>(
+        "/hk_camera/face_image", rclcpp::QoS(1).reliable().transient_local());
 }
 
 void HKCameraNode::setupSubscribers()
@@ -161,19 +181,21 @@ void HKCameraNode::setupServices()
 void HKCameraNode::connectCameraSignals()
 {
     // 解码器 → ROS2 publish
-    QObject::connect(decoder_, &HKDecoder::frameDecoded,
-        [this](const QImage& image) { onDecodedImage(image); });
+    camera_connections_.push_back(QObject::connect(decoder_, &HKDecoder::frameDecoded,
+        [this](const QImage& image) { onDecodedImage(image); }));
 
     // 报警: SDK回调线程 → ROS2 publish
-    QObject::connect(camera_, &HKCamera::alarmReceived,
-        [this](const AlarmEvent& alarm) { onAlarm(alarm); });
+    camera_connections_.push_back(QObject::connect(camera_, &HKCamera::alarmReceived,
+        [this](const AlarmEvent& alarm) { onAlarm(alarm); }));
+    camera_connections_.push_back(QObject::connect(camera_, &HKCamera::faceCaptured,
+        [this](const FaceCaptureEvent& event) { onFaceCapture(event); }));
 
     // 错误处理
-    QObject::connect(camera_, &HKCamera::errorOccurred,
+    camera_connections_.push_back(QObject::connect(camera_, &HKCamera::errorOccurred,
         [this](int code, const QString& msg) {
             RCLCPP_ERROR(get_logger(), "HK SDK error [%d]: %s",
                          code, msg.toStdString().c_str());
-        });
+        }));
 }
 
 void HKCameraNode::onDecodedImage(const QImage& image)
@@ -201,6 +223,7 @@ void HKCameraNode::onDecodedImage(const QImage& image)
 // ---- 报警回调 → 发布 CameraAlarm ----
 void HKCameraNode::onAlarm(const AlarmEvent& alarm)
 {
+    if (alarm.user_id >= 0 && alarm.user_id != user_id_.load()) return;
     auto msg = msg::CameraAlarm();
     msg.alarm_type = alarm.alarm_type;
     msg.alarm_desc = "alarm";
@@ -214,8 +237,109 @@ void HKCameraNode::onAlarm(const AlarmEvent& alarm)
 
     alarm_pub_->publish(msg);
 
-    RCLCPP_INFO(get_logger(), "Alarm: type=%d, channels=%ld",
-                alarm.alarm_type, msg.alarm_channels.size());
+    RCLCPP_INFO(get_logger(), "Alarm: command=0x%lx type=%u, channels=%zu",
+                static_cast<unsigned long>(alarm.command), alarm.alarm_type, msg.alarm_channels.size());
+}
+
+void HKCameraNode::onFaceCapture(const FaceCaptureEvent& event)
+{
+    if (!accept_faces_ || (event.user_id >= 0 && event.user_id != user_id_.load()) ||
+        (event.channel != 0 && event.channel != static_cast<uint32_t>(channel_))) return;
+    std::lock_guard<std::mutex> guard(face_mutex_);
+    if (!accept_faces_) return;
+    if (face_queue_.size() >= face_queue_limit_)
+    {
+        ++face_dropped_;
+        return;
+    }
+    face_queue_.push_back(event);
+}
+
+bool HKCameraNode::startAlarmReception()
+{
+    if (!enable_face_capture_ || alarm_handle_ >= 0) return true;
+    try
+    {
+        std::filesystem::create_directories(face_capture_dir_);
+    }
+    catch (const std::exception& error)
+    {
+        RCLCPP_ERROR(get_logger(), "Cannot create face capture directory: %s", error.what());
+        return false;
+    }
+    face_coordinate_size_ = camera_->videoSize(user_id_.load(), channel_);
+    if (!face_coordinate_size_[0])
+        RCLCPP_WARN(get_logger(), "Cannot read video size; face coordinates will use the full background image");
+    else
+        RCLCPP_INFO(get_logger(), "Face coordinate video size: %ux%u",
+                    face_coordinate_size_[0], face_coordinate_size_[1]);
+    accept_faces_ = true;
+    alarm_handle_ = camera_->setupAlarmChan(user_id_.load());
+    if (alarm_handle_ < 0)
+    {
+        accept_faces_ = false;
+        RCLCPP_ERROR(get_logger(), "Face alarm setup failed, SDK error=%d", camera_->getLastError());
+        return false;
+    }
+    RCLCPP_INFO(get_logger(), "Face alarm reception active; output=%s", face_capture_dir_.c_str());
+    return true;
+}
+
+void HKCameraNode::processFaceCaptures()
+{
+    const auto dropped = face_dropped_.exchange(0);
+    if (dropped) RCLCPP_WARN(get_logger(), "Face queue full: dropped %lu events", dropped);
+    FaceCaptureEvent event;
+    {
+        std::lock_guard<std::mutex> guard(face_mutex_);
+        if (face_queue_.empty()) return;
+        event = std::move(face_queue_.front());
+        face_queue_.pop_front();
+    }
+    if (!accept_faces_ || user_id_.load() < 0 ||
+        (event.user_id >= 0 && event.user_id != user_id_.load())) return;
+    if (event.channel == 0) event.channel = channel_;
+    event.coordinate_width = face_coordinate_size_[0];
+    event.coordinate_height = face_coordinate_size_[1];
+    try
+    {
+        if (event.background_jpeg.empty() && !event.face_jpeg.empty())
+            event.background_jpeg = camera_->findFaceBackground(user_id_.load(), event.face_id);
+        const auto stem = std::to_string(event.received_ns) + "_face" +
+                          std::to_string(event.face_id) + "_" + std::to_string(++face_sequence_);
+        const auto files = saveFaceCapture(event, face_capture_dir_, stem);
+        auto message = msg::FaceCapture();
+        message.header.stamp = rclcpp::Time(event.received_ns, RCL_SYSTEM_TIME);
+        message.header.frame_id = "hk_camera";
+        message.channel = event.channel;
+        message.face_id = event.face_id;
+        message.target_id = event.target_id;
+        message.score = event.score;
+        message.camera_time_raw = event.camera_time;
+        message.end_mark = event.end_mark;
+        message.rect_valid = files.rect_valid;
+        message.background_width = files.background_width;
+        message.background_height = files.background_height;
+        message.coordinate_width = files.coordinate_width;
+        message.coordinate_height = files.coordinate_height;
+        message.rect_normalized = files.rect;
+        message.rect_pixels = {files.pixels.x, files.pixels.y, files.pixels.width, files.pixels.height};
+        message.face_path = files.face_path;
+        message.background_path = files.background_path;
+        message.annotated_path = files.annotated_path;
+        message.metadata_path = files.metadata_path;
+        face_pub_->publish(message);
+        if (!files.annotated.empty())
+            face_image_pub_->publish(*cv_bridge::CvImage(message.header, "bgr8", files.annotated).toImageMsg());
+        for (const auto& warning : files.warnings)
+            RCLCPP_WARN(get_logger(), "Face %u: %s", event.face_id, warning.c_str());
+        RCLCPP_INFO(get_logger(), "Face %u: face=%s boxed=%s metadata=%s", event.face_id,
+                    files.face_path.c_str(), files.annotated_path.c_str(), files.metadata_path.c_str());
+    }
+    catch (const std::exception& error)
+    {
+        RCLCPP_ERROR(get_logger(), "Face %u could not be saved: %s", event.face_id, error.what());
+    }
 }
 
 // ============================================================
@@ -228,17 +352,19 @@ void HKCameraNode::onLogin(
 {
     if (user_id_ >= 0)
     {
-        res->success = true;
-        res->message = "Already logged in, user_id=" + std::to_string(user_id_);
+        res->success = startAlarmReception();
+        res->message = res->success ? "Already logged in, user_id=" + std::to_string(user_id_.load())
+                                   : "Logged in, but alarm setup failed; call login again to retry";
         return;
     }
     user_id_ = camera_->login(login_info_);
 
     if (user_id_ >= 0)
     {
-        res->success = true;
-        res->message = "Login OK, user_id=" + std::to_string(user_id_);
-        RCLCPP_INFO(get_logger(), "Device login OK, user_id=%d", user_id_);
+        res->success = startAlarmReception();
+        res->message = res->success ? "Login OK, user_id=" + std::to_string(user_id_.load())
+                                   : "Login OK, but alarm setup failed; call login again to retry";
+        RCLCPP_INFO(get_logger(), "Device login OK, user_id=%d", user_id_.load());
     }
     else
     {
@@ -254,6 +380,14 @@ void HKCameraNode::onLogout(
 {
     if (user_id_ >= 0)
     {
+        accept_faces_ = false;
+        if (alarm_handle_ >= 0) camera_->closeAlarmChan(alarm_handle_);
+        alarm_handle_ = -1;
+        decoder_->stop();
+        {
+            std::lock_guard<std::mutex> guard(face_mutex_);
+            face_queue_.clear();
+        }
         camera_->logout(user_id_);
         user_id_ = -1;
         res->success = true;

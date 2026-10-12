@@ -12,6 +12,7 @@
 
 // 海康 SDK 头文件
 #include "HCNetSDK.h"
+#include "hk_camera/face_capture.h"
 
 namespace hk_camera
 {
@@ -54,6 +55,7 @@ struct VideoFrame
  */
 struct AlarmEvent
 {
+    int     user_id       = -1;
     LONG    command       = 0;
     DWORD   alarm_type    = 0;
     int     channels[16]  = {0};  // 16 通道报警状态
@@ -126,6 +128,8 @@ public:
     // ---- 报警 ----
     int  setupAlarmChan(int user_id);
     bool closeAlarmChan(int alarm_handle);
+    std::vector<uint8_t> findFaceBackground(int user_id, uint32_t face_id);
+    std::array<uint32_t, 2> videoSize(int user_id, int channel);
     int  startListenAlarm(const std::string& local_ip, uint16_t port);
 
     // ---- 语音 ----
@@ -181,6 +185,7 @@ signals:
 
     // ---- 报警信号 ----
     void alarmReceived(const hk_camera::AlarmEvent& alarm);
+    void faceCaptured(const hk_camera::FaceCaptureEvent& event);
 
     // ---- 语音数据信号 ----
     void voiceDataReady(const std::vector<uint8_t>& data);
@@ -216,5 +221,6 @@ private:
 
 Q_DECLARE_METATYPE(hk_camera::VideoFrame)
 Q_DECLARE_METATYPE(hk_camera::AlarmEvent)
+Q_DECLARE_METATYPE(hk_camera::FaceCaptureEvent)
 
 #endif // HK_CAMERA_H

@@ -8,6 +8,9 @@ hk_camera_node:
     channel: 1
     auto_login: true           # 启动时自动登录
     auto_stream: true          # 登录后自动开始取流
+    enable_face_capture: true  # 登录后接收相机原生人脸抓拍报警
+    face_capture_dir: "/home/jkbot/Remote_ctrol/captures/hk_faces"
+    face_queue_limit: 8         # 保存队列满时报告丢弃数量，避免阻塞 SDK 回调
     reconnect_interval: 5.0    # 断线重连间隔 (秒)
     stream_type: 0             # 0=主码流 1=子码流
     link_mode: 0               # 0=TCP 1=UDP 2=组播
