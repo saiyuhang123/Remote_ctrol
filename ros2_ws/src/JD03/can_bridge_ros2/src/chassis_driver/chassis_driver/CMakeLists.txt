@@ -112,6 +112,12 @@ install(DIRECTORY
   DESTINATION share/${PROJECT_NAME}
 )
 
+if(BUILD_TESTING)
+  enable_testing()
+  add_executable(test_gcan_udp_frame test/test_gcan_udp_frame.cpp)
+  add_test(NAME gcan_udp_frame COMMAND test_gcan_udp_frame)
+endif()
+
 ament_package()
 
 # 将库路径添加到运行时搜索路径

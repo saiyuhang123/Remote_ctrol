@@ -4,7 +4,7 @@
 
 这是一个基于 ROS 2 Humble 的智能巡检机器人远程控制项目，用于实机遥控、视频监控、识别、抓拍与巡检业务管理。2026-10-09 已清理 Gazebo 仿真、测试场地地图和模拟执行逻辑。具体清单见 [实机开发说明](实机开发说明.md)。
 
-> 当前状态：已移植 FAST-LIO2 建图/定位、JD03 控制桥、三维雷达转扫描及 Nav2。新车安装外参、车体几何和底盘通信仍待实测确认，尚未实机验证。步骤见 [实机导航移植说明](实机导航移植说明.md)。巡检执行器仍待接入。
+> 当前状态：已移植 FAST-LIO2 建图/定位、JD03 控制桥、三维雷达转扫描及 Nav2。雷达/IMU 安装外参、车体轮廓和等效阿克曼参数已配置，eno1 底盘网络与反馈接收已验证；实机导航仍待验证。步骤见 [实机导航移植说明](实机导航移植说明.md)。巡检执行器仍待接入。
 
 2026-10-10 已补齐独立 JD03 轮速里程计，可与 FAST-LIO 同时记录，并通过 `odom_source:=lio/wheel/wheel_imu` 选择 Nav2 的主里程计，见 [底盘里程计说明](底盘里程计说明.md)。
 
@@ -235,11 +235,13 @@ ros2 launch chassis_nav2 bringup.launch.py mode:=drivers
 填写新车 `hardware.yaml` 后选择建图、定位或完整导航之一：
 
 ```bash
-ros2 launch chassis_nav2 mapping.launch.py pcd_map:=/实际路径/site.pcd rviz:=true
+ros2 launch chassis_nav2 fastlio_mapping.launch.py
 ros2 launch chassis_nav2 localization.launch.py pcd_map:=/实际路径/site.pcd rviz:=true
 ros2 launch chassis_nav2 navigation.launch.py \
   pcd_map:=/实际路径/site.pcd map:=/实际路径/site.yaml rviz:=true
 ```
+
+`fastlio_mapping.launch.py` 一次启动维特 IMU、速腾雷达、FAST-LIO 和 RViz，默认在项目 `maps/` 下按启动时间生成 PCD 文件名。可用 `pcd_map:=/实际路径/site.pcd` 指定文件，或用 `rviz:=false` 关闭界面。建图后在另一个终端执行 `ros2 service call /map_save std_srvs/srv/Trigger '{}'`，确认 `success: true` 后退出。原 `mapping.launch.py` 入口仍支持显式输出路径和轮速对比等参数。
 
 统一入口使用实际时钟，默认启动速腾和维特，底盘控制默认关闭。完整流程、PCD 保存、栅格/网页地图导出及启用 JD03 的参数见 [实机导航移植说明](实机导航移植说明.md)。定位初始位姿通过 `/initialpose` 给定。
 

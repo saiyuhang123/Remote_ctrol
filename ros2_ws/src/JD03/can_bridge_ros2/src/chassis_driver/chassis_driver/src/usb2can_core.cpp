@@ -1,4 +1,5 @@
 #include "usb2can_core.h"
+#include "gcan_udp_frame.h"
 #include <errno.h>
 #include <sys/ioctl.h>
 #include <net/if.h>
@@ -288,17 +289,9 @@ void CAN_app::ecu_cb(const yunle_msgs::msg::Ecu::SharedPtr msg)
         // ROS_INFO("1");
         // memset(d, 0, sizeof(BYTE)*13);
         // ROS_INFO("2");
-        BYTE d[13];
-        d[0] = (BYTE)sendData.DataLen;
-        d[1] = (BYTE)((0xff000000 & sendData.ID) >> 24);
-        d[2] = (BYTE)((0xff0000 & sendData.ID) >> 16);
-        d[3] = (BYTE)((0xff00 & sendData.ID) >> 8);
-        d[4] = (BYTE)((0xff & sendData.ID));
-        for (int i = 0; i < sendData.DataLen; i++) {
-            d[5+i] = sendData.Data[i];
-        }
-        int send_num = sendto(sock_fd, d, 13, 0, (struct sockaddr *)&can2_addr_serv, can2_addr_serv_len);
-        // ROS_INFO("send to ip:%s", can2_remote_ip.c_str()); //, can2_addr_serv.sin_addr.s_addr, can2_addr_serv.sin_port);
+        const auto packet = encode_gcan_udp_frame(sendData);
+        int send_num = sendto(sock_fd, packet.data(), packet.size(), 0, (struct sockaddr *)&can1_addr_serv, can1_addr_serv_len);
+        // ROS_INFO("send to ip:%s", can1_remote_ip.c_str()); //, can1_addr_serv.sin_addr.s_addr, can1_addr_serv.sin_port);
         if ( send_num < 0 ) {
             // ROS_WARN("[CAN_DRIVER] Send data failed, res: %d", send_num);
             RCLCPP_WARN(this->get_logger(), "[CAN_DRIVER] Send data failed, res: %d", send_num);
@@ -349,17 +342,9 @@ void CAN_app::imu_cb(const sensor_msgs::msg::Imu::SharedPtr msg) const
         // ROS_INFO("1");
         // memset(d, 0, sizeof(BYTE)*13);
         // ROS_INFO("2");
-        BYTE d[13];
-        d[0] = (BYTE)sendData.DataLen;
-        d[1] = (BYTE)((0xff000000 & sendData.ID) >> 24);
-        d[2] = (BYTE)((0xff0000 & sendData.ID) >> 16);
-        d[3] = (BYTE)((0xff00 & sendData.ID) >> 8);
-        d[4] = (BYTE)((0xff & sendData.ID));
-        for (int i = 0; i < sendData.DataLen; i++) {
-            d[5+i] = sendData.Data[i];
-        }
-        int send_num = sendto(sock_fd, d, 13, 0, (struct sockaddr *)&can2_addr_serv, can2_addr_serv_len);
-        // ROS_INFO("send to ip:%s", can2_remote_ip.c_str()); //, can2_addr_serv.sin_addr.s_addr, can2_addr_serv.sin_port);
+        const auto packet = encode_gcan_udp_frame(sendData);
+        int send_num = sendto(sock_fd, packet.data(), packet.size(), 0, (struct sockaddr *)&can1_addr_serv, can1_addr_serv_len);
+        // ROS_INFO("send to ip:%s", can1_remote_ip.c_str()); //, can1_addr_serv.sin_addr.s_addr, can1_addr_serv.sin_port);
         if ( send_num < 0 ) {
             // ROS_WARN("[CAN_DRIVER] Send data failed, res: %d", send_num);
             RCLCPP_WARN(this->get_logger(), "[CAN_DRIVER] Send data failed, res: %d", send_num);
@@ -809,6 +794,20 @@ void CAN_app::can_recv_func(int id) {
             WheelStatus msg_factory(obj_can, WHEEL_RIGHT);
             right_wheel_speed = msg_factory.get_rpm()*wheel_radius*2*3.141592654/60;
             // ROS_INFO("right rpm: %d", msg_factory.get_rpm());
+        }
+
+        case 100:   // BMS 电池状态帧 (CAN ID 0x100, 1Hz)
+        {
+            yunle_msgs::msg::Battery msg_battery;
+            uint16_t v_raw = recv_buf[5] | (recv_buf[6] << 8);
+            int16_t  a_raw = recv_buf[7] | (recv_buf[8] << 8);
+            msg_battery.voltage  = v_raw * 0.1;            // V
+            msg_battery.ampere   = a_raw * 0.1;            // A, 负值为放电
+            msg_battery.capacity = recv_buf[9];            // SOC %
+            msg_battery.bmusys_status = 0;
+            msg_battery.charge_status = (a_raw > 0) ? 1 : 0;
+            pub_battery_status->publish(msg_battery);
+            break;
         }
 
         default:

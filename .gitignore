@@ -25,6 +25,7 @@ venv/
 backend/data/
 captures/
 reports/
+maps/
 
 # ================= 本机私有配置覆盖（config.yaml 入库，本机差异用 local 覆盖）=================
 config/config.local.yaml

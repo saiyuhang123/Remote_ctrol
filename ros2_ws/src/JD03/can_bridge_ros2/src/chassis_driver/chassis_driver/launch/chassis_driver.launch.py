@@ -16,7 +16,7 @@ def generate_launch_description():
                 {'canbus_type': 1},
 
                 # USB2CAN
-                {'main_can_id': 2},  # 1:CAN1 2:CAN2
+                {'main_can_id': 1},  # 1:CAN1 2:CAN2
                 {'debug_can_id': 1},
 
                 # EthCan_UDP
@@ -26,7 +26,7 @@ def generate_launch_description():
                 {'can2_remote_ip': '192.168.1.10'},
                 {'can2_remote_port': 4002},
                 {'local_ip': '192.168.1.102'},
-                {'local_port': 8002},
+                {'local_port': 8001},
 
                 # Common
                 {'debug_mode': False},	# True or False

@@ -63,6 +63,7 @@ class IntegrationTests(unittest.TestCase):
 
     def test_new_mounting_requires_calibration_and_composes_correctly(self):
         fresh = yaml.safe_load((SRC/'chassis_nav2/config/hardware.yaml').read_text())
+        fresh['sensor_calibration']['confirmed'] = False
         with self.assertRaises(ValueError):
             bringup.calibrations(fresh)
         base_lidar, base_imu = bringup.calibrations(self.hardware())

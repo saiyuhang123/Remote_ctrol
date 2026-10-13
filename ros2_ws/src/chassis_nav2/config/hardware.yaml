@@ -1,14 +1,14 @@
 # 新 JD03 车：填写实测数据后才能启动定位/建图；drivers 模式不需要外参。
-# 坐标约定：base_link 原点采用 JD03 URDF 原 Frame 原点，x 前、y 左、z 上。
+# 坐标约定：base_link 位于小车中心（用户确认），x 前、y 左、z 上。
 # base_from_* 表示传感器坐标 -> base_link；translation 单位 m，rpy 单位 rad。
 sensor_calibration:
-  confirmed: false
+  confirmed: true  # 雷达/IMU 安装位置和朝向已按用户提供的实测数据确认
   base_from_lidar:
-    translation: null
-    rpy: null
+    translation: [0.32, 0.0, 0.46]  # 相对 base_link：前方 32 cm，左侧 0 cm，上方 46 cm
+    rpy: [0.0, 0.0, 0.0]  # 水平安装，雷达 X 轴与车头方向一致
   base_from_imu:
-    translation: null
-    rpy: null
+    translation: [0.32, 0.0, 0.22]  # 相对 base_link：前方 32 cm，上方 22 cm；位于雷达正下方 24 cm
+    rpy: [0.0, 0.0, 0.0]  # 水平安装，IMU X 轴朝车头方向
   time_offset_lidar_to_imu: 0.0  # 尚未测量，需实测确认时间偏差
 
 imu:
@@ -28,10 +28,14 @@ scan:
   scan_time: 0.1
 
 robot_geometry:
-  confirmed: false
-  wheel_base: null            # 新 JD03 实测轴距
-  max_steering_deg: null      # 驱动编码限制 27°；需核对实车有效转角
-  footprint: null             # [[前左x,y],[前右x,y],[后右x,y],[后左x,y]]，base_link 下 m
+  confirmed: true            # 尺寸、轴距及最大转角已确认；底盘协调转向，上层按等效阿克曼计算
+  wheel_base: 0.5            # 厂家参数图：轴距 500 mm，单位 m
+  max_steering_deg: 24.0      # 用户确认轮胎最大转角 24°，低于厂家驱动编码上限 27°
+  footprint:                 # 厂家长 895 mm、宽 560 mm，base_link 在中心；单位 m
+    - [0.4475, 0.28]         # 左前
+    - [0.4475, -0.28]        # 右前
+    - [-0.4475, -0.28]       # 右后
+    - [-0.4475, 0.28]        # 左后
 
 # 纯轮速里程计独立确认，不要求雷达/IMU 外参或 footprint 已完成。
 wheel_odometry:
@@ -47,7 +51,7 @@ wheel_odometry:
   lateral_velocity_stddev: 0.02
 
 chassis:
-  confirmed: false           # 核对通信参数、转向正负和速度单位后设 true
+  confirmed: true            # eno1 通信参数已核对，底盘反馈已收到；转向和速度按厂家协议转换
   command_steering_sign: -1.0
   feedback_steering_sign: -1.0 # 厂商 wheelAngle() 右转为正，ROS yaw 左转为正
   max_speed: 0.3
@@ -56,7 +60,7 @@ chassis:
     canbus_type: 1
     main_can_id: 2
     debug_can_id: 1
-    can_eth_card: enp1s0
+    can_eth_card: eno1
     can1_remote_ip: 192.168.1.10
     can1_remote_port: 4001
     can2_remote_ip: 192.168.1.10
