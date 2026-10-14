@@ -22,9 +22,12 @@ from yunle_msgs.msg import Ecu, VehicleStatus
 
 
 class KeyboardState:
-    def __init__(self, speed=.1, turn_angle=10., steering_sign=-1., key_timeout=.6):
+    def __init__(self, speed=.1, turn_angle=10., steering_sign=-1., key_timeout=.6,
+                 four_wheel_steering=False, rear_steering_sign=-1.):
         self.speed, self.turn_angle = speed, turn_angle
         self.steering_sign, self.key_timeout = steering_sign, key_timeout
+        self.four_wheel_steering = four_wheel_steering
+        self.rear_steering_sign = rear_steering_sign
         self.direction, self.steering, self.gear = 0, 0., Ecu.SHIFT_D
         self.last_key = None
         self.escape = 0
@@ -105,7 +108,9 @@ class KeyboardNode(Node):
         msg = Ecu()
         msg.header.stamp = self.get_clock().now().to_msg()
         msg.motor, msg.steer, msg.shift, msg.brake = motor, steer, gear, brake
-        msg.set_torque, msg.rear_wheel_flag = False, False
+        msg.set_torque = False
+        msg.rear_wheel_flag = self.state.four_wheel_steering
+        msg.rear_steer = self.state.rear_steering_sign * steer if self.state.four_wheel_steering else 0.
         self.publisher.publish(msg)
 
     def publish_command(self):
@@ -143,6 +148,8 @@ def arguments():
         max_speed = float(hw['chassis']['max_speed'])
         max_angle = float(hw['robot_geometry']['max_steering_deg'])
         sign = float(hw['chassis']['command_steering_sign'])
+        four_wheel_steering = bool(hw['chassis'].get('four_wheel_steering', False))
+        rear_sign = float(hw['chassis'].get('rear_steering_sign', -1.))
     except (OSError, KeyError, TypeError, ValueError, yaml.YAMLError) as error:
         parser.error(f'读取底盘配置失败：{error}')
     if not math.isfinite(max_speed) or max_speed <= 0 or not math.isfinite(max_angle) or not 0 < max_angle <= 27 or sign not in (-1., 1.):
@@ -153,9 +160,12 @@ def arguments():
         parser.error(f'--turn-angle 必须在 (0, {max_angle}] 度内')
     if not math.isfinite(args.key_timeout) or not .1 <= args.key_timeout <= 1.:
         parser.error('--key-timeout 必须在 [0.1, 1.0] 秒内')
+    if rear_sign not in (-1., 1.):
+        parser.error('rear_steering_sign 必须为 -1 或 1')
     if not sys.stdin.isatty():
         parser.error('请在可接收键盘输入的终端中运行')
-    return KeyboardState(args.speed, args.turn_angle, sign, args.key_timeout)
+    return KeyboardState(args.speed, args.turn_angle, sign, args.key_timeout,
+                         four_wheel_steering, rear_sign)
 
 
 def main():
@@ -178,6 +188,8 @@ def main():
         node = KeyboardNode(state)
         print('W 前进 | S 倒车 | A 左转 | D 右转 | X 回正 | 空格刹车 | Q/Ctrl+C 退出', flush=True)
         print(f'A/D 保持 W/S 选定的行驶方向；停车时 A/D 只转向。无新按键 {state.key_timeout:g} 秒后自动刹车。', flush=True)
+        if state.four_wheel_steering:
+            print(f'四轮转向已启用（rear_steering_sign={state.rear_steering_sign:g}）：A/D 时后轮反相同角度。', flush=True)
         tty.setcbreak(fd)
         running = True
         while running and not stop_requested and rclpy.ok():

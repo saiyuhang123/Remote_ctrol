@@ -8,7 +8,7 @@ ament_python_install_package(${PROJECT_NAME})
 install(DIRECTORY config launch
   DESTINATION share/${PROJECT_NAME})
 
-install(PROGRAMS scripts/lio_odometry.py scripts/jd03_bridge.py scripts/jd03_odometry.py scripts/jd03_keyboard.py
+install(PROGRAMS scripts/lio_odometry.py scripts/jd03_bridge.py scripts/jd03_odometry.py scripts/jd03_keyboard.py scripts/cloud_crop_box.py scripts/final_approach.py
   DESTINATION lib/${PROJECT_NAME})
 
 ament_package()

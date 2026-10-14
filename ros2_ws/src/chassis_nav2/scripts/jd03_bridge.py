@@ -7,7 +7,7 @@ from rclpy.node import Node
 from geometry_msgs.msg import Twist
 from yunle_msgs.msg import Ecu, VehicleStatus
 from std_msgs.msg import Bool
-from chassis_nav2.geometry import ackermann_command
+from chassis_nav2.geometry import ackermann_command, ackermann_command_4ws
 
 
 class JD03Bridge(Node):
@@ -15,10 +15,13 @@ class JD03Bridge(Node):
         super().__init__('jd03_bridge')
         defaults = {'wheel_base': 0.5, 'max_steering_deg': 27., 'max_speed': .3,
                     'cmd_timeout': .5, 'command_steering_sign': -1.,
-                    'feedback_steering_sign': -1., 'enable_control': False}
+                    'feedback_steering_sign': -1., 'enable_control': False,
+                    'four_wheel_steering': False, 'rear_steering_sign': -1.,
+                    'four_wheel_curvature_gain': 2.}
         for name, value in defaults.items():
             setattr(self, name, self.declare_parameter(name, value).value)
-        if self.wheel_base <= 0 or not 0 < self.max_steering_deg <= 27:
+        if (self.wheel_base <= 0 or not 0 < self.max_steering_deg <= 27
+                or self.rear_steering_sign not in (-1., 1.)):
             raise ValueError('JD03 wheel_base must be positive; steering must be within encoder limit 27 degrees')
         self.command = None
         self.feedback_time = None
@@ -44,12 +47,22 @@ class JD03Bridge(Node):
         active = (not self.estopped and self.command is not None and now-self.command[0] <= self.cmd_timeout
                   and self.feedback_time is not None and now-self.feedback_time <= .5)
         v, w = self.command[1:] if active else (0., 0.)
-        motor, steer, gear, brake = ackermann_command(
-            v, w, self.wheel_base, self.max_steering_deg, self.max_speed, self.command_steering_sign)
         msg = Ecu()
         msg.header.stamp = self.get_clock().now().to_msg()
+        if self.four_wheel_steering:
+            motor, steer, rear, gear, brake = ackermann_command_4ws(
+                v, w, self.wheel_base, self.max_steering_deg, self.max_speed,
+                self.command_steering_sign, self.rear_steering_sign,
+                self.four_wheel_curvature_gain)
+            msg.rear_steer = rear
+            msg.rear_wheel_flag = True
+        else:
+            motor, steer, gear, brake = ackermann_command(
+                v, w, self.wheel_base, self.max_steering_deg, self.max_speed, self.command_steering_sign)
+            msg.rear_steer = 0.
+            msg.rear_wheel_flag = False
         msg.motor, msg.steer, msg.shift, msg.brake = motor, steer, gear, brake
-        msg.rear_wheel_flag, msg.set_torque = False, False
+        msg.set_torque = False
         self.ecu_pub.publish(msg)
 
     def feedback(self, msg):

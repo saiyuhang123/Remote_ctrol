@@ -5,15 +5,23 @@ import numpy as np
 
 class WheelOdometry:
     def __init__(self, wheel_base, rear_axle, speed_stddev=.05,
-                 steering_stddev_deg=1., lateral_stddev=.02, max_gap=.5):
+                 steering_stddev_deg=1., lateral_stddev=.02, max_gap=.5,
+                 four_wheel_steering=False, four_wheel_yaw_gain=2.0):
         self.wheel_base = wheel_base
         self.rear_axle = np.asarray(rear_axle, dtype=float)
+        self.four_wheel_steering = four_wheel_steering
+        # Measured curvature gain kappa = gain*tan(delta)/L; 2.0 is the
+        # geometric counter-phase ideal, JD03 measures ~= 1.0 (R=1.1m at 24°).
+        self.four_wheel_yaw_gain = four_wheel_yaw_gain
+        # With counter-phase rear steering the zero-slip point is mid-wheelbase.
+        self.reference = (self.rear_axle + [wheel_base / 2., 0.]
+                          if four_wheel_steering else self.rear_axle)
         self.speed_variance = speed_stddev**2
         self.steering_variance = math.radians(steering_stddev_deg)**2
         self.lateral_variance = lateral_stddev**2
         self.max_gap = max_gap
-        # Start base_link at (0,0,0), even when rear axle is offset from base_link.
-        self.state = np.array([*self.rear_axle, 0.])
+        # Start base_link at (0,0,0), even when the reference is offset from base_link.
+        self.state = np.array([*self.reference, 0.])
         self.covariance = np.diag([.01**2, .01**2, .01**2])
         self.previous = None
         self.direction = None
@@ -31,9 +39,11 @@ class WheelOdometry:
         self.direction = direction
         v = abs(speed) * (direction or 1)
         tangent = math.tan(steering)
-        w = v*tangent/self.wheel_base
-        noise_jacobian = np.array([[1., 0.], [tangent/self.wheel_base,
-                                     v*(1+tangent*tangent)/self.wheel_base]])
+        steer_gain = self.four_wheel_yaw_gain if self.four_wheel_steering else 1.
+        w = steer_gain*v*tangent/self.wheel_base
+        noise_jacobian = np.array(
+            [[1., 0.], [steer_gain*tangent/self.wheel_base,
+                        steer_gain*v*(1+tangent*tangent)/self.wheel_base]])
         noise = noise_jacobian @ np.diag([self.speed_variance, self.steering_variance]) @ noise_jacobian.T
         gap = False
         if self.previous:
@@ -49,7 +59,7 @@ class WheelOdometry:
                 self._integrate(average_v, average_w, dt, noise)
         self.previous = stamp, v, w
         x, y, yaw = self.state
-        rx, ry = self.rear_axle
+        rx, ry = self.reference
         c, s = math.cos(yaw), math.sin(yaw)
         base_pose = np.array([x-c*rx+s*ry, y-s*rx-c*ry, yaw])
         pose_jacobian = np.array([[1., 0., s*rx+c*ry], [0., 1., -c*rx+s*ry], [0., 0., 1.]])

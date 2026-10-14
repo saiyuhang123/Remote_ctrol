@@ -1,6 +1,7 @@
 """Assemble the real RoboSense/Wit/JD03 pipeline from one hardware file."""
 import json
 import math
+from datetime import datetime
 from pathlib import Path
 import numpy as np
 import yaml
@@ -61,7 +62,10 @@ def wheel_parameters(hw):
                                   'lateral_velocity_stddev', 'stamp_source')}
     result.update(wheel_base=float(base), rear_axle_translation=vector(
         cfg['rear_axle_translation'], 2, '后轴中心相对 base_link 的 x/y'),
-        feedback_steering_sign=hw['chassis']['feedback_steering_sign'], use_sim_time=False)
+        feedback_steering_sign=hw['chassis']['feedback_steering_sign'],
+        four_wheel_steering=bool(hw['chassis'].get('four_wheel_steering', False)),
+        four_wheel_yaw_gain=float(hw['chassis'].get('four_wheel_curvature_gain', 2.)),
+        use_sim_time=False)
     for key in ('speed_scale', 'steering_scale', 'max_feedback_gap', 'speed_stddev',
                 'steering_stddev_deg', 'lateral_velocity_stddev'):
         result[key] = vector([result[key]], 1, key)[0]
@@ -121,7 +125,13 @@ def existing_file(value, label):
 def navigation_nodes(map_yaml, hw, params_file):
     from nav2_common.launch import ReplaceString, RewrittenYaml
     base, angle, footprint = geometry(hw)
-    turning_radius = base / math.tan(math.radians(angle))
+    # 优先使用实测最小转弯半径（hardware.yaml chassis.min_turning_radius）。
+    measured = hw['chassis'].get('min_turning_radius')
+    if measured is not None:
+        turning_radius = float(measured)
+    else:
+        halves = 2. if hw['chassis'].get('four_wheel_steering', False) else 1.
+        turning_radius = base / (halves * math.tan(math.radians(angle)))
     params = RewrittenYaml(
         source_file=ReplaceString(source_file=params_file,
                                   replacements={'@CHASSIS_NAV2_SHARE@': str(share('chassis_nav2'))}),
@@ -189,7 +199,10 @@ def configure(context):
         chassis_cfg = hw['chassis']
         params = {k: chassis_cfg[k] for k in ('command_steering_sign', 'feedback_steering_sign', 'max_speed')}
         params.update(wheel_base=base, max_steering_deg=angle, cmd_timeout=chassis_cfg['cmd_timeout'],
-                      enable_control=True)
+                      enable_control=True,
+                      four_wheel_steering=bool(chassis_cfg.get('four_wheel_steering', False)),
+                      rear_steering_sign=float(chassis_cfg.get('rear_steering_sign', -1.)),
+                      four_wheel_curvature_gain=float(chassis_cfg.get('four_wheel_curvature_gain', 2.)))
         nodes.append(Node(package='chassis_nav2', executable='jd03_bridge.py', parameters=[params], output='screen'))
     if source == 'wheel':
         nodes.append(wheel_node(hw, '/odom', 'odom', True, '/odom_wheel'))
@@ -223,7 +236,9 @@ def configure(context):
         output = Path(args['pcd_map']).expanduser().resolve()
         output.parent.mkdir(parents=True, exist_ok=True)
         if output.exists():
-            raise ValueError(f'建图输出已存在：{output}；请指定新的文件名，避免覆盖已有地图')
+            backup = output.with_name(f"{output.stem}_{datetime.now():%Y%m%d_%H%M%S}{output.suffix}")
+            output.rename(backup)
+            print(f'[bringup] 旧地图已备份为 {backup.name}，本次建图保存到 {output.name}')
         fast['map_file_path'] = str(output)
     else:
         fast['map_file_path'] = existing_file(args['pcd_map'], '定位 PCD 地图')
@@ -249,18 +264,32 @@ def configure(context):
             nodes.append(Node(package='fast_lio_localization', executable=executable, name=name,
                               parameters=[profile_path, fast],
                               additional_env={'OPENBLAS_NUM_THREADS': '1', 'OMP_NUM_THREADS': '2'}, output='screen'))
+    # 摄像头支柱等车身固定物裁剪：/scan 链路不经过 LIO 的 blind，需在入口抠掉
+    nodes.append(Node(package='chassis_nav2', executable='cloud_crop_box.py', name='cloud_crop_box',
+                      parameters=[{'use_sim_time': False}], output='screen'))
     scan_params = dict(hw['scan'], use_sim_time=False, target_frame='base_link',
                        transform_tolerance=.1, angle_min=-math.pi, angle_max=math.pi,
                        use_inf=True, inf_epsilon=1.)
     nodes.append(Node(package='pointcloud_to_laserscan', executable='pointcloud_to_laserscan_node',
                       name='pointcloud_to_scan', parameters=[scan_params],
-                      remappings=[('cloud_in', '/velodyne_points'), ('scan', '/scan')], output='screen'))
+                      remappings=[('cloud_in', '/velodyne_points_cropped'), ('scan', '/scan')], output='screen'))
+    if mode == 'localization' and args['map']:
+        # 定位模式可选加载 Nav2 栅格地图（pcd2pgm 切片产物），供 RViz 叠加显示
+        map_yaml = existing_file(args['map'], 'Nav2 栅格地图')
+        nodes += [Node(package='nav2_map_server', executable='map_server', name='map_server',
+                       parameters=[{'yaml_filename': map_yaml, 'use_sim_time': False}], output='screen'),
+                  Node(package='nav2_lifecycle_manager', executable='lifecycle_manager',
+                       name='lifecycle_manager_map', parameters=[{'use_sim_time': False,
+                       'autostart': True, 'node_names': ['map_server']}], output='screen')]
     if mode == 'navigation':
         nodes.extend(navigation_nodes(existing_file(args['map'], 'Nav2 栅格地图'), hw,
                                       existing_file(args['nav2_params'], 'Nav2 参数')))
     if args['rviz'].lower() == 'true':
-        filename = 'fastlio.rviz' if mode == 'mapping' else 'fastlio_localization.rviz'
+        if mode == 'mapping':
+            rviz_config = str(share('fast_lio_localization')/'rviz/fastlio.rviz')
+        else:
+            rviz_config = str(share('chassis_nav2')/'config/localization_nav.rviz')
         nodes.append(Node(package='rviz2', executable='rviz2',
-                          arguments=['-d', str(share('fast_lio_localization')/'rviz'/filename)],
+                          arguments=['-d', rviz_config],
                           parameters=[{'use_sim_time': False}], output='screen'))
     return nodes

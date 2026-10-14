@@ -54,7 +54,7 @@ namespace USB2CAN
         this->setBrakeMode(ecuMsg.brake);
         this->setShiftLevel(ShiftLevel(ecuMsg.shift));
         this->setSpeed(ecuMsg.motor);
-        this->setWheelAngle(ecuMsg.steer, ecuMsg.rear_wheel_flag);
+        this->setWheelAngle(ecuMsg.steer, ecuMsg.rear_steer, ecuMsg.rear_wheel_flag);
         this->setEBrake(ecuMsg.brake);
         this->setTorque(ecuMsg.set_torque);
     }
@@ -64,20 +64,23 @@ namespace USB2CAN
         writeInt(canMsg.Data, JD01_SCU_TARGET_SPEED_OFFSET, JD01_SCU_TARGET_SPEED_LENGTH, speed);
     }
 
-    void MsgJD01::setWheelAngle(double angle, bool rear_wheel_flag) {
+    void MsgJD01::setWheelAngle(double front_angle, double rear_angle, bool rear_wheel_flag) {
         // 注意: JD01的转角为1精度
         // 120对应27°前轮转角, 即实际ratio = 120 / 27 = 4.444
-        int v = int(angle*4.4444);
+        int vf = int(front_angle*4.4444);
         // jd01转角极限值为120, 超过将引起反转
-        if (v > 120) v = 120;
-        if (v < -120) v = -120;
+        if (vf > 120) vf = 120;
+        if (vf < -120) vf = -120;
         //if (ecuMsg.shift == ecuMsg.SHIFT_D)
         {
-            writeInt(canMsg.Data, JD01_SCU_STEER_WHEEL_F_OFFSET, JD01_SCU_STEER_WHEEL_F_LENGTH, v);
+            writeInt(canMsg.Data, JD01_SCU_STEER_WHEEL_F_OFFSET, JD01_SCU_STEER_WHEEL_F_LENGTH, vf);
             // else if (ecuMsg.shift == ecuMsg.SHIFT_R)
             if(rear_wheel_flag)  //后轮转向
             {
-                writeInt(canMsg.Data, JD01_SCU_STEER_WHEEL_R_OFFSET, JD01_SCU_STEER_WHEEL_R_LENGTH, v);
+                int vr = int(rear_angle*4.4444);
+                if (vr > 120) vr = 120;
+                if (vr < -120) vr = -120;
+                writeInt(canMsg.Data, JD01_SCU_STEER_WHEEL_R_OFFSET, JD01_SCU_STEER_WHEEL_R_LENGTH, vr);
             }
         }
     }

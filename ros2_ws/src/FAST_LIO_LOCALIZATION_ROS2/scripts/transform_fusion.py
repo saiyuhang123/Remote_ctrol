@@ -139,6 +139,13 @@ class TransformFusionNode(Node):
             ekf_tf = self.tf_buffer.lookup_transform(
                 'odom', 'base_link', rclpy.time.Time.from_msg(fastlio_odom.header.stamp))
             T_odom_ekf_to_body = self.tf_to_mat(ekf_tf)
+        except tf2_ros.ExtrapolationException:
+            # 雷达时钟略快于系统时钟(~0.1s)，LIO 采样时刻偶在未来，回退到最新 TF
+            try:
+                ekf_tf = self.tf_buffer.lookup_transform('odom', 'base_link', rclpy.time.Time())
+                T_odom_ekf_to_body = self.tf_to_mat(ekf_tf)
+            except Exception:
+                pass
         except Exception as e:
             # 警告节流: EKF 不在时避免 50Hz 刷日志
             now = time.monotonic()

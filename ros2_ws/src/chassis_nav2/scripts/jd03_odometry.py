@@ -31,7 +31,8 @@ class JD03Odometry(Node):
                     'lateral_velocity_stddev': .02, 'stamp_source': 'receipt',
                     'feedback_topic': '/vehicle_status', 'odom_topic': '/odom_wheel',
                     'odom_frame': 'wheel_odom', 'base_frame': 'base_link',
-                    'comparison_topic': '', 'publish_tf': False}
+                    'comparison_topic': '', 'publish_tf': False,
+                    'four_wheel_steering': False, 'four_wheel_yaw_gain': 2.}
         for name, value in defaults.items():
             setattr(self, name, self.declare_parameter(name, value).value)
         numeric = (self.wheel_base, self.speed_scale, self.steering_scale,
@@ -46,7 +47,9 @@ class JD03Odometry(Node):
             raise ValueError('Invalid JD03 odometry geometry, scales, noise or timestamp source')
         self.integrator = WheelOdometry(self.wheel_base, self.rear_axle_translation,
             self.speed_stddev, self.steering_stddev_deg,
-            self.lateral_velocity_stddev, self.max_feedback_gap)
+            self.lateral_velocity_stddev, self.max_feedback_gap,
+            four_wheel_steering=self.four_wheel_steering,
+            four_wheel_yaw_gain=self.four_wheel_yaw_gain)
         self.publisher = self.create_publisher(Odometry, self.odom_topic, 10)
         self.comparison = (self.create_publisher(Odometry, self.comparison_topic, 10)
                            if self.comparison_topic and self.comparison_topic != self.odom_topic else None)

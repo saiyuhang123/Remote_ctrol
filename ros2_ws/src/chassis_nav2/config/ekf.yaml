@@ -5,11 +5,15 @@ ekf_filter_node:
     sensor_timeout: 0.2
     two_d_mode: true
     publish_tf: true
+    print_diagnostics: true
     map_frame: map
     odom_frame: odom
     base_link_frame: base_link
     world_frame: odom
     # 融合真实底盘速度，避免同时融合由同一速度积分的 x/y/yaw。
+    # 注：kybot 参考配置(robot_location2_ws/param/ekf_config.yaml)融合了轮速绝对位姿，
+    # 因其底盘节点直接以 odom 帧发布；本车 jd03_odometry 以 wheel_odom 帧发 /odom_raw，
+    # 绝对位姿不能直接融（无 wheel_odom→odom TF），且位姿是速度的积分，重复融合无意义。
     odom0: /odom_raw
     odom0_config: [false, false, false, false, false, false,
                    true, true, false, false, false, true, false, false, false]

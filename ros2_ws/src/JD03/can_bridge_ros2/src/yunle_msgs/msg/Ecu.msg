@@ -1,7 +1,8 @@
 std_msgs/Header header
 
 float32 motor # 目标速度
-float32 steer # 转向
+float32 steer # 前轮转向
+float32 rear_steer # 后轮转向(°)，仅在 rear_wheel_flag=true 时写入 CAN 后轮转角字段
 bool brake # 紧急停车
 bool set_torque # 设置扭矩值(测试用，使用时不设置)
 bool rear_wheel_flag # 后轮转向flag

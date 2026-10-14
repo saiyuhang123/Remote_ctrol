@@ -198,6 +198,23 @@ class GlobalLocalizationNode(Node):
     def timer_callback(self):
         self.global_localization(self.T_map_to_odom)
 
+    def _smooth_correction(self, T_new, alpha=0.3):
+        """周期 ICP 修正做低通，抑制定位在原地的小幅跳动；
+        大修正（机器人被搬动/重定位）直接应用，避免收敛过慢。"""
+        delta = float(np.linalg.norm(T_new[:3, 3] - self.T_map_to_odom[:3, 3]))
+        if delta > 0.5:
+            return T_new
+        out = T_new.copy()
+        out[:3, 3] = (1.0 - alpha) * self.T_map_to_odom[:3, 3] + alpha * T_new[:3, 3]
+        q_old = np.asarray(tf_transformations.quaternion_from_matrix(self.T_map_to_odom), dtype=float)
+        q_new = np.asarray(tf_transformations.quaternion_from_matrix(T_new), dtype=float)
+        if float(np.dot(q_old, q_new)) < 0.0:
+            q_new = -q_new
+        q = (1.0 - alpha) * q_old + alpha * q_new
+        q = q / np.linalg.norm(q)
+        out[:3, :3] = tf_transformations.quaternion_matrix(q)[:3, :3]
+        return out
+
     def global_localization(self, pose_est):
         if self.cur_scan is None or self.cur_scan_odom is None or self.global_map is None:
             return False
@@ -226,6 +243,8 @@ class GlobalLocalizationNode(Node):
         self.get_logger().info(f'ICP fitness: {fitness:.3f}')
 
         if fitness > self.localization_th:
+            if self.initialized:
+                T = self._smooth_correction(T)
             self.T_map_to_odom = T
             odom = Odometry()
             xyz  = tf_transformations.translation_from_matrix(T)

@@ -80,10 +80,11 @@ controller_server:
       required_movement_radius: 0.5
       movement_time_allowance: 20.0
     general_goal_checker:
-      stateful: false
+      stateful: true  # 进入容差即锁定成功，避免终点附近抖动反复判定
       plugin: nav2_controller::SimpleGoalChecker
+      # 双阿克曼不能原地旋转，终点精度取宽容差：位置 25cm、朝向 30°
       xy_goal_tolerance: 0.25
-      yaw_goal_tolerance: 3.141592653589793
+      yaw_goal_tolerance: 0.523599
     FollowPath:
       plugin: nav2_regulated_pure_pursuit_controller::RegulatedPurePursuitController
       desired_linear_vel: 0.3
@@ -115,8 +116,8 @@ local_costmap:
       - inflation_layer
       inflation_layer:
         plugin: nav2_costmap_2d::InflationLayer
-        cost_scaling_factor: 2.0
-        inflation_radius: 0.7
+        cost_scaling_factor: 3.0   # 原 2.0 衰减太慢，软膨胀区太胖
+        inflation_radius: 0.2    # 用户实测要求 0.2；注意：小于内切半径 0.28，软缓冲带消失，路径会贴墙
       obstacle_layer:
         plugin: nav2_costmap_2d::ObstacleLayer
         enabled: true
@@ -128,7 +129,7 @@ local_costmap:
           marking: true
           data_type: LaserScan
           raytrace_max_range: 15.0
-          raytrace_min_range: 0.0
+          raytrace_min_range: 1.5   # 雷达近场盲区 1.5m 内禁止射线清除，防止牙子靠近后被抹掉
           obstacle_max_range: 10.0
           obstacle_min_range: 0.0
           inf_is_valid: true
@@ -163,14 +164,14 @@ global_costmap:
           obstacle_max_range: 10.0
           obstacle_min_range: 0.0
           raytrace_max_range: 15.0
-          raytrace_min_range: 0.0
+          raytrace_min_range: 1.5   # 同局部层：近场盲区禁止清除，保留牙子记忆
       static_layer:
         plugin: nav2_costmap_2d::StaticLayer
         map_subscribe_transient_local: true
       inflation_layer:
         plugin: nav2_costmap_2d::InflationLayer
-        cost_scaling_factor: 2.0
-        inflation_radius: 0.7
+        cost_scaling_factor: 3.0   # 原 2.0 衰减太慢，软膨胀区太胖
+        inflation_radius: 0.2    # 用户实测要求 0.2；注意：小于内切半径 0.28，软缓冲带消失，路径会贴墙
       always_send_full_costmap: true
 map_server:
   ros__parameters:

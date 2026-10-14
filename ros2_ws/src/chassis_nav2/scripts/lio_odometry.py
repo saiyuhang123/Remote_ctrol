@@ -62,6 +62,9 @@ class LioOdometry(Node):
         self.publisher.publish(out)
         tf = TransformStamped()
         tf.header, tf.child_frame_id = out.header, out.child_frame_id
+        # TF 用发布时间戳：保证任何消息（捕获时刻）做 TF 查询时数据已存在。
+        # 用 LIO 采样时刻会导致查询"向未来外推"，触发 tf2 waitForTransform 死锁（RViz 卡死）
+        tf.header.stamp = self.get_clock().now().to_msg()
         tf.transform.translation.x, tf.transform.translation.y, tf.transform.translation.z = map(float, matrix[:3, 3])
         tf.transform.rotation = out.pose.pose.orientation
         if self.tf:

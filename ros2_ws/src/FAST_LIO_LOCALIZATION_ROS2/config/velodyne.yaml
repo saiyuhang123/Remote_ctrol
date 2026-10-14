@@ -19,7 +19,10 @@
       scan_line: 32
       scan_rate: 10
       timestamp_unit: 0
-      blind: 2.0
+      # 盲区半径(m)：1.5 = 滤掉车身及近场残影（实测车身最远点 0.8m，仍见残影故继续扩大）。
+      # 警告：接近小房间尺度（墙距 1~2m），盲区过大会丢光约束导致 LIO 发散（2.0 已实锤）；
+      # 若再出现定位发散，优先回调此值。与定位配置 velodyne_test.yaml 保持一致。
+      blind: 1.5
     mapping:
       acc_cov: 0.1
       gyr_cov: 0.1

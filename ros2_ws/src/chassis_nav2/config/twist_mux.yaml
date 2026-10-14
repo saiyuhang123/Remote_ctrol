@@ -6,6 +6,10 @@ twist_mux:
         topic: /cmd_vel_auto
         timeout: 0.5
         priority: 10
+      final_approach:
+        topic: /cmd_vel_final
+        timeout: 0.5
+        priority: 50
       teleop:
         topic: /cmd_vel_teleop
         timeout: 0.5

@@ -15,7 +15,8 @@ from builtin_interfaces.msg import Time
 from geometry_msgs.msg import PoseWithCovarianceStamped, Twist
 from nav_msgs.msg import Odometry
 from std_msgs.msg import Bool
-from chassis_nav2.geometry import transform, inverse, quaternion, ackermann_command
+from chassis_nav2.geometry import transform, inverse, quaternion, ackermann_command, ackermann_command_4ws
+from chassis_nav2.final_approach_logic import FinalApproachLogic
 from chassis_nav2.wheel_odometry import WheelOdometry
 from chassis_nav2 import bringup
 
@@ -89,6 +90,23 @@ class IntegrationTests(unittest.TestCase):
         self.assertAlmostEqual(limited[0], 1.08)
         self.assertEqual(abs(limited[1]), 27.)
 
+    def test_jd03_four_wheel_steering_command(self):
+        motor, front, rear, gear, brake = ackermann_command_4ws(.2, .1, .5, 27., .3)
+        self.assertAlmostEqual(motor, .72)
+        # Counter-phase rear steering: half the front angle, rear mirrored.
+        self.assertAlmostEqual(front, -math.degrees(math.atan(.125)))
+        self.assertAlmostEqual(rear, -front)
+        self.assertEqual((gear, brake), (1, False))
+        reverse = ackermann_command_4ws(-.2, .1, .5, 27., .3)
+        self.assertEqual(reverse[3], 3)
+        self.assertEqual(ackermann_command_4ws(0., .5, .5, 27., .3), (0., 0., 0., 1, True))
+        self.assertTrue(ackermann_command_4ws(float('nan'), 0., .5, 27., .3)[4])
+        limited = ackermann_command_4ws(2., 10., .5, 27., .3)
+        self.assertEqual(abs(limited[1]), 27.)
+        self.assertEqual(abs(limited[2]), 27.)
+        crab = ackermann_command_4ws(.2, .1, .5, 27., .3, rear_steering_sign=1.)
+        self.assertAlmostEqual(crab[2], crab[1])
+
     def test_lio_body_offset_velocity_and_duplicate_stamp(self):
         cls = load(SRC/'chassis_nav2/scripts/lio_odometry.py').LioOdometry
         node = cls.__new__(cls)
@@ -96,6 +114,7 @@ class IntegrationTests(unittest.TestCase):
         node.body_from_base, node.previous = inverse(base_body), None
         node.odom_frame, node.comparison = 'odom', None
         node.publisher, node.tf = Capture(), Capture()
+        node.get_clock = lambda: SimpleNamespace(now=lambda: SimpleNamespace(to_msg=lambda: Time()))
         base0 = transform([1., 2., .1], [0., 0., .4])
         node.receive(pose(base0 @ base_body))
         out = node.publisher.messages[-1]
@@ -113,6 +132,7 @@ class IntegrationTests(unittest.TestCase):
         node = cls.__new__(cls)
         node.wheel_base, node.max_steering_deg, node.max_speed = .5, 27., .3
         node.command_steering_sign, node.cmd_timeout, node.estopped = -1., .5, False
+        node.four_wheel_steering, node.rear_steering_sign = False, -1.
         node.ecu_pub, node.feedback_time = Capture(), time.monotonic()
         node.command = time.monotonic(), .2, .1
         node.get_clock = lambda: SimpleNamespace(now=lambda: SimpleNamespace(to_msg=lambda: Time()))
@@ -154,6 +174,81 @@ class IntegrationTests(unittest.TestCase):
         wanted = rear + [math.sin(1.), 1-math.cos(1.)] - rotation @ rear
         np.testing.assert_allclose(sample[0][:2], wanted, atol=1e-12)
         np.testing.assert_allclose(sample[1], [1.1, .25, 1.], atol=1e-12)
+
+    def test_wheel_odometry_four_wheel_steering_doubles_yaw_rate(self):
+        model = WheelOdometry(.5, [0., 0.], four_wheel_steering=True)
+        for i in range(6):
+            sample = model.update(1+i*.2, 1., math.atan(.5), 1)
+        # Yaw rate doubles and the zero-slip reference moves to mid-wheelbase.
+        yaw = 2.
+        wanted = [.25*(1-math.cos(yaw))+.5*math.sin(yaw),
+                  .5*(1-math.cos(yaw))-.25*math.sin(yaw), yaw]
+        np.testing.assert_allclose(sample[0], wanted, atol=1e-12)
+        np.testing.assert_allclose(sample[1], [1., -.5, 2.], atol=1e-12)
+        measured = WheelOdometry(.5, [0., 0.], four_wheel_steering=True, four_wheel_yaw_gain=1.)
+        for i in range(6):
+            sample = measured.update(1+i*.2, 1., math.atan(.5), 1)
+        np.testing.assert_allclose(sample[0][2], 1., atol=1e-12)
+
+    def test_reeds_shepp_paths_reach_goal_exactly(self):
+        # 对每条生成的路径词做运动学积分，终点必须与目标位姿一致
+        from chassis_nav2.reeds_shepp import generate_paths
+        import random
+        random.seed(7)
+        cases = [(0., .4, 0.), (-.5, 0., 0.), (0., 2.01, -2.77), (.3, -.2, 1.2)]
+        cases += [(random.uniform(-2, 2), random.uniform(-2, 2),
+                   random.uniform(-math.pi, math.pi)) for _ in range(40)]
+        for dx, dy, dyaw in cases:
+            paths = generate_paths(dx, dy, dyaw, 1.45)
+            self.assertTrue(paths, f'无路径：{(dx, dy, dyaw)}')
+            for lengths, ctypes in paths:
+                x = y = yaw = 0.
+                for length, ctype in zip(lengths, ctypes):
+                    dist = length / 1.45
+                    if ctype == 'S':
+                        x += dist * math.cos(yaw)
+                        y += dist * math.sin(yaw)
+                    else:
+                        kappa = 1.45 if ctype == 'L' else -1.45
+                        turn = kappa * dist
+                        x += (math.sin(yaw + turn) - math.sin(yaw)) / kappa
+                        y += (math.cos(yaw) - math.cos(yaw + turn)) / kappa
+                        yaw += turn
+                yaw = math.atan2(math.sin(yaw), math.cos(yaw))
+                self.assertAlmostEqual(x, dx, places=6, msg=f'{ctypes}{lengths}')
+                self.assertAlmostEqual(y, dy, places=6, msg=f'{ctypes}{lengths}')
+                self.assertAlmostEqual(yaw, math.atan2(math.sin(dyaw), math.cos(dyaw)),
+                                       places=6, msg=f'{ctypes}{lengths}')
+
+    def test_final_approach_rs_first_segment_and_done(self):
+        logic = FinalApproachLogic(speed=.1, max_curvature=1.45, settle_time=.2)
+        v, w, _ = logic.update(1., 0., 0., .05)
+        self.assertGreater(v, 0.)      # 正前方：直行
+        self.assertAlmostEqual(w, 0.)
+        v, w, _ = logic.update(-.5, 0., 0., .05)
+        self.assertLess(v, 0.)         # 正后方：倒车
+        self.assertAlmostEqual(w, 0.)
+        v, w, _ = logic.update(0., .4, 0., .05)
+        self.assertLessEqual(abs(w / v), 1.45)  # 侧移：首段曲率必可行
+        self.assertGreater(abs(w), 0.)
+        self.assertIsNotNone(logic.path_length)
+        for _ in range(3):
+            v, w, status = logic.update(.01, 0., .01, .05)
+        self.assertEqual((v, w), (0., 0.))
+        self.assertEqual(status, FinalApproachLogic.RUNNING)
+        _, _, status = logic.update(.01, 0., .01, .05)
+        self.assertEqual(status, FinalApproachLogic.DONE)
+        timeout = FinalApproachLogic(timeout=.2)
+        _, _, status = timeout.update(1., 0., 0., .3)
+        self.assertEqual(status, FinalApproachLogic.FAILED)
+
+    def test_final_approach_fallback_pursuit_respects_curvature(self):
+        logic = FinalApproachLogic(speed=.1, max_curvature=.9)
+        v, w, _ = logic._approach(0., .23, .18)
+        self.assertLessEqual(abs(w / v), .8 * .9 + 1e-9)  # 自适应过冲压曲率到 80% 内
+        self.assertGreater(v, 0.)
+        v, w, _ = logic._approach(-.5, 0., 0.)
+        self.assertLess(v, 0.)
 
     def test_wheel_odometry_drops_bad_samples_and_does_not_invent_missing_motion(self):
         model = WheelOdometry(.5, [0., 0.])
@@ -342,7 +437,9 @@ class IntegrationTests(unittest.TestCase):
             params = yaml.safe_load(Path(rewritten).read_text())
             try:
                 radius = params['planner_server']['ros__parameters']['GridBased']['minimum_turning_radius']
-                self.assertAlmostEqual(radius, .5/math.tan(math.radians(27.)))
+                measured = hw['chassis'].get('min_turning_radius')
+                expected = float(measured) if measured is not None else .5/math.tan(math.radians(27.))
+                self.assertAlmostEqual(radius, expected)
                 costmap = params['local_costmap']['local_costmap']['ros__parameters']
                 self.assertEqual(__import__('json').loads(costmap['footprint']), hw['robot_geometry']['footprint'])
                 self.assertEqual(costmap['robot_base_frame'], 'base_link')

@@ -20,7 +20,11 @@ imu:
   print_debug: false
 
 scan:
-  min_height: 0.1             # base_link 坐标下的截取高度，需按新车及地面检查
+  # 实测（2026-10-14 室内平地）：地面簇 z=-0.193±0.011m，噪声上沿 -0.155m；阈值取离地 5cm。
+  # 12cm 牙子顶部 z≈-0.07，高出阈值 7cm，可稳定标记；但 >2° 的坡会把地面切进来，坡道不可通行。
+  # 注意：雷达近场盲区约 1.5m（垂直视场角），1.5m 内障碍本就没有回波。
+  # 粗糙地面会使噪声带变厚，换场地需用 scripts/measure_ground_noise.py 重测后上调。
+  min_height: -0.14
   max_height: 1.5
   range_min: 0.3
   range_max: 15.0
@@ -39,8 +43,8 @@ robot_geometry:
 
 # 纯轮速里程计独立确认，不要求雷达/IMU 外参或 footprint 已完成。
 wheel_odometry:
-  confirmed: false
-  rear_axle_translation: null # 后轴中心相对 base_link 的 [x,y]，m；不能假定原 CAD 原点在后轴
+  confirmed: true            # 2026-10-14 启用 wheel_imu 模式；比例为默认值，待实测校准
+  rear_axle_translation: [-0.25, 0.0] # 假设 0.5m 轴距关于 base_link 居中；系估计值，需卷尺实测
   speed_scale: 1.0            # cur_speed 解码为 m/s，实测距离校准比例；假设为后轴纵向速度
   steering_scale: 1.0         # cur_steer 实际前轮角度的校准比例
   steering_bias_deg: 0.0      # cur_steer 加此零位偏差，再应用 feedback_steering_sign
@@ -56,9 +60,13 @@ chassis:
   feedback_steering_sign: -1.0 # 厂商 wheelAngle() 右转为正，ROS yaw 左转为正
   max_speed: 0.3
   cmd_timeout: 0.5
+  four_wheel_steering: true # 双阿克曼反相四轮转向；若实测后轮与前轮同向偏（蟹行），把 rear_steering_sign 改为 -1.0
+  rear_steering_sign: 1.0    # 实车验证(2026-10-14)：R 通道与前轮同号时几何反向（反相转弯）
+  four_wheel_curvature_gain: 1.63 # 实测：满转角内圈直径 0.82m，中心半径 0.41+0.28=0.69m；κ = gain·tanδ/L
+  min_turning_radius: 0.69   # 实测(2026-10-14) 4WS 满转角内圈直径 0.82m 换算的车中心半径；规划器和精细接近按此限曲率
   driver:
     canbus_type: 1
-    main_can_id: 2
+    main_can_id: 1
     debug_can_id: 1
     can_eth_card: eno1
     can1_remote_ip: 192.168.1.10
@@ -66,7 +74,7 @@ chassis:
     can2_remote_ip: 192.168.1.10
     can2_remote_port: 4002
     local_ip: 192.168.1.102
-    local_port: 8002
+    local_port: 8001
     debug_mode: false
     show_sending_msg: false
     car_type: JD03

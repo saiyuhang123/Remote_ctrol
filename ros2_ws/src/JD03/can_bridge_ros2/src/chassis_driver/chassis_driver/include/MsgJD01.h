@@ -51,7 +51,7 @@ protected:
     void setEBrake(bool need = false);
     void setTorque(bool need = false);
     void setSpeed(double v);
-    void setWheelAngle(double angle, bool rear_wheel_flag);
+    void setWheelAngle(double front_angle, double rear_angle, bool rear_wheel_flag);
     void rosMsg2canMsg();
 
 public:
