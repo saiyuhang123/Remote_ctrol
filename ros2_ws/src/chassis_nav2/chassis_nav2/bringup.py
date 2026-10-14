@@ -122,7 +122,46 @@ def existing_file(value, label):
     return str(path.resolve())
 
 
-def navigation_nodes(map_yaml, hw, params_file):
+def sensor_nodes(hw, lidar_config):
+    return [Node(package='rslidar_sdk', executable='rslidar_sdk_node', name='rslidar_sdk_node',
+                 parameters=[{'config_path': existing_file(lidar_config, '速腾配置')}], output='screen'),
+            Node(package='wit_ros2_imu', executable='wit_ros2_imu', name='imuDriverNode',
+                 parameters=[hw['imu'], {'use_sim_time': False}], output='screen')]
+
+
+def bridge_node(hw):
+    base, angle, _ = geometry(hw)
+    if hw['chassis'].get('confirmed') is not True:
+        raise ValueError('启用 JD03 控制/轮式融合前需要确认 chassis 配置')
+    chassis_cfg = hw['chassis']
+    params = {k: chassis_cfg[k] for k in ('command_steering_sign', 'feedback_steering_sign', 'max_speed')}
+    params.update(wheel_base=base, max_steering_deg=angle, cmd_timeout=chassis_cfg['cmd_timeout'],
+                  enable_control=True,
+                  four_wheel_steering=bool(chassis_cfg.get('four_wheel_steering', False)),
+                  rear_steering_sign=float(chassis_cfg.get('rear_steering_sign', -1.)),
+                  four_wheel_curvature_gain=float(chassis_cfg.get('four_wheel_curvature_gain', 2.)))
+    return Node(package='chassis_nav2', executable='jd03_bridge.py', parameters=[params], output='screen')
+
+
+def ekf_node(hw):
+    return Node(package='robot_localization', executable='ekf_node', name='ekf_filter_node',
+                parameters=[str(share('chassis_nav2')/'config/ekf.yaml')],
+                remappings=[('odometry/filtered', '/odom')], output='screen')
+
+
+def scan_nodes(hw):
+    # 摄像头支柱等车身固定物裁剪：/scan 链路不经过 LIO 的 blind，需在入口抠掉
+    scan_params = dict(hw['scan'], use_sim_time=False, target_frame='base_link',
+                       transform_tolerance=.1, angle_min=-math.pi, angle_max=math.pi,
+                       use_inf=True, inf_epsilon=1.)
+    return [Node(package='chassis_nav2', executable='cloud_crop_box.py', name='cloud_crop_box',
+                 parameters=[{'use_sim_time': False}], output='screen'),
+            Node(package='pointcloud_to_laserscan', executable='pointcloud_to_laserscan_node',
+                 name='pointcloud_to_scan', parameters=[scan_params],
+                 remappings=[('cloud_in', '/velodyne_points_cropped'), ('scan', '/scan')], output='screen')]
+
+
+def navigation_nodes(map_yaml, hw, params_file, use_map_server=True):
     from nav2_common.launch import ReplaceString, RewrittenYaml
     base, angle, footprint = geometry(hw)
     # 优先使用实测最小转弯半径（hardware.yaml chassis.min_turning_radius）。
@@ -138,8 +177,10 @@ def navigation_nodes(map_yaml, hw, params_file):
         root_key='', param_rewrites={'footprint': json.dumps(footprint),
                                      'minimum_turning_radius': str(turning_radius),
                                      'use_sim_time': 'false'}, convert_types=True)
-    nodes = [Node(package='nav2_map_server', executable='map_server', name='map_server',
-                  parameters=[params, {'yaml_filename': map_yaml, 'use_sim_time': False}], output='screen')]
+    nodes = []
+    if use_map_server:
+        nodes.append(Node(package='nav2_map_server', executable='map_server', name='map_server',
+                          parameters=[params, {'yaml_filename': map_yaml, 'use_sim_time': False}], output='screen'))
     names = []
     for package, executable in [('nav2_controller', 'controller_server'),
                                 ('nav2_smoother', 'smoother_server'),
@@ -156,12 +197,13 @@ def navigation_nodes(map_yaml, hw, params_file):
         nodes.append(Node(package=package, executable=executable, name=executable,
                           parameters=[params], remappings=remaps, output='screen'))
         names.append(executable)
-    nodes += [Node(package='nav2_lifecycle_manager', executable='lifecycle_manager',
-                   name='lifecycle_manager_map', parameters=[{'use_sim_time': False,
-                   'autostart': True, 'node_names': ['map_server']}], output='screen'),
-              Node(package='nav2_lifecycle_manager', executable='lifecycle_manager',
-                   name='lifecycle_manager_navigation', parameters=[{'use_sim_time': False,
-                   'autostart': True, 'node_names': names}], output='screen')]
+    if use_map_server:
+        nodes.append(Node(package='nav2_lifecycle_manager', executable='lifecycle_manager',
+                          name='lifecycle_manager_map', parameters=[{'use_sim_time': False,
+                          'autostart': True, 'node_names': ['map_server']}], output='screen'))
+    nodes.append(Node(package='nav2_lifecycle_manager', executable='lifecycle_manager',
+                      name='lifecycle_manager_navigation', parameters=[{'use_sim_time': False,
+                      'autostart': True, 'node_names': names}], output='screen'))
     return nodes
 
 
@@ -186,24 +228,11 @@ def configure(context):
         nodes += [static_tf(base_lidar, 'base_link', 'velodyne'),
                   static_tf(base_body, 'base_link', 'imu_link')]
     if args['start_sensors'].lower() == 'true':
-        nodes += [Node(package='rslidar_sdk', executable='rslidar_sdk_node', name='rslidar_sdk_node',
-                       parameters=[{'config_path': existing_file(args['lidar_config'], '速腾配置')}], output='screen'),
-                  Node(package='wit_ros2_imu', executable='wit_ros2_imu', name='imuDriverNode',
-                       parameters=[hw['imu'], {'use_sim_time': False}], output='screen')]
+        nodes += sensor_nodes(hw, args['lidar_config'])
     if chassis:
         nodes.append(chassis_node(hw))
     if control:
-        base, angle, _ = geometry(hw)
-        if hw['chassis'].get('confirmed') is not True:
-            raise ValueError('启用 JD03 控制/轮式融合前需要确认 chassis 配置')
-        chassis_cfg = hw['chassis']
-        params = {k: chassis_cfg[k] for k in ('command_steering_sign', 'feedback_steering_sign', 'max_speed')}
-        params.update(wheel_base=base, max_steering_deg=angle, cmd_timeout=chassis_cfg['cmd_timeout'],
-                      enable_control=True,
-                      four_wheel_steering=bool(chassis_cfg.get('four_wheel_steering', False)),
-                      rear_steering_sign=float(chassis_cfg.get('rear_steering_sign', -1.)),
-                      four_wheel_curvature_gain=float(chassis_cfg.get('four_wheel_curvature_gain', 2.)))
-        nodes.append(Node(package='chassis_nav2', executable='jd03_bridge.py', parameters=[params], output='screen'))
+        nodes.append(bridge_node(hw))
     if source == 'wheel':
         nodes.append(wheel_node(hw, '/odom', 'odom', True, '/odom_wheel'))
     elif wheel_imu:
@@ -252,9 +281,7 @@ def configure(context):
                      'publish_tf': source == 'lio'}],
         additional_env={'OPENBLAS_NUM_THREADS': '1'}, output='screen'))
     if wheel_imu:
-        nodes.append(Node(package='robot_localization', executable='ekf_node', name='ekf_filter_node',
-                          parameters=[str(share('chassis_nav2')/'config/ekf.yaml')],
-                          remappings=[('odometry/filtered', '/odom')], output='screen'))
+        nodes.append(ekf_node(hw))
     elif source == 'lio':
         nodes.append(static_tf(np.eye(4), 'odom', 'lio_odom'))
     if mode in ('localization', 'navigation'):
@@ -264,15 +291,7 @@ def configure(context):
             nodes.append(Node(package='fast_lio_localization', executable=executable, name=name,
                               parameters=[profile_path, fast],
                               additional_env={'OPENBLAS_NUM_THREADS': '1', 'OMP_NUM_THREADS': '2'}, output='screen'))
-    # 摄像头支柱等车身固定物裁剪：/scan 链路不经过 LIO 的 blind，需在入口抠掉
-    nodes.append(Node(package='chassis_nav2', executable='cloud_crop_box.py', name='cloud_crop_box',
-                      parameters=[{'use_sim_time': False}], output='screen'))
-    scan_params = dict(hw['scan'], use_sim_time=False, target_frame='base_link',
-                       transform_tolerance=.1, angle_min=-math.pi, angle_max=math.pi,
-                       use_inf=True, inf_epsilon=1.)
-    nodes.append(Node(package='pointcloud_to_laserscan', executable='pointcloud_to_laserscan_node',
-                      name='pointcloud_to_scan', parameters=[scan_params],
-                      remappings=[('cloud_in', '/velodyne_points_cropped'), ('scan', '/scan')], output='screen'))
+    nodes += scan_nodes(hw)
     if mode == 'localization' and args['map']:
         # 定位模式可选加载 Nav2 栅格地图（pcd2pgm 切片产物），供 RViz 叠加显示
         map_yaml = existing_file(args['map'], 'Nav2 栅格地图')
