@@ -43,10 +43,13 @@ robot_geometry:
 
 # 纯轮速里程计独立确认，不要求雷达/IMU 外参或 footprint 已完成。
 wheel_odometry:
-  confirmed: true            # 2026-10-14 启用 wheel_imu 模式；比例为默认值，待实测校准
+  confirmed: true            # 2026-10-15 bag 实测校准：见 speed_scale 注释
   rear_axle_translation: [-0.25, 0.0] # 假设 0.5m 轴距关于 base_link 居中；系估计值，需卷尺实测
-  speed_scale: 1.0            # cur_speed 解码为 m/s，实测距离校准比例；假设为后轴纵向速度
-  steering_scale: 1.0         # cur_steer 实际前轮角度的校准比例
+  # cur_speed 反馈约为真实速度的 4.5 倍（2026-10-15 bag：原地转 360°，IMU 实测 -367.6°，
+  # 轮速模型推算 -1666.4°，比值 4.53；直行 2m 反馈积分 8.5m，比值 4.25，两处互证）。
+  # 精确值建议卷尺量 3m 直线后微调：speed_scale = 实量距离 / odom_raw 积分距离。
+  speed_scale: 0.22
+  steering_scale: 1.0         # cur_steer 实测无明显比例误差（直行窗推算偏航率与 IMU 吻合）
   steering_bias_deg: 0.0      # cur_steer 加此零位偏差，再应用 feedback_steering_sign
   max_feedback_gap: 0.5       # 反馈间隔超过此值，不推算丢失期间的位移
   stamp_source: receipt      # 厂家 header 未填；使用本机接收时间。填好采样时间后可改 header

@@ -488,10 +488,17 @@ class imuDriverNode(Node):
 
         if not orientation_valid:
             imuMsg.orientation_covariance[0] = -1.0
+        else:
+            # 全零协方差（零测量噪声）会导致 robot_localization 不采纳该测量：
+            # 实测 EKF 航向完全不跟踪 IMU（2026-10-15 bag 分析偏差达 560°）。
+            # roll/pitch 有加速度计静态约束，噪声小；yaw 无磁参考会漂，方差给大。
+            imuMsg.orientation_covariance[0] = 0.0004   # roll，std ~1.1°
+            imuMsg.orientation_covariance[4] = 0.0004   # pitch
+            imuMsg.orientation_covariance[8] = 0.01     # yaw，std ~5.7°，靠 EKF 与轮速互相约束
 
-        # 其余协方差未知，需按实机噪声标定
-
-        imuMsg.angular_velocity_covariance[8]= 0.02
+        imuMsg.angular_velocity_covariance[0] = 0.02
+        imuMsg.angular_velocity_covariance[4] = 0.02
+        imuMsg.angular_velocity_covariance[8] = 0.02
 
 
         self.imuPublisher.publish(imuMsg)

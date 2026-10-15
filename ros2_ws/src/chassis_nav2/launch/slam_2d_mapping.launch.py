@@ -16,6 +16,7 @@ def generate_launch_description():
         DeclareLaunchArgument('start_sensors', default_value='true', choices=['true', 'false']),
         DeclareLaunchArgument('start_chassis', default_value='false', choices=['true', 'false']),
         DeclareLaunchArgument('enable_control', default_value='false', choices=['true', 'false']),
+        DeclareLaunchArgument('start_nav2', default_value='false', choices=['true', 'false']),
         DeclareLaunchArgument('rviz', default_value='false', choices=['true', 'false']),
         OpaqueFunction(function=configure_mapping),
     ])

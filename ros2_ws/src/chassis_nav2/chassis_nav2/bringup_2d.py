@@ -78,13 +78,16 @@ def assemble(args, mapping, backend):
     nodes.append(Node(package='robot_state_publisher', executable='robot_state_publisher',
                       parameters=[{'robot_description': description, 'use_sim_time': False}], output='screen'))
     nodes += bringup.scan_nodes(hw)
-    nav2_params = bringup.existing_file(args['nav2_params'], 'Nav2 参数')
     nodes += BACKENDS[backend](nav_share, args, mapping)
     if mapping:
-        # 建图时没有先验栅格地图：不开 map_server，全局代价地图不含静态层
-        nodes.extend(bringup.navigation_nodes(None, hw, nav2_params, use_map_server=False))
+        # 建图默认遥控，不起 Nav2；需要边建图边发目标点时 start_nav2:=true，
+        # 此时没有先验栅格地图：不开 map_server，全局代价地图不含静态层
+        if args.get('start_nav2', 'false').lower() == 'true':
+            nodes.extend(bringup.navigation_nodes(None, hw, bringup.existing_file(
+                args['nav2_params'], 'Nav2 参数'), use_map_server=False))
         rviz_config = str(nav_share/'config/slam.rviz')
     else:
+        nav2_params = bringup.existing_file(args['nav2_params'], 'Nav2 参数')
         nodes.extend(bringup.navigation_nodes(bringup.existing_file(args['map'], 'Nav2 栅格地图'),
                                               hw, nav2_params, use_map_server=True))
         rviz_config = str(nav_share/'config/localization_nav.rviz')

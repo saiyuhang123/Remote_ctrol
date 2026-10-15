@@ -28,6 +28,9 @@ Visualization Manager:
       Enabled: true
       Topic:
         Value: /scan
+        Depth: 5
+        Durability Policy: Volatile
+        Reliability Policy: Best Effort
   Enabled: true
   Global Options:
     Background Color: 48; 48; 48
