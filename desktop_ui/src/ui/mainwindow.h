@@ -1,0 +1,61 @@
+#pragma once
+#include "adapters/ros_adapter.h"
+#include "runtime/config.h"
+#include <QJsonArray>
+#include <QMainWindow>
+#include <QVector>
+class GatewayClient; class BusinessClient; class ProcessManager; class MapSaver; class RvizHost;
+class QCheckBox; class QComboBox; class QDoubleSpinBox; class QLabel; class QLineEdit;
+class QPlainTextEdit; class QProgressBar; class QPushButton; class QTableWidget; class QStackedWidget;
+class DashBoard;
+namespace ads { class CDockManager; }
+namespace Ui { class MainWindow; }
+
+class MainWindow : public QMainWindow {
+  Q_OBJECT
+public:
+  MainWindow(const DesktopConfig &config, bool offline, QWidget *parent = nullptr);
+  ~MainWindow() override;
+  void setProfileIndex(int index);
+  bool saveScreenshot(const QString &path);
+protected:
+  void closeEvent(QCloseEvent *event) override;
+  void changeEvent(QEvent *event) override;
+private:
+  const Profile &profile() const;
+  void setupUi();
+  void applyProfile();
+  void log(const QString &message);
+  void updateControls();
+  void updateSnapshot(const RobotSnapshot &state);
+  void sendGoal(double x, double y, double yaw);
+  void sendInitialPose(double x, double y, double yaw);
+  void startSession();
+  void showPoints(const QJsonArray &points);
+  bool allowed() const;
+  DesktopConfig config_;
+  bool offline_;
+  Ui::MainWindow *ui_ = nullptr;
+  ads::CDockManager *docks_ = nullptr;
+  GatewayClient *gateway_ = nullptr;
+  BusinessClient *business_ = nullptr;
+  RosAdapter *ros_ = nullptr;
+  ProcessManager *process_ = nullptr;
+  MapSaver *saver_ = nullptr;
+  RvizHost *rviz_ = nullptr;
+  RobotSnapshot state_;
+  QComboBox *profiles_ = nullptr, *odom_ = nullptr;
+  QCheckBox *enableControl_ = nullptr, *manage_ = nullptr, *sensors_ = nullptr, *chassis_ = nullptr, *bridge_ = nullptr;
+  QLineEdit *gatewayUrl_ = nullptr, *backendUrl_ = nullptr, *mapPrefix_ = nullptr;
+  QDoubleSpinBox *goalX_ = nullptr, *goalY_ = nullptr, *goalYaw_ = nullptr, *speed_ = nullptr, *turn_ = nullptr;
+  QDoubleSpinBox *pan_ = nullptr, *tilt_ = nullptr, *zoom_ = nullptr;
+  QLabel *connection_ = nullptr, *pose_ = nullptr, *velocity_ = nullptr, *stopState_ = nullptr, *navState_ = nullptr;
+  QLabel *power_ = nullptr, *camera_ = nullptr, *picture_ = nullptr, *ocr_ = nullptr;
+  QProgressBar *battery_ = nullptr;
+  QStackedWidget *speedStack_ = nullptr;
+  DashBoard *dashboard_ = nullptr;
+  QPlainTextEdit *logs_ = nullptr;
+  QTableWidget *points_ = nullptr;
+  QPushButton *start_ = nullptr, *stop_ = nullptr, *save_ = nullptr, *take_ = nullptr, *unlock_ = nullptr;
+  QVector<QPushButton *> directionButtons_, writeButtons_;
+};

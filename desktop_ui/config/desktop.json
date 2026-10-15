@@ -1,0 +1,13 @@
+{
+  "gateway_url": "ws://127.0.0.1:8765",
+  "backend_url": "http://127.0.0.1:8888",
+  "default_profile": "fastlio_navigation",
+  "base_frame": "base_link",
+  "odom_topic": "/odom",
+  "image_topic": "/hk_camera/image_raw",
+  "battery_topic": "/battery_status",
+  "max_linear": 0.3,
+  "max_angular": 0.5,
+  "feedback_timeout_ms": 1500,
+  "service_timeout_ms": 15000
+}

@@ -1,0 +1,67 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<ui version="4.0">
+ <!-- 指定主窗口的类名为MainWindow -->
+ <class>MainWindow</class>
+ <!-- 定义一个主窗口部件，类为QMainWindow，命名为MainWindow -->
+ <widget class="QMainWindow" name="MainWindow">
+  <!-- 设置主窗口的初始位置和大小 -->
+  <property name="geometry">
+   <rect>
+    <x>0</x>
+    <y>0</y>
+    <width>1438</width>
+    <height>944</height>
+   </rect>
+  </property>
+  <!-- 设置主窗口的标题 -->
+  <property name="windowTitle">
+   <string>MainWindow</string>
+  </property>
+  <!-- 定义一个中心部件，类型为QWidget，命名为centralwidget -->
+  <widget class="QWidget" name="centralwidget">
+   <!-- 为中心部件定义布局，采用垂直布局 -->
+   <layout class="QVBoxLayout" name="verticalLayout"/>
+  </widget>
+  <!-- 定义一个菜单栏部件，命名为menubar -->
+  <widget class="QMenuBar" name="menubar">
+   <!-- 设置菜单栏部件的位置和大小 -->
+   <property name="geometry">
+    <rect>
+     <x>0</x>
+     <y>0</y>
+     <width>1438</width>
+     <height>28</height>
+    </rect>
+   </property>
+   <!-- 设置菜单的标题为“view” -->
+   <widget class="QMenu" name="menuView">
+    <property name="title">
+     <string>view</string>
+    </property>
+   </widget>
+   <!-- 将菜单添加到菜单栏中。 -->
+   <addaction name="menuView"/>
+  </widget>
+  <!-- 定义一个动作，命名为speed_ctrl -->
+  <action name="speed_ctrl">
+   <!-- 设置动作的显示文本 -->
+   <property name="text">
+    <string>speed_ctrl</string>
+   </property>
+  </action>
+  <!-- 定义另一个动作，命名为speed_dashboard -->
+  <action name="speed_dashboard">
+   <!-- 设置动作的显示文本 -->
+   <property name="text">
+    <string>speed_dashboard</string>
+   </property>
+  </action>
+ </widget>
+ <!-- 包含资源文件的位置 -->
+ <resources>
+  <!-- 包含资源文件images.qrc -->
+  <include location="../../resources/images.qrc"/>
+ </resources>
+ <!-- 定义信号与槽的连接关系。在这个UI文件中，并没有定义具体的信号与槽连接 -->
+ <connections/>
+</ui>
