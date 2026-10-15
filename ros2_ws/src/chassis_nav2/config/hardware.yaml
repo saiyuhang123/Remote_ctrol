@@ -53,16 +53,19 @@ wheel_odometry:
   speed_stddev: 0.05          # 估计噪声，m/s；需按实际反馈调整
   steering_stddev_deg: 1.0
   lateral_velocity_stddev: 0.02
+  min_yaw_rate_stddev: 0.01   # 停车且方向盘回正时模型推算的角速度方差会退化为 0，
+                             # 零方差测量会使下游 EKF 协方差奇异(NaN)；此为下限，rad/s
 
 chassis:
   confirmed: true            # eno1 通信参数已核对，底盘反馈已收到；转向和速度按厂家协议转换
   command_steering_sign: -1.0
   feedback_steering_sign: -1.0 # 厂商 wheelAngle() 右转为正，ROS yaw 左转为正
-  max_speed: 0.3
+  max_speed: 0.5
   cmd_timeout: 0.5
   four_wheel_steering: true # 双阿克曼反相四轮转向；若实测后轮与前轮同向偏（蟹行），把 rear_steering_sign 改为 -1.0
   rear_steering_sign: 1.0    # 实车验证(2026-10-14)：R 通道与前轮同号时几何反向（反相转弯）
   four_wheel_curvature_gain: 1.63 # 实测：满转角内圈直径 0.82m，中心半径 0.41+0.28=0.69m；κ = gain·tanδ/L
+  steering_rate_dps: 45.0  # 舵机转角速率上限（度/秒）；防止控制器输出抖动时舵机疯狂摆动
   min_turning_radius: 0.69   # 实测(2026-10-14) 4WS 满转角内圈直径 0.82m 换算的车中心半径；规划器和精细接近按此限曲率
   driver:
     canbus_type: 1

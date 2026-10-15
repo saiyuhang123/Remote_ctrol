@@ -6,7 +6,8 @@ import numpy as np
 class WheelOdometry:
     def __init__(self, wheel_base, rear_axle, speed_stddev=.05,
                  steering_stddev_deg=1., lateral_stddev=.02, max_gap=.5,
-                 four_wheel_steering=False, four_wheel_yaw_gain=2.0):
+                 four_wheel_steering=False, four_wheel_yaw_gain=2.0,
+                 min_yaw_rate_stddev=.01):
         self.wheel_base = wheel_base
         self.rear_axle = np.asarray(rear_axle, dtype=float)
         self.four_wheel_steering = four_wheel_steering
@@ -19,6 +20,9 @@ class WheelOdometry:
         self.speed_variance = speed_stddev**2
         self.steering_variance = math.radians(steering_stddev_deg)**2
         self.lateral_variance = lateral_stddev**2
+        # Zero speed with centered steering would model yaw-rate variance as exactly
+        # zero; a zero-variance measurement singularizes the downstream EKF (NaN).
+        self.min_yaw_rate_variance = min_yaw_rate_stddev**2
         self.max_gap = max_gap
         # Start base_link at (0,0,0), even when the reference is offset from base_link.
         self.state = np.array([*self.reference, 0.])
@@ -45,6 +49,7 @@ class WheelOdometry:
             [[1., 0.], [steer_gain*tangent/self.wheel_base,
                         steer_gain*v*(1+tangent*tangent)/self.wheel_base]])
         noise = noise_jacobian @ np.diag([self.speed_variance, self.steering_variance]) @ noise_jacobian.T
+        noise[1, 1] = max(noise[1, 1], self.min_yaw_rate_variance)
         gap = False
         if self.previous:
             old_stamp, old_v, old_w = self.previous

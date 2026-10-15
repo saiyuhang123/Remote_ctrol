@@ -7,6 +7,7 @@ bt_navigator:
     robot_base_frame: base_link
     odom_topic: /odom
     bt_loop_duration: 100
+    always_reload_bt_xml: true
     default_server_timeout: 20
     wait_for_service_timeout: 1000
     default_nav_to_pose_bt_xml: '@CHASSIS_NAV2_SHARE@/config/bt/navigate_to_pose_w_replanning_and_recovery.xml'
@@ -87,16 +88,17 @@ controller_server:
       yaw_goal_tolerance: 0.523599
     FollowPath:
       plugin: nav2_regulated_pure_pursuit_controller::RegulatedPurePursuitController
-      desired_linear_vel: 0.3
-      lookahead_dist: 1.2
-      min_lookahead_dist: 0.5
-      max_lookahead_dist: 2.5
+      desired_linear_vel: 0.5
+      lookahead_dist: 0.9    # 车速 0.5m/s；太短转向敏感会扭，太长切弯
+      min_lookahead_dist: 0.3
+      max_lookahead_dist: 1.5
       rotate_to_heading_angular_vel: 0.5
       transform_tolerance: 0.5
       xy_goal_tolerance: 0.25
       use_rotate_to_heading: false
       max_angular_accel: 1.5
       allow_reversing: true
+
 local_costmap:
   local_costmap:
     ros__parameters:
@@ -116,8 +118,8 @@ local_costmap:
       - inflation_layer
       inflation_layer:
         plugin: nav2_costmap_2d::InflationLayer
-        cost_scaling_factor: 3.0   # 原 2.0 衰减太慢，软膨胀区太胖
-        inflation_radius: 0.2    # 用户实测要求 0.2；注意：小于内切半径 0.28，软缓冲带消失，路径会贴墙
+        cost_scaling_factor: 10.0  # 陡衰减：3cm 软带内代价就掉光，窄缝中心保持自由，通过性不受影响
+        inflation_radius: 0.32   # 略大于内切半径 0.29 的最小可用值：产生"离墙远代价低"的梯度，全局路径不再贴障碍边
       obstacle_layer:
         plugin: nav2_costmap_2d::ObstacleLayer
         enabled: true
@@ -129,7 +131,7 @@ local_costmap:
           marking: true
           data_type: LaserScan
           raytrace_max_range: 15.0
-          raytrace_min_range: 1.5   # 雷达近场盲区 1.5m 内禁止射线清除，防止牙子靠近后被抹掉
+          raytrace_min_range: 0.0   # 全距离射线清除（原 1.5m 近场保护会导致幽灵障碍滞留，牙子保护后续另议）
           obstacle_max_range: 10.0
           obstacle_min_range: 0.0
           inf_is_valid: true
@@ -163,11 +165,11 @@ global_costmap:
           obstacle_max_range: 10.0
           obstacle_min_range: 0.0
           raytrace_max_range: 15.0
-          raytrace_min_range: 1.5   # 同局部层：近场盲区禁止清除，保留牙子记忆
+          raytrace_min_range: 0.0   # 同局部层：全距离射线清除，幽灵障碍随新帧即消
       inflation_layer:
         plugin: nav2_costmap_2d::InflationLayer
-        cost_scaling_factor: 3.0   # 原 2.0 衰减太慢，软膨胀区太胖
-        inflation_radius: 0.2    # 用户实测要求 0.2；注意：小于内切半径 0.28，软缓冲带消失，路径会贴墙
+        cost_scaling_factor: 10.0  # 陡衰减：3cm 软带内代价就掉光，窄缝中心保持自由，通过性不受影响
+        inflation_radius: 0.32   # 略大于内切半径 0.29 的最小可用值：产生"离墙远代价低"的梯度，全局路径不再贴障碍边
       always_send_full_costmap: true
 planner_server:
   ros__parameters:
@@ -188,13 +190,34 @@ planner_server:
 smoother_server:
   ros__parameters:
     use_sim_time: false
+    costmap_topic: global_costmap/costmap_raw
+    footprint_topic: global_costmap/published_footprint
+    robot_base_frame: base_link
+    transform_timeout: 0.1
     smoother_plugins:
-    - simple_smoother
-    simple_smoother:
-      plugin: nav2_smoother::SimpleSmoother
-      tolerance: 0.15
-      max_its: 50
-      do_refinement: true
+    - constrained_smoother
+    constrained_smoother:
+      # ConstrainedSmoother：障碍感知 + 最小转弯半径约束，替代 SimpleSmoother（不感知障碍会切弯）
+      plugin: nav2_constrained_smoother/ConstrainedSmoother
+      minimum_turning_radius: 0.69   # launch 时按 hardware.yaml 实测值再注入
+      reversing_enabled: true
+      path_downsampling_factor: 1
+      path_upsampling_factor: 1
+      keep_start_orientation: true
+      keep_goal_orientation: true
+      w_smooth: 2000000.0
+      w_dist: 0.0
+      w_curve: 30.0
+      w_cost: 0.05        # 障碍代价权重高于默认 0.015，平滑不许往障碍上贴
+      w_cost_cusp_multiplier: 3.0
+      cusp_zone_length: 2.5
+      optimizer:
+        max_iterations: 100
+        debug_optimizer: false
+        fn_tol: 1.0e-07
+        gradient_tol: 1.0e-10
+        param_tol: 1.0e-15
+        linear_solver_type: SPARSE_NORMAL_CHOLESKY
 behavior_server:
   ros__parameters:
     costmap_topic: local_costmap/costmap_raw
@@ -241,17 +264,17 @@ velocity_smoother:
     scale_velocities: false
     feedback: OPEN_LOOP
     max_velocity:
-    - 0.3
+    - 0.5
     - 0.0
-    - 0.6
+    - 0.8
     min_velocity:
     - -0.2
     - 0.0
-    - -0.6
+    - -0.8
     max_accel:
-    - 0.3
+    - 0.5
     - 0.0
-    - 0.6
+    - 0.8
     max_decel:
     - -0.5
     - 0.0

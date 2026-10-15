@@ -17,16 +17,20 @@ class JD03Bridge(Node):
                     'cmd_timeout': .5, 'command_steering_sign': -1.,
                     'feedback_steering_sign': -1., 'enable_control': False,
                     'four_wheel_steering': False, 'rear_steering_sign': -1.,
-                    'four_wheel_curvature_gain': 2.}
+                    'four_wheel_curvature_gain': 2., 'steering_rate_dps': 45.}
         for name, value in defaults.items():
             setattr(self, name, self.declare_parameter(name, value).value)
         if (self.wheel_base <= 0 or not 0 < self.max_steering_deg <= 27
                 or self.rear_steering_sign not in (-1., 1.)):
             raise ValueError('JD03 wheel_base must be positive; steering must be within encoder limit 27 degrees')
+        if self.steering_rate_dps <= 0:
+            raise ValueError('steering_rate_dps 必须为正数（舵机转角速率上限，度/秒）')
         self.command = None
         self.feedback_time = None
         self.ecu_pub = None
         self.estopped = False
+        self.last_steer = 0.
+        self.last_rear = 0.
         self.create_subscription(VehicleStatus, '/vehicle_status', self.feedback, 10)
         if self.enable_control:
             self.ecu_pub = self.create_publisher(Ecu, '/ecu', 10)
@@ -54,13 +58,18 @@ class JD03Bridge(Node):
                 v, w, self.wheel_base, self.max_steering_deg, self.max_speed,
                 self.command_steering_sign, self.rear_steering_sign,
                 self.four_wheel_curvature_gain)
-            msg.rear_steer = rear
-            msg.rear_wheel_flag = True
         else:
             motor, steer, gear, brake = ackermann_command(
                 v, w, self.wheel_base, self.max_steering_deg, self.max_speed, self.command_steering_sign)
-            msg.rear_steer = 0.
-            msg.rear_wheel_flag = False
+            rear = 0.
+        # 转向速率限制：低速时 δ=atan(L·w/(gain·v)) 对 w 抖动极度敏感，
+        # 控制器每帧跳动会导致舵机疯狂摆动；限速后转角平滑逼近目标
+        max_delta = self.steering_rate_dps * 0.05  # 定时器周期 0.05s
+        steer = self.last_steer + max(-max_delta, min(max_delta, steer - self.last_steer))
+        rear = self.last_rear + max(-max_delta, min(max_delta, rear - self.last_rear))
+        self.last_steer, self.last_rear = steer, rear
+        msg.rear_steer = rear
+        msg.rear_wheel_flag = self.four_wheel_steering
         msg.motor, msg.steer, msg.shift, msg.brake = motor, steer, gear, brake
         msg.set_torque = False
         self.ecu_pub.publish(msg)

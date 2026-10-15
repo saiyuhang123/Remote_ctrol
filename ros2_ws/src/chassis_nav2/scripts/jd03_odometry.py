@@ -28,7 +28,8 @@ class JD03Odometry(Node):
                     'speed_scale': 1., 'steering_scale': 1., 'steering_bias_deg': 0.,
                     'feedback_steering_sign': -1., 'max_feedback_gap': .5,
                     'speed_stddev': .05, 'steering_stddev_deg': 1.,
-                    'lateral_velocity_stddev': .02, 'stamp_source': 'receipt',
+                    'lateral_velocity_stddev': .02, 'min_yaw_rate_stddev': .01,
+                    'stamp_source': 'receipt',
                     'feedback_topic': '/vehicle_status', 'odom_topic': '/odom_wheel',
                     'odom_frame': 'wheel_odom', 'base_frame': 'base_link',
                     'comparison_topic': '', 'publish_tf': False,
@@ -37,7 +38,8 @@ class JD03Odometry(Node):
             setattr(self, name, self.declare_parameter(name, value).value)
         numeric = (self.wheel_base, self.speed_scale, self.steering_scale,
                    self.feedback_steering_sign, self.max_feedback_gap, self.speed_stddev,
-                   self.steering_stddev_deg, self.lateral_velocity_stddev)
+                   self.steering_stddev_deg, self.lateral_velocity_stddev,
+                   self.min_yaw_rate_stddev)
         if (not all(math.isfinite(x) and x > 0 for x in numeric[:3]+numeric[4:])
                 or self.feedback_steering_sign not in (-1., 1.)
                 or not math.isfinite(self.steering_bias_deg)
@@ -49,7 +51,8 @@ class JD03Odometry(Node):
             self.speed_stddev, self.steering_stddev_deg,
             self.lateral_velocity_stddev, self.max_feedback_gap,
             four_wheel_steering=self.four_wheel_steering,
-            four_wheel_yaw_gain=self.four_wheel_yaw_gain)
+            four_wheel_yaw_gain=self.four_wheel_yaw_gain,
+            min_yaw_rate_stddev=self.min_yaw_rate_stddev)
         self.publisher = self.create_publisher(Odometry, self.odom_topic, 10)
         self.comparison = (self.create_publisher(Odometry, self.comparison_topic, 10)
                            if self.comparison_topic and self.comparison_topic != self.odom_topic else None)

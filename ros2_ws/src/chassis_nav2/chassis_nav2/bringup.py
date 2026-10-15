@@ -59,7 +59,8 @@ def wheel_parameters(hw):
         raise ValueError('轮速里程计需要实测 robot_geometry.wheel_base，单位 m')
     result = {k: cfg[k] for k in ('speed_scale', 'steering_scale', 'steering_bias_deg',
                                   'max_feedback_gap', 'speed_stddev', 'steering_stddev_deg',
-                                  'lateral_velocity_stddev', 'stamp_source')}
+                                  'lateral_velocity_stddev', 'min_yaw_rate_stddev',
+                                  'stamp_source')}
     result.update(wheel_base=float(base), rear_axle_translation=vector(
         cfg['rear_axle_translation'], 2, '后轴中心相对 base_link 的 x/y'),
         feedback_steering_sign=hw['chassis']['feedback_steering_sign'],
@@ -67,7 +68,7 @@ def wheel_parameters(hw):
         four_wheel_yaw_gain=float(hw['chassis'].get('four_wheel_curvature_gain', 2.)),
         use_sim_time=False)
     for key in ('speed_scale', 'steering_scale', 'max_feedback_gap', 'speed_stddev',
-                'steering_stddev_deg', 'lateral_velocity_stddev'):
+                'steering_stddev_deg', 'lateral_velocity_stddev', 'min_yaw_rate_stddev'):
         result[key] = vector([result[key]], 1, key)[0]
         if result[key] <= 0:
             raise ValueError(f'{key} 必须为正数')
@@ -139,7 +140,8 @@ def bridge_node(hw):
                   enable_control=True,
                   four_wheel_steering=bool(chassis_cfg.get('four_wheel_steering', False)),
                   rear_steering_sign=float(chassis_cfg.get('rear_steering_sign', -1.)),
-                  four_wheel_curvature_gain=float(chassis_cfg.get('four_wheel_curvature_gain', 2.)))
+                  four_wheel_curvature_gain=float(chassis_cfg.get('four_wheel_curvature_gain', 2.)),
+                  steering_rate_dps=float(chassis_cfg.get('steering_rate_dps', 45.)))
     return Node(package='chassis_nav2', executable='jd03_bridge.py', parameters=[params], output='screen')
 
 

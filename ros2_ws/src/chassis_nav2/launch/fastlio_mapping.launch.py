@@ -47,7 +47,7 @@ def generate_launch_description():
                               description='雷达/IMU 实测外参及维特串口配置'),
         DeclareLaunchArgument('lidar_config', default_value=str(lidar / 'config/config.yaml'),
                               description='速腾雷达驱动配置'),
-        DeclareLaunchArgument('map_dir', default_value=str(project / 'maps'),
+        DeclareLaunchArgument('map_dir', default_value=str(project / 'maps/fastlio'),
                               description='默认 PCD 保存目录（固定文件名 map.pcd）'),
         DeclareLaunchArgument('pcd_map', default_value='',
                               description='指定 PCD 保存路径；留空时保存为 map_dir/map.pcd'),

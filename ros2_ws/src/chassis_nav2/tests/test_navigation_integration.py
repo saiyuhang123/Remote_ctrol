@@ -133,6 +133,7 @@ class IntegrationTests(unittest.TestCase):
         node.wheel_base, node.max_steering_deg, node.max_speed = .5, 27., .3
         node.command_steering_sign, node.cmd_timeout, node.estopped = -1., .5, False
         node.four_wheel_steering, node.rear_steering_sign = False, -1.
+        node.steering_rate_dps, node.last_steer, node.last_rear = 45., 0., 0.
         node.ecu_pub, node.feedback_time = Capture(), time.monotonic()
         node.command = time.monotonic(), .2, .1
         node.get_clock = lambda: SimpleNamespace(now=lambda: SimpleNamespace(to_msg=lambda: Time()))
@@ -147,6 +148,30 @@ class IntegrationTests(unittest.TestCase):
         node.command, node.feedback_time = (time.monotonic()-2, .2, 0.), time.monotonic()
         node.send()
         self.assertTrue(node.ecu_pub.messages[-1].brake)
+
+    def test_jd03_steering_slew_rate_limits_swing(self):
+        # 低速时转角对 w 抖动敏感；速率限制后舵机只能平滑逼近，不能来回抽
+        cls = load(SRC/'chassis_nav2/scripts/jd03_bridge.py').JD03Bridge
+        node = cls.__new__(cls)
+        node.wheel_base, node.max_steering_deg, node.max_speed = .5, 27., .5
+        node.command_steering_sign, node.cmd_timeout, node.estopped = -1., .5, False
+        node.four_wheel_steering, node.rear_steering_sign = False, -1.
+        node.steering_rate_dps, node.last_steer, node.last_rear = 45., 0., 0.
+        node.ecu_pub, node.feedback_time = Capture(), time.monotonic()
+        node.command = time.monotonic(), .05, 1.0  # 低速大转角：期望打满 27°
+        node.get_clock = lambda: SimpleNamespace(now=lambda: SimpleNamespace(to_msg=lambda: Time()))
+        node.send()
+        first = node.ecu_pub.messages[-1].steer
+        node.send()
+        second = node.ecu_pub.messages[-1].steer
+        # 每周期(0.05s)最多转 45*0.05=2.25°，两次发送增量都应被钳在 2.25 内
+        self.assertLessEqual(abs(first), 2.25 + 1e-9)
+        self.assertLessEqual(abs(second - first), 2.25 + 1e-9)
+        # 反向指令同样被限速，而不是瞬时翻满
+        node.command = time.monotonic(), .05, -1.0
+        node.send()
+        third = node.ecu_pub.messages[-1].steer
+        self.assertLessEqual(abs(third - second), 2.25 + 1e-9)
 
     def test_wheel_odometry_straight_reverse_and_exact_turn(self):
         straight = WheelOdometry(.5, [0., 0.])
@@ -264,6 +289,23 @@ class IntegrationTests(unittest.TestCase):
         np.testing.assert_allclose(gap[0], sample[0], atol=1e-12)
         self.assertTrue(gap[-1])
         self.assertGreater(gap[2][0, 0], sample[2][0, 0])
+
+    def test_wheel_odometry_yaw_rate_variance_never_collapses_to_zero(self):
+        # 停车且方向盘回正时，模型推算的角速度方差曾退化为精确的 0，
+        # 零方差测量会使下游 EKF 协方差奇异(NaN)，必须有正下限。
+        model = WheelOdometry(.5, [0., 0.])
+        model.update(1., 1., 0., 1)
+        sample = model.update(1.1, 0., 0., 1)
+        self.assertAlmostEqual(sample[1][2], 0.)
+        self.assertGreaterEqual(sample[3][2, 2], .01**2)
+        custom = WheelOdometry(.5, [0., 0.], min_yaw_rate_stddev=.05)
+        custom.update(1., 1., 0., 1)
+        sample = custom.update(1.1, 0., 0., 1)
+        self.assertGreaterEqual(sample[3][2, 2], .05**2)
+        moving = WheelOdometry(.5, [0., 0.])
+        moving.update(1., 1., math.atan(.5), 1)
+        sample = moving.update(1.1, 1., math.atan(.5), 1)
+        self.assertGreater(sample[3][2, 2], .01**2)
 
     def test_wheel_ros_message_uses_measured_speed_even_when_braking(self):
         from yunle_msgs.msg import VehicleStatus
