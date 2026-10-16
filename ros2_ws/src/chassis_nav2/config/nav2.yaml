@@ -89,9 +89,12 @@ controller_server:
     FollowPath:
       plugin: nav2_regulated_pure_pursuit_controller::RegulatedPurePursuitController
       desired_linear_vel: 0.5
-      lookahead_dist: 0.9    # 车速 0.5m/s；太短转向敏感会扭，太长切弯
-      min_lookahead_dist: 0.3
-      max_lookahead_dist: 1.5
+      # 前视距离随速度缩放：折返点（倒车→前进）前曲率大，regulated 减速会把前视压到 min，
+      # 换向发生在贴近折返点处，倒车段走得完整；固定 0.9 曾导致倒车不够就提前换前进，来回振荡
+      use_velocity_scaled_lookahead_dist: true
+      lookahead_time: 1.5
+      min_lookahead_dist: 0.25
+      max_lookahead_dist: 0.7
       rotate_to_heading_angular_vel: 0.5
       transform_tolerance: 0.5
       xy_goal_tolerance: 0.20
