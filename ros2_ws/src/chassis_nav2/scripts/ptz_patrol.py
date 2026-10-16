@@ -18,7 +18,10 @@
 - diagonal（默认）：斜向指令四段绕圈，水平垂直同时动。俯仰幅度受控：
   每次开启巡航时以当前俯仰角为中心，只在其 ±tilt_range 度（默认 5°）内动，
   到边界即换向（"高低低高"小幅转圈）；设备不回读角度时退化为按 tilt_seconds
-  定时换向。回读值冻结不变（设备不上报真实角度）也自动退化为定时换向；
+  定时换向——此时巡航以开启那一刻的实际位置为中心上下交替，
+  先把相机手动调到想要的高度再开启即可；上下角速度不一致导致一边偏高/偏低时，
+  用 tilt_up_seconds / tilt_down_seconds 分别压缩该方向的时长。
+  回读值冻结不变（设备不上报真实角度）也自动退化为定时换向；
 - raster：水平扫到头 → 俯仰 tilt_seconds 秒 → 反向水平扫 → 反向俯仰，上下交替。
   云台控制是单指令通道时才需要的降级方案（老固件不支持斜向指令时用）。
 
@@ -53,6 +56,8 @@ class PtzPatrol(Node):
         self.declare_parameter('tilt_enabled', True)    # 水平换向时顺带俯仰一段（扫描式，见模块说明）
         self.declare_parameter('tilt_speed', 2)         # 俯仰速度档 1~7
         self.declare_parameter('tilt_seconds', 4.0)     # 无角度反馈时的俯仰换向时长；raster 每次俯仰时长
+        self.declare_parameter('tilt_up_seconds', -1.0)   # >0 时覆盖上抬时长（往上偏高就调小它）
+        self.declare_parameter('tilt_down_seconds', -1.0) # >0 时覆盖下压时长（调反了说明设备约定相反，两值互换）
         self.declare_parameter('tilt_range', 5.0)       # diagonal 俯仰半幅（度），以开启时角度为中心
         self.declare_parameter('home_pan', -1.0)        # 三个 home_* 都设了，关停后回该姿态
         self.declare_parameter('home_tilt', -1.0)
@@ -85,6 +90,15 @@ class PtzPatrol(Node):
         pmax = self.get_parameter('pan_max').value
         return 0 <= pmin < pmax <= 360
 
+    def _dir_tilt_seconds(self):
+        # 当前俯仰方向的换向时长；上下可不等（云台受重力影响两边角速度常不一致）
+        up = self.get_parameter('tilt_up_seconds').value
+        down = self.get_parameter('tilt_down_seconds').value
+        base = self.get_parameter('tilt_seconds').value
+        if self._tilt_dir == TILT_UP:
+            return up if up > 0 else base
+        return down if down > 0 else base
+
     def _tick(self):
         if not self.get_parameter('enabled').value:
             self._was_enabled = False
@@ -116,7 +130,7 @@ class PtzPatrol(Node):
                         (self._tilt >= self._tilt_center + rng or
                          self._tilt <= self._tilt_center - rng):
                     tilt_flip = True
-            elif tilt_gap >= self.get_parameter('tilt_seconds').value:
+            elif tilt_gap >= self._dir_tilt_seconds():
                 tilt_flip = True
             if tilt_flip:
                 self._tilt_dir = TILT_DOWN if self._tilt_dir == TILT_UP else TILT_UP
