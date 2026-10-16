@@ -37,6 +37,8 @@
   <exec_depend>nav2_rviz_plugins</exec_depend>
   <exec_depend>nav2_smac_planner</exec_depend>
   <exec_depend>nav2_regulated_pure_pursuit_controller</exec_depend>
+  <exec_depend>action_msgs</exec_depend>
+  <exec_depend>hk_camera</exec_depend>
 
   <export>
     <build_type>ament_cmake</build_type>
