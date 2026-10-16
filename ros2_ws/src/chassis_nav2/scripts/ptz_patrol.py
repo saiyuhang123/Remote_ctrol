@@ -14,9 +14,11 @@
   到达边界且距上次换向超过 3s 才触发。不假设"左/右指令使角度增/减"的方向约定，
   约定反了也会在另一侧边界自我纠正。
 
-俯仰（tilt_enabled，默认开）：云台控制是单指令通道，不能真正斜着走，
-所以做成扫描式——水平扫到头 → 俯仰 tilt_seconds 秒 → 反向水平扫 → 反向俯仰……
-上下交替进行，长期不会朝一个方向跑偏。
+俯仰（tilt_enabled，默认开）：pattern 决定运动方式——
+- diagonal（默认）：斜向指令 25/26/28/27 四段绕圈（左上→右上→右下→左下），
+  水平垂直同时动，四段后回到原位不跑偏；
+- raster：水平扫到头 → 俯仰 tilt_seconds 秒 → 反向水平扫 → 反向俯仰，上下交替。
+  云台控制是单指令通道时才需要的降级方案（老固件不支持斜向指令时用）。
 
 相机节点没启动时只周期性告警。
 """
@@ -30,6 +32,7 @@ PAN_LEFT = 23    # 海康 SDK 指令：左
 PAN_RIGHT = 24   # 海康 SDK 指令：右
 TILT_UP = 21     # 海康 SDK 指令：上
 TILT_DOWN = 22   # 海康 SDK 指令：下
+DIAGONAL_LEGS = (25, 26, 28, 27)   # 左上→右上→右下→左下，四段绕一圈回到原位
 MIN_FLIP_GAP = 3.0   # 角度边界换向的最小间隔，防边界抖动
 
 
@@ -37,6 +40,7 @@ class PtzPatrol(Node):
     def __init__(self):
         super().__init__('ptz_patrol')
         self.declare_parameter('enabled', False)        # 总开关，默认不转，手动开启
+        self.declare_parameter('pattern', 'diagonal')   # diagonal 斜向绕圈；raster 水平扫+换向俯仰
         self.declare_parameter('pan_speed', 2)          # 海康速度档 1~7
         self.declare_parameter('sweep_seconds', 20.0)   # 单侧扫掠时长（时间兜底换向）
         self.declare_parameter('pan_min', -1.0)         # >=0 且 < pan_max 时启用角度边界换向（度）
@@ -54,6 +58,7 @@ class PtzPatrol(Node):
 
         self._moving = False                    # 我们认为云台正在转
         self._direction = PAN_LEFT
+        self._leg = 0                           # diagonal 模式的段序号
         self._tilt_dir = TILT_UP
         self._tilt_until = None                 # 非 None 表示正在俯仰段（时刻）
         self._last_flip = self.get_clock().now()  # 上次换向时刻
@@ -79,6 +84,14 @@ class PtzPatrol(Node):
                                    throttle_duration_sec=10.0)
             return
         now = self.get_clock().now()
+        if self.get_parameter('pattern').value == 'diagonal':
+            elapsed = (now - self._last_flip).nanoseconds * 1e-9
+            if elapsed >= self.get_parameter('sweep_seconds').value:
+                self._leg = (self._leg + 1) % len(DIAGONAL_LEGS)
+                self._last_flip = now
+            if not self._ctrl_pending:
+                self._send_start(DIAGONAL_LEGS[self._leg], self.get_parameter('pan_speed').value)
+            return
         if self._tilt_until is not None:
             # 俯仰段：时间到就水平换向、交替俯仰方向，回到水平扫
             if now >= self._tilt_until:

@@ -631,8 +631,9 @@ void HKCameraNode::onControlPTZ(const srv::ControlPTZ::Request::SharedPtr req,
         return;
     }
     if (user_id_ < 0) { res->message = "Not logged in"; return; }
-    if ((req->command != 11 && req->command != 12 &&
-         req->command != 21 && req->command != 22 && req->command != 23 && req->command != 24) ||
+    const bool direction_ok = req->command >= 21 && req->command <= 28;  // 含 25~28 斜向
+    const bool zoom_ok = req->command == 11 || req->command == 12;
+    if ((!direction_ok && !zoom_ok) ||
         req->speed < 1 || req->speed > 7) { res->message = "Invalid PTZ direction or speed"; return; }
     if (active_ptz_command_ != req->command || active_ptz_speed_ != req->speed) {
         if (!stopPTZ()) { res->message = "Could not stop previous PTZ command"; return; }
