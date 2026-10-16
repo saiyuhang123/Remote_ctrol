@@ -4,9 +4,9 @@
 
 这是一个基于 ROS 2 Humble 的智能巡检机器人远程控制项目，用于实机遥控、视频监控、识别、抓拍与巡检业务管理。2026-10-09 已清理 Gazebo 仿真、测试场地地图和模拟执行逻辑。具体清单见 [实机开发说明](实机开发说明.md)。
 
-> 当前状态：已移植 FAST-LIO2 建图/定位、JD03 控制桥、三维雷达转扫描及 Nav2。雷达/IMU 安装外参、车体轮廓和等效阿克曼参数已配置，eno1 底盘网络与反馈接收已验证；实机导航仍待验证。步骤见 [实机导航移植说明](实机导航移植说明.md)。巡检执行器仍待接入。
+> 当前状态：3D（FAST-LIO）与 2D（slam_toolbox、cartographer）三套建图导航链路均已实车跑通，轮速里程计已完成卷尺标定，Nav2 可正常到点。三套方案的使用命令见 [建图导航命令](建图导航命令.md)（3D）和 [2D 建图导航](2d建图导航.md)（两套 2D）。巡检执行器仍待接入。
 
-2026-10-10 已补齐独立 JD03 轮速里程计，可与 FAST-LIO 同时记录，并通过 `odom_source:=lio/wheel/wheel_imu` 选择 Nav2 的主里程计，见 [底盘里程计说明](底盘里程计说明.md)。
+轮速里程计可与 FAST-LIO 同时记录，并通过 `odom_source:=lio/wheel/wheel_imu` 选择 Nav2 的主里程计，见 [底盘里程计说明](底盘里程计说明.md)。
 
 ## 功能概览
 
@@ -43,6 +43,8 @@ Remote_ctrol/
 ├── deploy/                  # MediaMTX 配置
 ├── scripts/                 # 安装、推流和一键启动脚本
 ├── web/                     # 监控台、点位、计划、记录页面及地图资源
+├── maps/                    # 三套方案的地图：fastlio / slam_toolbox / cartographer
+├── desktop_ui/              # Qt + RViz2 桌面端（独立构建，含六种建图/导航显示配置）
 ├── ros2_ws/src/
 │   ├── robot_gateway/       # WebSocket 遥控/遥测网关
 │   ├── robot_common/        # HTTP 上报器和断网缓存
@@ -224,26 +226,95 @@ DEV=/dev/video4 SIZE=640x480 FPS=30 \
 
 `records.html` 显示识别记录、抓拍记录和统计信息。计划页面可查询已有任务和报告；清理后的后台不会自动生成模拟任务或成功报告。
 
-## 实机建图与导航
+## 实机建图与导航（3D / 2D）
 
-尚未标定时先检查速腾和维特原始数据：
+本车有三套**互斥**的建图定位方案，运行时三选一（都会抢 `map->odom` TF 和 `/scan`，不可同时启动）：
+
+| 方案 | 定位原理 | 地图目录 | 建图 launch | 定位+导航 launch |
+| --- | --- | --- | --- | --- |
+| 3D：FAST-LIO | FAST-LIO + ICP 全局定位 | `maps/fastlio/`（map.pcd + map.pgm/yaml） | `slam.launch.py` | `navigation.launch.py odom_source:=wheel_imu enable_control:=true` |
+| 2D：slam_toolbox | 序列化地图纯定位 | `maps/slam_toolbox/`（map.posegraph + map.pgm/yaml） | `slam_2d_mapping.launch.py` | `slam_2d_localization.launch.py` |
+| 2D：cartographer | 子图匹配纯定位 | `maps/cartographer/`（map.pbstream + map.pgm/yaml） | `cartographer_2d_mapping.launch.py` | `cartographer_2d_localization.launch.py` |
+
+### 公共前提
+
+所有终端先加载环境；终端 1 先起底盘驱动并保持运行（建图/定位/导航都需要它）：
 
 ```bash
-ros2 launch chassis_nav2 bringup.launch.py mode:=drivers
+source /opt/ros/humble/setup.bash
+source ~/Remote_ctrol/ros2_ws/install/setup.bash
+ros2 launch chassis_driver chassis_driver.launch.py
 ```
 
-填写新车 `hardware.yaml` 后选择建图、定位或完整导航之一：
+2D 各 launch 的公共参数：`enable_control:=true`（接管底盘）、`rviz:=true`、`start_sensors`（默认开雷达/IMU）、`start_chassis`（默认 false，厂家驱动独立启动）、`start_nav2`（2D 建图默认 false 不起 Nav2，边建图边导航时传 true）。
+
+切换方案前先 Ctrl+C 停干净，可用 `ros2 node list | sort | uniq -c` 确认无残留双栈。
+
+### 方案一：3D FAST-LIO（推荐，无起点限制）
 
 ```bash
-ros2 launch chassis_nav2 fastlio_mapping.launch.py
-ros2 launch chassis_nav2 localization.launch.py pcd_map:=/实际路径/site.pcd rviz:=true
+# 终端 2：建图（输出固定为 maps/fastlio/map.pcd，旧图自动备份）
+ros2 launch chassis_nav2 slam.launch.py
+# 终端 3：键盘遥控，低速匀速走回环
+ros2 run chassis_nav2 jd03_keyboard.py
+# 存图（建图保持运行时执行）
+ros2 service call /map_save std_srvs/srv/Trigger '{}'
+
+# PCD 转栅格地图（导航必做）+ 清理噪点
+ros2 launch pcd2pgm pcd2pgm_launch.py z_min:=-0.10 z_max:=2.0 rviz:=true
+ros2 run nav2_map_server map_saver_cli \
+  -t /projected_map -f ~/Remote_ctrol/maps/fastlio/map
+python3 ~/Remote_ctrol/scripts/clean_map.py
+
+# 定位 + 导航（全局 ICP 定位，RViz 给初始位姿后即可发目标点）
 ros2 launch chassis_nav2 navigation.launch.py \
-  pcd_map:=/实际路径/site.pcd map:=/实际路径/site.yaml rviz:=true
+  odom_source:=wheel_imu enable_control:=true rviz:=true
 ```
 
-`fastlio_mapping.launch.py` 一次启动维特 IMU、速腾雷达、FAST-LIO 和 RViz，默认在项目 `maps/` 下按启动时间生成 PCD 文件名。可用 `pcd_map:=/实际路径/site.pcd` 指定文件，或用 `rviz:=false` 关闭界面。建图后在另一个终端执行 `ros2 service call /map_save std_srvs/srv/Trigger '{}'`，确认 `success: true` 后退出。原 `mapping.launch.py` 入口仍支持显式输出路径和轮速对比等参数。
+详细步骤、初始位姿操作顺序和注意事项见 [建图导航命令](建图导航命令.md)。
 
-统一入口使用实际时钟，默认启动速腾和维特，底盘控制默认关闭。完整流程、PCD 保存、栅格/网页地图导出及启用 JD03 的参数见 [实机导航移植说明](实机导航移植说明.md)。定位初始位姿通过 `/initialpose` 给定。
+### 方案二：2D slam_toolbox
+
+```bash
+# 建图
+ros2 launch chassis_nav2 slam_2d_mapping.launch.py enable_control:=true rviz:=true
+# 存图（序列化地图 + 栅格地图两条命令，见 2d建图导航.md）
+# 定位 + 导航
+ros2 launch chassis_nav2 slam_2d_localization.launch.py enable_control:=true rviz:=true
+```
+
+### 方案三：2D cartographer
+
+```bash
+# 建图
+ros2 launch chassis_nav2 cartographer_2d_mapping.launch.py enable_control:=true rviz:=true
+# 存图（finish_trajectory → write_state → 转 pgm 三步，见 2d建图导航.md）
+# 定位 + 导航
+ros2 launch chassis_nav2 cartographer_2d_localization.launch.py enable_control:=true rviz:=true
+```
+
+两套 2D 方案的存图命令、起点对齐约束和选型建议见 [2D 建图导航](2d建图导航.md)。**注意**：两套 2D 纯定位都要求启动时车停在建图起点附近、朝向大致一致；本机 cartographer_ros 不支持 `/initialpose`（RViz 点 2D Pose Estimate 无效），初始位姿错了只能放回起点重启。
+
+### 里程计链与关键标定
+
+三套方案共用同一条数据链（改一处三套生效）：
+
+```text
+底盘 /vehicle_status(100Hz)
+  → jd03_odometry（双阿克曼模型，只用 cur_speed/cur_steer）→ /odom_raw
+  → EKF robot_localization（融合 IMU 航向）→ /odom + odom->base_link TF
+雷达 /velodyne_points
+  → cloud_crop_box（裁掉车身支柱）→ pointcloud_to_laserscan → /scan
+```
+
+已实车标定/确认的关键参数（`chassis_nav2/config/hardware.yaml`）：
+
+- `speed_scale: 0.29`：cur_speed 反馈与真实车速的比例，卷尺 2m 直线多次标定，残差约 -1.3% 由定位吸收。
+- 旋转精度：原地满舵一圈位置差约 1.3cm、角度差约 1.1°。
+- `/scan` 角度窗口 ±157.5°：正后方 45° 扇区打到车身设备产生幽灵障碍，已屏蔽。
+- Nav2 终点容差（三套各自的 nav2 配置）：xy 0.10 m，yaw 已放开（到点不管朝向）。
+
+尚未标定时可先只开驱动检查速腾和维特原始数据：`ros2 launch chassis_nav2 bringup.launch.py mode:=drivers`。外参、PCD 投影和网页地图导出的更多细节见 [实机导航移植说明](实机导航移植说明.md)。
 
 ## ROS 2 接口
 
@@ -328,10 +399,10 @@ video:
 ## 当前已知限制
 
 1. 实机巡检执行器尚未接入；点位、路线和计划可管理，自动调度及计划执行暂停。
-2. JD03 Twist/Ecu 桥和轮速反馈已接入代码；需核对实车 CAN 参数、转向符号、速度反馈与刹车。最大控制速度初始为 0.3m/s。
+2. JD03 Twist/Ecu 桥、转向符号和速度反馈已实车核对，轮速里程计已标定（`speed_scale: 0.29`）；最大控制速度 0.5 m/s。
 3. 已接入网页遥控/自主导航仲裁和急停；厂家手持遥控的权限逻辑仍需实车确认。
 4. 电池反馈尚未接入，页面显示“未接入”和空值。
-5. 统一使用 `base_link`。新车外参、轴距、转角与 footprint 未知，配置确认前对应功能不会启动；栅格投影质量需检查。
+5. 统一使用 `base_link`；外参、轴距、转角与 footprint 已确认（`hardware.yaml` 各段 `confirmed: true`）。
 6. 仿真地图已删除。配置实测网页地图的方法见 [地图说明](web/maps/README.md)。无地图时禁止地图点选。
 7. 识别默认使用 CPU 推理，性能取决于处理器和视频分辨率；人脸底库为空时只能识别为未登记人员或普通行人。
 8. `bin/mediamtx` 不在 Git 中，需要准备实际运行平台的版本。
@@ -390,11 +461,15 @@ ros2 pkg list | grep -E 'robot_gateway|detector_node|capture_server|chassis_nav2
 
 - [实机开发使用手册](实机开发使用手册.md)
 - [启动命令速查](启动.md)
+- [建图导航命令（3D FAST-LIO）](建图导航命令.md)
+- [2D 建图导航（slam_toolbox / cartographer）](2d建图导航.md)
 - [实机开发说明与清理清单](实机开发说明.md)
 - [实机导航移植与启动步骤](实机导航移植说明.md)
 - [底盘轮速里程计、对比与切换](底盘里程计说明.md)
+- [阿克曼停车改造计划](阿克曼停车改造计划.md)
 - [开发计划与里程碑](开发计划.md)
 - [巡检机器人远程控制方案](巡检机器人远程控制方案（蒲公英组网版）.md)
+- [Qt 桌面端说明](desktop_ui/README.md)
 
 ## 许可证与数据说明
 
