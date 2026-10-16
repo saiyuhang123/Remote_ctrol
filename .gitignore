@@ -22,6 +22,7 @@ venv/
 *.sqlite
 *.sqlite3
 *.log
+hk_log/
 backend/data/
 captures/
 reports/
