@@ -570,6 +570,12 @@ bool HKCamera::setDVRConfig(int user_id, DWORD command, int channel,
 }
 
 // ---- 显式模板实例化 (按需扩展) ----
+template bool HKCamera::getDVRConfig<NET_DVR_PTZPOS>(
+    int, DWORD, int, NET_DVR_PTZPOS*, DWORD*);
+template bool HKCamera::getDVRConfig<NET_DVR_PTZSCOPE>(
+    int, DWORD, int, NET_DVR_PTZSCOPE*, DWORD*);
+template bool HKCamera::setDVRConfig<NET_DVR_PTZPOS>(
+    int, DWORD, int, const NET_DVR_PTZPOS*);
 template bool HKCamera::getDVRConfig<NET_DVR_COMPRESSIONCFG_V30>(
     int, DWORD, int, NET_DVR_COMPRESSIONCFG_V30*, DWORD*);
 template bool HKCamera::setDVRConfig<NET_DVR_COMPRESSIONCFG_V30>(

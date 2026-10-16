@@ -39,6 +39,8 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/MissionStatus.msg"
   "srv/CapturePicture.srv"
   "srv/SetPTZPose.srv"
+  "srv/GetPTZPose.srv"
+  "srv/ControlPTZ.srv"
   "srv/RunMission.srv"
   DEPENDENCIES builtin_interfaces sensor_msgs geometry_msgs std_msgs
   ADD_LINTER_TESTS
@@ -233,6 +235,8 @@ install(DIRECTORY "${HK_SDK_LIB_DIR_ABS}/"
 ament_export_dependencies(rosidl_default_runtime)
 if(BUILD_TESTING)
   find_package(ament_cmake_gtest REQUIRED)
+  ament_add_gtest(test_ptz_codec test/test_ptz_codec.cpp)
+  target_include_directories(test_ptz_codec PRIVATE include)
   ament_add_gtest(test_face_capture test/test_face_capture.cpp src/face_capture.cpp)
   target_include_directories(test_face_capture PRIVATE ${COMMON_INCLUDE_DIRS} ${OpenCV_INCLUDE_DIRS})
   target_link_libraries(test_face_capture ${OpenCV_LIBS})

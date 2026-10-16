@@ -1,3 +1,4 @@
+# 历史备用配置：当前 SLAM 定位入口已切换 AMCL，默认使用 amcl.yaml，不加载本文件。
 # slam_toolbox 2D 纯定位（加载序列化 posegraph，不扩建地图）。
 # map_file_name 由 launch 按 map_file 参数注入，指向不含扩展名的 maps/map_2d。
 slam_toolbox:

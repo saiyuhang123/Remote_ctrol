@@ -4,7 +4,7 @@
 #include <QJsonArray>
 #include <QMainWindow>
 #include <QVector>
-class GatewayClient; class BusinessClient; class ProcessManager; class MapSaver; class RvizHost;
+class CameraPanel; class LocalController; class BusinessClient; class ProcessManager; class MapSaver; class RvizHost;
 class QCheckBox; class QComboBox; class QDoubleSpinBox; class QLabel; class QLineEdit;
 class QPlainTextEdit; class QProgressBar; class QPushButton; class QTableWidget; class QStackedWidget;
 class DashBoard;
@@ -37,20 +37,21 @@ private:
   bool offline_;
   Ui::MainWindow *ui_ = nullptr;
   ads::CDockManager *docks_ = nullptr;
-  GatewayClient *gateway_ = nullptr;
+  LocalController *controller_ = nullptr;
   BusinessClient *business_ = nullptr;
   RosAdapter *ros_ = nullptr;
   ProcessManager *process_ = nullptr;
   MapSaver *saver_ = nullptr;
   RvizHost *rviz_ = nullptr;
   RobotSnapshot state_;
+  QString lastNavigationEvent_;
   QComboBox *profiles_ = nullptr, *odom_ = nullptr;
   QCheckBox *enableControl_ = nullptr, *manage_ = nullptr, *sensors_ = nullptr, *chassis_ = nullptr, *bridge_ = nullptr;
-  QLineEdit *gatewayUrl_ = nullptr, *backendUrl_ = nullptr, *mapPrefix_ = nullptr;
+  QLineEdit *backendUrl_ = nullptr, *mapPrefix_ = nullptr;
   QDoubleSpinBox *goalX_ = nullptr, *goalY_ = nullptr, *goalYaw_ = nullptr, *speed_ = nullptr, *turn_ = nullptr;
-  QDoubleSpinBox *pan_ = nullptr, *tilt_ = nullptr, *zoom_ = nullptr;
+  CameraPanel *cameraPanel_ = nullptr;
   QLabel *connection_ = nullptr, *pose_ = nullptr, *velocity_ = nullptr, *stopState_ = nullptr, *navState_ = nullptr;
-  QLabel *power_ = nullptr, *camera_ = nullptr, *picture_ = nullptr, *ocr_ = nullptr;
+  QLabel *power_ = nullptr, *picture_ = nullptr, *ocr_ = nullptr;
   QProgressBar *battery_ = nullptr;
   QStackedWidget *speedStack_ = nullptr;
   DashBoard *dashboard_ = nullptr;

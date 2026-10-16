@@ -3,14 +3,19 @@
 #include <action_msgs/msg/goal_status_array.hpp>
 #include <geometry_msgs/msg/pose_stamped.hpp>
 #include <geometry_msgs/msg/pose_with_covariance_stamped.hpp>
+#include <geometry_msgs/msg/twist.hpp>
 #include <nav_msgs/msg/odometry.hpp>
 #include <rclcpp/rclcpp.hpp>
+#include <rclcpp_action/rclcpp_action.hpp>
+#include <nav2_msgs/action/navigate_to_pose.hpp>
 #include <sensor_msgs/msg/image.hpp>
 #include <std_msgs/msg/bool.hpp>
+#include <std_msgs/msg/string.hpp>
 #include <std_srvs/srv/trigger.hpp>
 #include <tf2_ros/buffer.h>
 #include <tf2_ros/transform_listener.h>
 #include <atomic>
+#include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <functional>
@@ -23,6 +28,8 @@
 #ifdef DESKTOP_HAS_HK_CAMERA
 #include <hk_camera/srv/capture_picture.hpp>
 #include <hk_camera/srv/set_ptz_pose.hpp>
+#include <hk_camera/srv/get_ptz_pose.hpp>
+#include <hk_camera/srv/control_ptz.hpp>
 #endif
 #ifdef DESKTOP_HAS_OCR_INTERFACES
 #include <ocr_interfaces/srv/recognize_text.hpp>
@@ -68,6 +75,19 @@ struct RosAdapter::Impl {
   std::unique_ptr<tf2_ros::Buffer> tf;
   std::unique_ptr<tf2_ros::TransformListener> listener;
   std::vector<rclcpp::SubscriptionBase::SharedPtr> subscriptions;
+  rclcpp::Publisher<geometry_msgs::msg::PoseWithCovarianceStamped>::SharedPtr initialPose;
+  rclcpp::Publisher<geometry_msgs::msg::PoseStamped>::SharedPtr goalPreview;
+  rclcpp::Publisher<geometry_msgs::msg::Twist>::SharedPtr velocity;
+  rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr emergency;
+  rclcpp::Publisher<std_msgs::msg::String>::SharedPtr capture, speech;
+  using Navigate = nav2_msgs::action::NavigateToPose;
+  using GoalHandle = rclcpp_action::ClientGoalHandle<Navigate>;
+  rclcpp_action::Client<Navigate>::SharedPtr navigation;
+  std::mutex goalMutex;
+  GoalHandle::SharedPtr goalHandle;
+  std::atomic_bool navPending{false}, ownedGoalActive{false}, observedNavActive{false}, cancellationKnown{false};
+  std::atomic_uint64_t cancelEpoch{0};
+  std::atomic_int estopCommand{-1};  // No startup writes; explicit stop/unlock starts feedback.
   std::map<std::string, rclcpp::ClientBase::SharedPtr> clients;
   rclcpp::TimerBase::SharedPtr timer;
   std::mutex frameMutex;
@@ -82,11 +102,24 @@ struct RosAdapter::Impl {
   quint64 nextRequest = 0;
   Impl(RosAdapter *o, const DesktopConfig &c) : owner(o), config(c) {
     node = std::make_shared<rclcpp::Node>("robot_desktop_state");
+    initialPose = node->create_publisher<geometry_msgs::msg::PoseWithCovarianceStamped>("/initialpose", 10);
+    goalPreview = node->create_publisher<geometry_msgs::msg::PoseStamped>("/desktop_ui/selected_goal", 1);
+    velocity = node->create_publisher<geometry_msgs::msg::Twist>("/cmd_vel_teleop", 10);
+    emergency = node->create_publisher<std_msgs::msg::Bool>("/emergency_stop", 10);
+    capture = node->create_publisher<std_msgs::msg::String>("/capture_request", 10);
+    speech = node->create_publisher<std_msgs::msg::String>("/tts_say", 10);
+    navigation = rclcpp_action::create_client<Navigate>(node, "/navigate_to_pose");
     // Keep clients alive so DDS discovery completes before an operator clicks.
     clients["/map_save"] = node->create_client<std_srvs::srv::Trigger>("/map_save");
+    for (const auto *command : {"login", "start_stream", "stop_stream"}) {
+      const auto name = std::string("/hk_camera/") + command;
+      clients[name] = node->create_client<std_srvs::srv::Trigger>(name);
+    }
 #ifdef DESKTOP_HAS_HK_CAMERA
     clients["/hk_camera/capture"] = node->create_client<hk_camera::srv::CapturePicture>("/hk_camera/capture");
     clients["/hk_camera/set_ptz_pose"] = node->create_client<hk_camera::srv::SetPTZPose>("/hk_camera/set_ptz_pose");
+    clients["/hk_camera/get_ptz_pose"] = node->create_client<hk_camera::srv::GetPTZPose>("/hk_camera/get_ptz_pose");
+    clients["/hk_camera/control_ptz"] = node->create_client<hk_camera::srv::ControlPTZ>("/hk_camera/control_ptz");
 #endif
 #ifdef DESKTOP_HAS_OCR_INTERFACES
     clients["/ocr/recognize"] = node->create_client<ocr_interfaces::srv::RecognizeText>("/ocr/recognize");
@@ -111,13 +144,21 @@ struct RosAdapter::Impl {
         state.speed = m->twist.twist.linear.x; state.yawRate = m->twist.twist.angular.z; odomTime = nowMs();
       }));
     subscriptions.push_back(node->create_subscription<std_msgs::msg::Bool>(
-      "/emergency_stop", rclcpp::QoS(10), [this](std_msgs::msg::Bool::ConstSharedPtr m) { state.estopped = m->data; stopTime = nowMs(); }));
+      "/emergency_stop", rclcpp::QoS(10), [this](std_msgs::msg::Bool::ConstSharedPtr m) {
+        state.estopped = m->data; stopTime = nowMs();
+        if (m->data && estopCommand.load() == 0) estopCommand.store(1);
+      }));
     subscriptions.push_back(node->create_subscription<action_msgs::msg::GoalStatusArray>(
       "/navigate_to_pose/_action/status", rclcpp::QoS(1).reliable().transient_local(),
       [this](action_msgs::msg::GoalStatusArray::ConstSharedPtr m) {
-        state.navigationActive = false; navReceived = true;
-        for (const auto &s : m->status_list) if (s.status >= 1 && s.status <= 3) state.navigationActive = true;
+        bool active = false; navReceived = true;
+        for (const auto &s : m->status_list) if (s.status >= 1 && s.status <= 3) active = true;
+        observedNavActive.store(active);
       }));
+    subscriptions.push_back(node->create_subscription<std_msgs::msg::String>(
+      "/capture_done", 10, [this](std_msgs::msg::String::ConstSharedPtr m) { emit owner->message("业务抓拍：" + QString::fromStdString(m->data)); }));
+    subscriptions.push_back(node->create_subscription<std_msgs::msg::String>(
+      "/tts_status", 10, [this](std_msgs::msg::String::ConstSharedPtr m) { emit owner->message("语音：" + QString::fromStdString(m->data)); }));
     subscriptions.push_back(node->create_subscription<sensor_msgs::msg::Image>(
       config.imageTopic.toStdString(), rclcpp::SensorDataQoS().keep_last(1), [this](sensor_msgs::msg::Image::ConstSharedPtr m) {
         if (nowMs() - imageTime < 100) return;
@@ -158,8 +199,13 @@ struct RosAdapter::Impl {
     state.estopValid = stopTime && current - stopTime < config.feedbackTimeoutMs;
     state.batteryValid = batteryTime && current - batteryTime < 5000;
     const bool navPublisher = node->count_publishers("/navigate_to_pose/_action/status") > 0;
-    state.navigationKnown = !navPublisher || navReceived;
-    if (!navPublisher) { state.navigationActive = false; navReceived = false; }
+    state.navigationKnown = !navPublisher || navReceived || cancellationKnown.load();
+    if (!navPublisher) { observedNavActive.store(false); navReceived = false; }
+    state.navigationActive = observedNavActive.load() || navPending.load() || ownedGoalActive.load();
+    state.navigationAvailable = navigation->action_server_is_ready();
+    if (estopCommand.load() >= 0) {
+      std_msgs::msg::Bool msg; msg.data = estopCommand.load() != 0; emergency->publish(msg);
+    }
     state.poseValid = false;
     try {
       const auto transform = tf->lookupTransform(state.frame.toStdString(), config.baseFrame.toStdString(), tf2::TimePointZero);
@@ -172,6 +218,16 @@ struct RosAdapter::Impl {
       }
     } catch (const tf2::TransformException &) {}
     emit owner->snapshot(state);
+  }
+  bool motionConflict() {
+    const auto ownGid = velocity->get_gid();
+    for (const auto &info : node->get_publishers_info_by_topic("/cmd_vel_teleop")) {
+      if (!std::equal(info.endpoint_gid().begin(), info.endpoint_gid().end(), ownGid.data)) {
+        emit owner->message("本地控制未执行：/cmd_vel_teleop 还有发布者 " + QString::fromStdString(info.node_name()) + "，请先停止远程网关或其他手动控制端");
+        return true;
+      }
+    }
+    return false;
   }
   template<class Service, class Callback>
   void request(const QString &operation, const std::string &name, const std::shared_ptr<typename Service::Request> &req, Callback callback) {
@@ -196,8 +252,111 @@ struct RosAdapter::Impl {
   }
 };
 
-RosAdapter::RosAdapter(const DesktopConfig &c, QObject *parent) : QObject(parent) { qRegisterMetaType<RobotSnapshot>(); impl_ = std::make_unique<Impl>(this, c); }
+RosAdapter::RosAdapter(const DesktopConfig &c, QObject *parent) : QObject(parent) { qRegisterMetaType<RobotSnapshot>(); qRegisterMetaType<CameraPose>(); impl_ = std::make_unique<Impl>(this, c); }
 RosAdapter::~RosAdapter() = default;
+bool RosAdapter::previewGoal(double x, double y, double yaw) {
+  if (!std::isfinite(x) || !std::isfinite(y) || !std::isfinite(yaw)) return false;
+  geometry_msgs::msg::PoseStamped msg;
+  msg.header.frame_id = "map"; msg.header.stamp = impl_->node->now();
+  msg.pose.position.x = x; msg.pose.position.y = y;
+  msg.pose.orientation.z = std::sin(yaw / 2.); msg.pose.orientation.w = std::cos(yaw / 2.);
+  impl_->goalPreview->publish(msg); return true;
+}
+bool RosAdapter::publishVelocity(double linear, double angular) {
+  if (!std::isfinite(linear) || !std::isfinite(angular)) return false;
+  if (std::abs(linear) > 1e-6 || std::abs(angular) > 1e-6) {
+    if (impl_->estopCommand.load() != 0 || impl_->navPending.load() || impl_->ownedGoalActive.load() ||
+        impl_->observedNavActive.load() || impl_->motionConflict()) return false;
+  }
+  geometry_msgs::msg::Twist msg;
+  msg.linear.x = std::clamp(linear, -impl_->config.maxLinear, impl_->config.maxLinear);
+  msg.angular.z = std::clamp(angular, -impl_->config.maxAngular, impl_->config.maxAngular);
+  impl_->velocity->publish(msg); return true;
+}
+bool RosAdapter::setEmergencyStop(bool stopped) {
+  if (!stopped && (impl_->navPending.load() || impl_->ownedGoalActive.load() ||
+                  impl_->observedNavActive.load() || impl_->motionConflict())) return false;
+  publishVelocity(0., 0.);
+  impl_->estopCommand.store(stopped ? 1 : 0);
+  std_msgs::msg::Bool msg; msg.data = stopped; impl_->emergency->publish(msg);
+  emit message(stopped ? "已发布本地急停" : "已明确解除本地急停，当前手动速度为零");
+  return true;
+}
+bool RosAdapter::navigate(double x, double y, double yaw) {
+  if (!std::isfinite(x) || !std::isfinite(y) || !std::isfinite(yaw) || impl_->motionConflict()) return false;
+  if (impl_->estopCommand.load() != 0) { emit message("请先点击解除急停，再发送导航目标"); return false; }
+  if (!impl_->navigation->action_server_is_ready()) { emit message("Nav2 /navigate_to_pose 尚未就绪"); return false; }
+  if (impl_->ownedGoalActive.load() || impl_->observedNavActive.load() || impl_->navPending.exchange(true)) {
+    emit message("已有导航目标，请先取消并等待结束，再发送新目标"); return false;
+  }
+  Impl::Navigate::Goal goal;
+  goal.pose.header.frame_id = "map"; goal.pose.header.stamp = impl_->node->now();
+  goal.pose.pose.position.x = x; goal.pose.pose.position.y = y;
+  goal.pose.pose.orientation.z = std::sin(yaw / 2.); goal.pose.pose.orientation.w = std::cos(yaw / 2.);
+  const auto epoch = impl_->cancelEpoch.load();
+  rclcpp_action::Client<Impl::Navigate>::SendGoalOptions options;
+  options.goal_response_callback = [this, epoch](Impl::GoalHandle::SharedPtr handle) {
+    { std::lock_guard<std::mutex> lock(impl_->goalMutex); impl_->goalHandle = handle; }
+    impl_->ownedGoalActive.store(static_cast<bool>(handle)); impl_->navPending.store(false);
+    if (!handle) { emit navigationEvent("导航目标被拒绝"); return; }
+    if (epoch != impl_->cancelEpoch.load()) {
+      impl_->navigation->async_cancel_goal(handle); emit navigationEvent("取消迟到的导航目标");
+    } else emit navigationEvent("导航目标已接受");
+  };
+  options.result_callback = [this](const Impl::GoalHandle::WrappedResult &result) {
+    impl_->ownedGoalActive.store(false);
+    { std::lock_guard<std::mutex> lock(impl_->goalMutex); impl_->goalHandle.reset(); }
+    QString text;
+    switch (result.code) {
+      case rclcpp_action::ResultCode::SUCCEEDED: text = "导航到点成功"; break;
+      case rclcpp_action::ResultCode::CANCELED: text = "导航已取消"; break;
+      case rclcpp_action::ResultCode::ABORTED: text = "导航失败 / 已中止"; break;
+      default: text = "导航结果未知";
+    }
+    emit navigationEvent(text);
+  };
+  try { impl_->navigation->async_send_goal(goal, options); }
+  catch (const std::exception &e) { impl_->navPending.store(false); emit message(QString("导航请求失败：") + e.what()); return false; }
+  emit navigationEvent("导航请求已发送，等待 Nav2 接受"); return true;
+}
+bool RosAdapter::cancelNavigation() {
+  ++impl_->cancelEpoch;
+  if (!impl_->navigation->action_server_is_ready()) {
+    if (impl_->observedNavActive.load() || impl_->navPending.load() || impl_->ownedGoalActive.load()) {
+      emit message("Nav2 不可用，无法确认导航已取消"); return false;
+    }
+    impl_->cancellationKnown.store(true); return true;
+  }
+  try {
+    impl_->navigation->async_cancel_all_goals([this](auto response) {
+      if (response->return_code == 0) {
+        impl_->cancellationKnown.store(true);
+        emit navigationEvent(response->goals_canceling.empty() ? "Nav2 已确认无待取消目标" : "导航取消已接受，等待执行结束");
+      } else emit navigationEvent("Nav2 未接受取消请求，请检查导航状态");
+    });
+  } catch (const std::exception &e) { emit message(QString("取消导航失败：") + e.what()); return false; }
+  return true;
+}
+void RosAdapter::captureBusiness() {
+  std_msgs::msg::String msg; msg.data = "desktop_manual"; impl_->capture->publish(msg);
+  emit message("业务抓拍请求已发布到 /capture_request");
+}
+void RosAdapter::speak(const QString &text) {
+  if (text.trimmed().isEmpty()) return;
+  std_msgs::msg::String msg; msg.data = text.trimmed().toStdString(); impl_->speech->publish(msg);
+}
+bool RosAdapter::setInitialPose(double x, double y, double yaw) {
+  if (!std::isfinite(x) || !std::isfinite(y) || !std::isfinite(yaw)) return false;
+  if (impl_->initialPose->get_subscription_count() == 0) {
+    emit message("初始位姿未发送：/initialpose 没有定位节点订阅，请等待定位流程启动完成"); return false;
+  }
+  geometry_msgs::msg::PoseWithCovarianceStamped msg;
+  msg.header.frame_id = "map"; msg.header.stamp = impl_->node->now();
+  msg.pose.pose.position.x = x; msg.pose.pose.position.y = y;
+  msg.pose.pose.orientation.z = std::sin(yaw / 2.); msg.pose.pose.orientation.w = std::cos(yaw / 2.);
+  msg.pose.covariance[0] = .25; msg.pose.covariance[7] = .25; msg.pose.covariance[35] = .07;
+  impl_->initialPose->publish(msg); return true;
+}
 void RosAdapter::setFixedFrame(const QString &frame) { std::lock_guard<std::mutex> lock(impl_->frameMutex); impl_->frame = frame; }
 QStringList RosAdapter::capabilities() const {
   QStringList list;
@@ -213,7 +372,7 @@ QStringList RosAdapter::capabilities() const {
   return list;
 }
 QStringList RosAdapter::conflictingNodes() const {
-  const QStringList names{"controller_server", "planner_server", "bt_navigator", "slam_toolbox", "cartographer_node", "fast_lio_mapping", "laser_mapping", "map_server", "twist_mux", "chassis_driver", "jd03_odometry", "ekf_filter_node", "robot_state_publisher", "rslidar_sdk_node", "imuDriverNode", "lio_odometry", "global_localization", "transform_fusion", "pointcloud_to_scan", "cloud_crop_box"};
+  const QStringList names{"controller_server", "planner_server", "bt_navigator", "amcl", "slam_toolbox", "cartographer_node", "fast_lio_mapping", "laser_mapping", "map_server", "twist_mux", "chassis_driver", "jd03_odometry", "ekf_filter_node", "robot_state_publisher", "rslidar_sdk_node", "imuDriverNode", "lio_odometry", "global_localization", "transform_fusion", "pointcloud_to_scan", "cloud_crop_box"};
   QStringList found;
   for (const auto &name : impl_->node->get_node_names()) {
     const auto qname = QString::fromStdString(name);
@@ -237,12 +396,61 @@ void RosAdapter::captureCamera() {
 }
 void RosAdapter::setPtz(double pan, double tilt, double zoom) {
 #ifdef DESKTOP_HAS_HK_CAMERA
-  if (!std::isfinite(pan) || !std::isfinite(tilt) || !std::isfinite(zoom) || pan < 0 || pan > 360 || tilt < 0 || tilt > 90 || zoom < 1 || zoom > 40) return;
+  if (!std::isfinite(pan) || !std::isfinite(tilt) || !std::isfinite(zoom) || pan < 0 || pan > 360 || tilt < 0 || tilt > 360 || zoom < 1 || zoom > 999.9) {
+    emit requestFinished("ptz", false, "云台角度或变倍超出范围"); return;
+  }
   auto req = std::make_shared<hk_camera::srv::SetPTZPose::Request>(); req->pan = pan; req->tilt = tilt; req->zoom = zoom;
   impl_->request<hk_camera::srv::SetPTZPose>("ptz", "/hk_camera/set_ptz_pose", req, [this](auto r) { emit requestFinished("ptz", r->success, QString::fromStdString(r->message)); });
 #else
   Q_UNUSED(pan); Q_UNUSED(tilt); Q_UNUSED(zoom);
   emit requestFinished("ptz", false, "构建时未发现 hk_camera 消息包");
+#endif
+}
+bool RosAdapter::cameraAvailable() const {
+  const auto client = impl_->clients.at("/hk_camera/login");
+  return client->service_is_ready() && impl_->clients.at("/hk_camera/start_stream")->service_is_ready();
+}
+bool RosAdapter::cameraNodePresent() const {
+  if (cameraAvailable() || impl_->node->count_publishers(impl_->config.imageTopic.toStdString()) > 0) return true;
+  for (const auto &name : impl_->node->get_node_names())
+    if (QString::fromStdString(name).section('/', -1) == "hk_camera_node") return true;
+  return false;
+}
+void RosAdapter::cameraCommand(const QString &command) {
+  if (command != "login" && command != "start_stream" && command != "stop_stream") return;
+  const auto operation = "camera_" + command;
+  auto req = std::make_shared<std_srvs::srv::Trigger::Request>();
+  impl_->request<std_srvs::srv::Trigger>(operation, "/hk_camera/" + command.toStdString(), req,
+      [this, operation](auto r) { emit requestFinished(operation, r->success, QString::fromStdString(r->message)); });
+}
+void RosAdapter::readCameraPose() {
+#ifdef DESKTOP_HAS_HK_CAMERA
+  auto req = std::make_shared<hk_camera::srv::GetPTZPose::Request>();
+  impl_->request<hk_camera::srv::GetPTZPose>("ptz_read", "/hk_camera/get_ptz_pose", req, [this](auto r) {
+    if (r->success && std::isfinite(r->pan) && std::isfinite(r->tilt) && std::isfinite(r->zoom)) {
+      CameraPose pose; pose.pan = r->pan; pose.tilt = r->tilt; pose.zoom = r->zoom;
+      pose.limitsValid = r->limits_valid;
+      pose.panMin = r->pan_min; pose.panMax = r->pan_max;
+      pose.tiltMin = r->tilt_min; pose.tiltMax = r->tilt_max;
+      pose.zoomMin = r->zoom_min; pose.zoomMax = r->zoom_max;
+      emit cameraPose(pose);
+      emit requestFinished("ptz_read", true, QString::fromStdString(r->message));
+    } else emit requestFinished("ptz_read", false, QString::fromStdString(r->message));
+  });
+#else
+  emit requestFinished("ptz_read", false, "构建时未发现 hk_camera 消息包");
+#endif
+}
+void RosAdapter::jogCamera(int command, int speed, bool stop) {
+#ifdef DESKTOP_HAS_HK_CAMERA
+  auto req = std::make_shared<hk_camera::srv::ControlPTZ::Request>();
+  req->command = command; req->speed = speed; req->stop = stop;
+  const auto operation = stop ? "ptz_stop" : "ptz_jog";
+  impl_->request<hk_camera::srv::ControlPTZ>(operation, "/hk_camera/control_ptz", req,
+      [this, operation](auto r) { emit requestFinished(operation, r->success, QString::fromStdString(r->message)); });
+#else
+  Q_UNUSED(command); Q_UNUSED(speed); Q_UNUSED(stop);
+  emit requestFinished("ptz_jog", false, "构建时未发现 hk_camera 消息包");
 #endif
 }
 void RosAdapter::recognize() {

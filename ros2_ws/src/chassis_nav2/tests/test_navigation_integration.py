@@ -537,6 +537,60 @@ class IntegrationTests(unittest.TestCase):
                 smoother = next(n for n in nodes if n.get('executable') == 'velocity_smoother')
                 self.assertIn(('cmd_vel_smoothed', '/cmd_vel_auto'), smoother['remappings'])
 
+    def test_slam_map_uses_amcl_without_serialized_posegraph(self):
+        from chassis_nav2 import bringup_2d
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root/'hardware.yaml').write_text(yaml.safe_dump(self.hardware()))
+            (root/'map.yaml').write_text('image: map.pgm\nresolution: 0.05\norigin: [0,0,0]\n')
+            args = {'hardware_file': str(root/'hardware.yaml'), 'map': str(root/'map.yaml'),
+                    'map_file': str(root/'no_posegraph_required'), 'start_sensors': 'false',
+                    'start_chassis': 'false', 'enable_control': 'false', 'rviz': 'false',
+                    'nav2_params': str(SRC/'chassis_nav2/config/nav2_2d_localization.yaml')}
+            paths = {'chassis_nav2': SRC/'chassis_nav2', 'chassis_description': SRC/'chassis_description'}
+            with patch.object(bringup, 'share', side_effect=lambda name: paths[name]), \
+                    patch.object(bringup, 'Node', side_effect=lambda **kwargs: kwargs), \
+                    patch.object(bringup_2d, 'Node', side_effect=lambda **kwargs: kwargs), \
+                    patch.dict('os.environ', {'ROBOT_PROJECT_ROOT': str(root)}):
+                nodes = bringup_2d.assemble(args, mapping=False, backend='slam_toolbox')
+                self.assertEqual(sum(n['package'] == 'nav2_amcl' for n in nodes), 1)
+                self.assertFalse(any(n['package'] in ('slam_toolbox', 'cartographer_ros',
+                                                     'fast_lio_localization') for n in nodes))
+                self.assertEqual(sum(n['package'] == 'robot_localization' for n in nodes), 1)
+                amcl = next(n for n in nodes if n['package'] == 'nav2_amcl')
+                params = yaml.safe_load(Path(amcl['parameters'][0]).read_text())['amcl']['ros__parameters']
+                self.assertEqual((params['global_frame_id'], params['odom_frame_id'], params['base_frame_id']),
+                                 ('map', 'odom', 'base_link'))
+                self.assertIs(params['set_initial_pose'], False)
+                self.assertIs(params['always_reset_initial_pose'], True)
+                manager = next(n for n in nodes if n.get('name') == 'lifecycle_manager_localization')
+                self.assertEqual(manager['parameters'][0]['node_names'], ['map_server', 'amcl'])
+                mapping = bringup_2d.assemble(args, mapping=True, backend='slam_toolbox')
+                self.assertEqual(sum(n.get('executable') == 'async_slam_toolbox_node' for n in mapping), 1)
+                self.assertFalse(any(n['package'] in ('nav2_amcl', 'nav2_map_server') for n in mapping))
+
+    def test_cartographer_localization_keeps_its_own_state_and_lifecycle(self):
+        from chassis_nav2 import bringup_2d
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root/'hardware.yaml').write_text(yaml.safe_dump(self.hardware()))
+            (root/'map.yaml').write_text('image: map.pgm\nresolution: 0.05\norigin: [0,0,0]\n')
+            (root/'map.pbstream').write_bytes(b'test-only state placeholder; no runtime nodes start')
+            args = {'hardware_file': str(root/'hardware.yaml'), 'map': str(root/'map.yaml'),
+                    'map_file': str(root/'map'), 'start_sensors': 'false', 'start_chassis': 'false',
+                    'enable_control': 'false', 'rviz': 'false',
+                    'nav2_params': str(SRC/'chassis_nav2/config/nav2_carto_localization.yaml')}
+            paths = {'chassis_nav2': SRC/'chassis_nav2', 'chassis_description': SRC/'chassis_description'}
+            with patch.object(bringup, 'share', side_effect=lambda name: paths[name]), \
+                    patch.object(bringup, 'Node', side_effect=lambda **kwargs: kwargs), \
+                    patch.object(bringup_2d, 'Node', side_effect=lambda **kwargs: kwargs):
+                nodes = bringup_2d.assemble(args, mapping=False, backend='cartographer')
+            self.assertFalse(any(n['package'] in ('nav2_amcl', 'slam_toolbox') for n in nodes))
+            carto = next(n for n in nodes if n.get('executable') == 'cartographer_node')
+            self.assertIn(str(root/'map.pbstream'), carto['arguments'])
+            manager = next(n for n in nodes if n.get('name') == 'lifecycle_manager_map')
+            self.assertEqual(manager['parameters'][0]['node_names'], ['map_server'])
+
 
 if __name__ == '__main__':
     unittest.main(verbosity=2)

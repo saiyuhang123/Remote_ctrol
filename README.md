@@ -4,7 +4,7 @@
 
 这是一个基于 ROS 2 Humble 的智能巡检机器人远程控制项目，用于实机遥控、视频监控、识别、抓拍与巡检业务管理。2026-10-09 已清理 Gazebo 仿真、测试场地地图和模拟执行逻辑。具体清单见 [实机开发说明](实机开发说明.md)。
 
-> 当前状态：3D（FAST-LIO）与 2D（slam_toolbox、cartographer）三套建图导航链路均已实车跑通，轮速里程计已完成卷尺标定，Nav2 可正常到点。三套方案的使用命令见 [建图导航命令](建图导航命令.md)（3D）和 [2D 建图导航](2d建图导航.md)（两套 2D）。巡检执行器仍待接入。
+> 当前状态：3D（FAST-LIO）与 2D（SLAM Toolbox 建图、Cartographer）三套建图导航链路已有实车记录；SLAM Toolbox 定位端现已切换 AMCL，完成隔离模拟验证，实车效果待验收。此前已完成轮速里程计卷尺标定和 Nav2 到点测试。三套方案的使用命令见 [建图导航命令](建图导航命令.md)（3D）和 [2D 建图导航](2d建图导航.md)（两套 2D）。巡检执行器仍待接入。
 
 轮速里程计可与 FAST-LIO 同时记录，并通过 `odom_source:=lio/wheel/wheel_imu` 选择 Nav2 的主里程计，见 [底盘里程计说明](底盘里程计说明.md)。
 
@@ -233,7 +233,7 @@ DEV=/dev/video4 SIZE=640x480 FPS=30 \
 | 方案 | 定位原理 | 地图目录 | 建图 launch | 定位+导航 launch |
 | --- | --- | --- | --- | --- |
 | 3D：FAST-LIO | FAST-LIO + ICP 全局定位 | `maps/fastlio/`（map.pcd + map.pgm/yaml） | `slam.launch.py` | `navigation.launch.py odom_source:=wheel_imu enable_control:=true` |
-| 2D：slam_toolbox | 序列化地图纯定位 | `maps/slam_toolbox/`（map.posegraph + map.pgm/yaml） | `slam_2d_mapping.launch.py` | `slam_2d_localization.launch.py` |
+| 2D：SLAM Toolbox + AMCL | AMCL 栅格地图定位 | `maps/slam_toolbox/`（map.pgm/yaml） | `slam_2d_mapping.launch.py` | `amcl_localization.launch.py` |
 | 2D：cartographer | 子图匹配纯定位 | `maps/cartographer/`（map.pbstream + map.pgm/yaml） | `cartographer_2d_mapping.launch.py` | `cartographer_2d_localization.launch.py` |
 
 ### 公共前提
@@ -273,14 +273,15 @@ ros2 launch chassis_nav2 navigation.launch.py \
 
 详细步骤、初始位姿操作顺序和注意事项见 [建图导航命令](建图导航命令.md)。
 
-### 方案二：2D slam_toolbox
+### 方案二：SLAM Toolbox 建图 / AMCL 定位
 
 ```bash
 # 建图
 ros2 launch chassis_nav2 slam_2d_mapping.launch.py enable_control:=true rviz:=true
-# 存图（序列化地图 + 栅格地图两条命令，见 2d建图导航.md）
+# 存图：map_saver_cli 保存 YAML/PGM 供 AMCL 定位；序列化地图可保留续建图，见 2d建图导航.md
 # 定位 + 导航
-ros2 launch chassis_nav2 slam_2d_localization.launch.py enable_control:=true rviz:=true
+ros2 launch chassis_nav2 amcl_localization.launch.py enable_control:=true rviz:=true
+# 先用 2D Pose Estimate 给实际位置和朝向，等待定位与 Nav2 激活后再发目标
 ```
 
 ### 方案三：2D cartographer
@@ -293,7 +294,7 @@ ros2 launch chassis_nav2 cartographer_2d_mapping.launch.py enable_control:=true 
 ros2 launch chassis_nav2 cartographer_2d_localization.launch.py enable_control:=true rviz:=true
 ```
 
-两套 2D 方案的存图命令、起点对齐约束和选型建议见 [2D 建图导航](2d建图导航.md)。**注意**：两套 2D 纯定位都要求启动时车停在建图起点附近、朝向大致一致；本机 cartographer_ros 不支持 `/initialpose`（RViz 点 2D Pose Estimate 无效），初始位姿错了只能放回起点重启。
+两套 2D 方案的存图命令、初始化约束和选型建议见 [2D 建图导航](2d建图导航.md)。AMCL 等待 `/initialpose`，可在当前实际位置初始化；旧 `slam_2d_localization.launch.py` 命令兼容转入 AMCL。Cartographer 仍需在建图起点附近启动，本机版本不支持 `/initialpose`。
 
 ### 里程计链与关键标定
 
@@ -462,7 +463,7 @@ ros2 pkg list | grep -E 'robot_gateway|detector_node|capture_server|chassis_nav2
 - [实机开发使用手册](实机开发使用手册.md)
 - [启动命令速查](启动.md)
 - [建图导航命令（3D FAST-LIO）](建图导航命令.md)
-- [2D 建图导航（slam_toolbox / cartographer）](2d建图导航.md)
+- [2D 建图导航（SLAM Toolbox + AMCL / Cartographer）](2d建图导航.md)
 - [实机开发说明与清理清单](实机开发说明.md)
 - [实机导航移植与启动步骤](实机导航移植说明.md)
 - [底盘轮速里程计、对比与切换](底盘里程计说明.md)

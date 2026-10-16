@@ -1,0 +1,14 @@
+# Read actual SDK PTZ coordinates without moving the camera.
+---
+bool success
+string message
+float32 pan
+float32 tilt
+float32 zoom
+bool limits_valid
+float32 pan_min
+float32 pan_max
+float32 tilt_min
+float32 tilt_max
+float32 zoom_min
+float32 zoom_max

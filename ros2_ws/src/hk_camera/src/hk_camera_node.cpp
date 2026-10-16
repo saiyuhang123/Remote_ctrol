@@ -1,3 +1,6 @@
+#include "hk_camera/ptz_codec.h"
+#include <QTemporaryDir>
+#include <filesystem>
 #include "hk_camera/hk_camera_node.h"
 #include <cv_bridge/cv_bridge.h>
 #include <opencv2/opencv.hpp>
@@ -41,6 +44,8 @@ HKCameraNode::HKCameraNode(const std::string& name)
 
 HKCameraNode::~HKCameraNode()
 {
+    stopPTZ();
+    ptz_timer_->cancel();
     accept_faces_ = false;
     face_timer_->cancel();
     for (const auto& connection : camera_connections_) QObject::disconnect(connection);
@@ -165,6 +170,19 @@ void HKCameraNode::setupServices()
                std_srvs::srv::Trigger::Response::SharedPtr       res) {
             onStopStream(req, res);
         });
+
+    control_ptz_srv_ = create_service<srv::ControlPTZ>("/hk_camera/control_ptz",
+        [this](const srv::ControlPTZ::Request::SharedPtr req,
+               srv::ControlPTZ::Response::SharedPtr res) { onControlPTZ(req, res); });
+    ptz_timer_ = create_wall_timer(std::chrono::milliseconds(100), [this] {
+        if (active_ptz_command_ && std::chrono::steady_clock::now() >= ptz_deadline_)
+            stopPTZ();  // Retry on SDK errors until a stop succeeds.
+    });
+
+    get_ptz_pose_srv_ = create_service<srv::GetPTZPose>(
+        "/hk_camera/get_ptz_pose",
+        [this](const srv::GetPTZPose::Request::SharedPtr req,
+               srv::GetPTZPose::Response::SharedPtr res) { onGetPTZPose(req, res); });
 
     set_ptz_pose_srv_ = create_service<srv::SetPTZPose>(
         "/hk_camera/set_ptz_pose",
@@ -380,6 +398,7 @@ void HKCameraNode::onLogout(
 {
     if (user_id_ >= 0)
     {
+        stopPTZ();
         accept_faces_ = false;
         if (alarm_handle_ >= 0) camera_->closeAlarmChan(alarm_handle_);
         alarm_handle_ = -1;
@@ -413,7 +432,7 @@ void HKCameraNode::onStartStream(
 
     if (decoder_->isRunning())
     {
-        res->success = false;
+        res->success = true;
         res->message = "Stream already active";
         return;
     }
@@ -434,6 +453,7 @@ void HKCameraNode::onStopStream(
     const std_srvs::srv::Trigger::Request::SharedPtr,
     std_srvs::srv::Trigger::Response::SharedPtr res)
 {
+    stopPTZ();
     if (decoder_->isRunning())
     {
         decoder_->stop();
@@ -442,8 +462,8 @@ void HKCameraNode::onStopStream(
     }
     else
     {
-        res->success = false;
-        res->message = "No active stream";
+        res->success = true;
+        res->message = "Stream already stopped";
     }
 }
 
@@ -458,11 +478,29 @@ void HKCameraNode::onCapturePicture(
         return;
     }
 
+    if (req->quality > 2) {
+        res->success = false;
+        res->message = "Invalid JPEG quality (expected 0..2)";
+        return;
+    }
+    // Empty path means preview only. The SDK needs a filename; remove its
+    // temporary JPEG after copying the response, without a machine-specific path.
+    QTemporaryDir temporary;
     std::string path = req->save_path;
-    if (path.empty())
-    {
-        path = "/home/nvidia/kybot_ws/src/hk_camera/pic_capture/" +
-               std::to_string(now().nanoseconds()) + ".jpg";
+    if (path.empty()) {
+        if (!temporary.isValid()) {
+            res->message = "Cannot create temporary capture directory";
+            return;
+        }
+        path = temporary.filePath("preview.jpg").toStdString();
+    } else {
+        std::error_code error;
+        const auto parent = std::filesystem::path(path).parent_path();
+        if (!parent.empty()) std::filesystem::create_directories(parent, error);
+        if (error) {
+            res->message = "Cannot create capture directory: " + error.message();
+            return;
+        }
     }
 
     bool ok = camera_->captureJPEG(user_id_, channel_,
@@ -471,14 +509,19 @@ void HKCameraNode::onCapturePicture(
     res->success = ok;
     if (ok)
     {
-        res->message = "Captured: " + path;
+        res->message = req->save_path.empty() ? "Captured preview" : "Captured: " + path;
         // 尝试读取并发布图片
         cv::Mat img = cv::imread(path, cv::IMREAD_COLOR);
         if (!img.empty())
         {
             auto img_msg = cv_bridge::CvImage(
                 std_msgs::msg::Header(), "bgr8", img).toImageMsg();
+            img_msg->header.stamp = now();
+            img_msg->header.frame_id = "hk_camera";
             res->image = *img_msg;
+        } else {
+            res->success = false;
+            res->message = "Captured JPEG could not be decoded";
         }
     }
     else
@@ -503,28 +546,106 @@ void HKCameraNode::onSetPTZPose(
         return;
     }
 
-    // 海康 SDK 没有直接的绝对位置 API, 使用预置点方案:
-    // pan 字段作为预置点编号 (1~256)
-    int preset_no = static_cast<int>(req->pan);
-    if (preset_no < 1 || preset_no > 256)
-    {
-        res->success = false;
-        res->message = "Invalid preset number (pan field, expect 1~256)";
+    if (active_ptz_command_) { res->message = "Release manual PTZ control first"; return; }
+    if (!ptz::validPose(req->pan, req->tilt, req->zoom)) {
+        res->message = "Invalid PTZ coordinates: pan/tilt 0..360 degrees, zoom 1..999.9x";
         return;
     }
+    NET_DVR_PTZPOS pose{};
+    pose.wAction = 1;  // Absolute pan, tilt and zoom, not a preset number.
+    pose.wPanPos = *ptz::encode(req->pan);
+    pose.wTiltPos = *ptz::encode(req->tilt);
+    pose.wZoomPos = *ptz::encode(req->zoom);
+    // Validate against the device's limits when it supports scope queries.
+    NET_DVR_PTZSCOPE scope{};
+    DWORD length = 0;
+    if (camera_->getDVRConfig(user_id_, NET_DVR_GET_PTZSCOPE, channel_, &scope, &length)) {
+        if (scope.wPanPosMin == 0 && scope.wPanPosMax == 0 &&
+            scope.wTiltPosMin == 0 && scope.wTiltPosMax == 0) {
+            if (req->pan != 0 || req->tilt != 0) {
+                res->message = "Device does not report absolute pan/tilt; use manual PTZ direction controls";
+                return;
+            }
+            pose.wAction = 4;  // This IPZoom + RS485 device supports absolute zoom only.
+        }
+        if (!ptz::withinScope(pose.wPanPos, scope.wPanPosMin, scope.wPanPosMax) ||
+            !ptz::withinScope(pose.wTiltPos, scope.wTiltPosMin, scope.wTiltPosMax) ||
+            !ptz::withinScope(pose.wZoomPos, scope.wZoomPosMin, scope.wZoomPosMax)) {
+            res->message = "PTZ coordinates exceed device limits; read current PTZ first";
+            return;
+        }
+    }
+    res->success = camera_->setDVRConfig(user_id_, NET_DVR_SET_PTZPOS, channel_, &pose);
+    res->message = res->success ? "PTZ target accepted (read back to confirm arrival)" :
+        "Absolute PTZ command failed, SDK error=" + std::to_string(camera_->getLastError());
+}
 
-    if (camera_->ptzGotoPreset(user_id_, channel_, preset_no))
-    {
-        res->success = true;
-        res->message = "PTZ moving to preset " + std::to_string(preset_no);
-        RCLCPP_INFO(get_logger(), "PTZ → preset %d", preset_no);
+void HKCameraNode::onGetPTZPose(
+    const srv::GetPTZPose::Request::SharedPtr,
+    srv::GetPTZPose::Response::SharedPtr res)
+{
+    if (user_id_ < 0) { res->message = "Not logged in"; return; }
+    NET_DVR_PTZPOS pose{};
+    DWORD length = 0;
+    if (!camera_->getDVRConfig(user_id_, NET_DVR_GET_PTZPOS, channel_, &pose, &length)) {
+        res->message = "Read PTZ failed, SDK error=" + std::to_string(camera_->getLastError());
+        return;
     }
-    else
-    {
-        res->success = false;
-        res->message = "PTZ failed, error=" +
-                       std::to_string(camera_->getLastError());
+    const auto pan = ptz::decode(pose.wPanPos), tilt = ptz::decode(pose.wTiltPos), zoom = ptz::decode(pose.wZoomPos);
+    if (!pan || !tilt || !zoom || !ptz::validPose(*pan, *tilt, *zoom)) {
+        res->message = "Device returned invalid PTZ coordinates";
+        return;
     }
+    res->pan = *pan; res->tilt = *tilt; res->zoom = *zoom;
+    res->success = true;
+    res->message = "Actual PTZ coordinates (SDK degrees / optical zoom)";
+    NET_DVR_PTZSCOPE scope{};
+    if (camera_->getDVRConfig(user_id_, NET_DVR_GET_PTZSCOPE, channel_, &scope, &length)) {
+        const auto pmin = ptz::decode(scope.wPanPosMin), pmax = ptz::decode(scope.wPanPosMax);
+        const auto tmin = ptz::decode(scope.wTiltPosMin), tmax = ptz::decode(scope.wTiltPosMax);
+        const auto zmin = ptz::decode(scope.wZoomPosMin), zmax = ptz::decode(scope.wZoomPosMax);
+        if (pmin && pmax && tmin && tmax && zmin && zmax) {
+            res->limits_valid = true;
+            res->pan_min = *pmin; res->pan_max = *pmax;
+            res->tilt_min = *tmin; res->tilt_max = *tmax;
+            res->zoom_min = *zmin; res->zoom_max = *zmax;
+        }
+    }
+}
+
+bool HKCameraNode::stopPTZ()
+{
+    if (!active_ptz_command_) return true;
+    if (user_id_ >= 0 && !camera_->ptzControlWithSpeed(user_id_, channel_,
+            active_ptz_command_, active_ptz_speed_, 1)) return false;
+    active_ptz_command_ = 0;
+    return true;
+}
+
+void HKCameraNode::onControlPTZ(const srv::ControlPTZ::Request::SharedPtr req,
+                               srv::ControlPTZ::Response::SharedPtr res)
+{
+    if (req->stop) {
+        res->success = stopPTZ();
+        res->message = res->success ? "PTZ stopped" : "PTZ stop failed; watchdog will retry";
+        return;
+    }
+    if (user_id_ < 0) { res->message = "Not logged in"; return; }
+    if ((req->command != 11 && req->command != 12 &&
+         req->command != 21 && req->command != 22 && req->command != 23 && req->command != 24) ||
+        req->speed < 1 || req->speed > 7) { res->message = "Invalid PTZ direction or speed"; return; }
+    if (active_ptz_command_ != req->command || active_ptz_speed_ != req->speed) {
+        if (!stopPTZ()) { res->message = "Could not stop previous PTZ command"; return; }
+        if (!camera_->ptzControlWithSpeed(user_id_, channel_, req->command, req->speed, 0)) {
+            res->message = "Manual PTZ failed, SDK error=" + std::to_string(camera_->getLastError());
+            return;
+        }
+        active_ptz_command_ = req->command;
+        active_ptz_speed_ = req->speed;
+    }
+    ptz_deadline_ = std::chrono::steady_clock::now() + std::chrono::milliseconds(500);
+    res->success = true;
+    res->message = "PTZ lease renewed";
 }
 
 // ============================================================

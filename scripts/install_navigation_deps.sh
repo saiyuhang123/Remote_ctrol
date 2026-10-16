@@ -3,7 +3,7 @@ set -euo pipefail
 # Run on the real development/deployment computer; requires sudo.
 sudo apt-get update
 sudo apt-get install -y \
-  ros-humble-navigation2 ros-humble-nav2-bringup \
+  ros-humble-navigation2 ros-humble-nav2-bringup ros-humble-nav2-amcl \
   ros-humble-nav2-smac-planner ros-humble-nav2-regulated-pure-pursuit-controller \
   ros-humble-robot-localization ros-humble-pointcloud-to-laserscan \
   ros-humble-twist-mux ros-humble-tf-transformations ros-humble-sensor-msgs-py \

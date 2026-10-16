@@ -15,6 +15,8 @@
 #include "hk_camera/msg/face_capture.hpp"
 #include "hk_camera/srv/capture_picture.hpp"
 #include "hk_camera/srv/set_ptz_pose.hpp"
+#include "hk_camera/srv/get_ptz_pose.hpp"
+#include "hk_camera/srv/control_ptz.hpp"
 
 namespace hk_camera
 {
@@ -90,6 +92,12 @@ private:
     void onSetPTZPose(
         const srv::SetPTZPose::Request::SharedPtr req,
         srv::SetPTZPose::Response::SharedPtr res);
+    void onGetPTZPose(
+        const srv::GetPTZPose::Request::SharedPtr req,
+        srv::GetPTZPose::Response::SharedPtr res);
+    void onControlPTZ(const srv::ControlPTZ::Request::SharedPtr req,
+                      srv::ControlPTZ::Response::SharedPtr res);
+    bool stopPTZ();
 
     // ---- Sub callback ----
     void onCommand(const std_msgs::msg::String::SharedPtr msg);
@@ -115,6 +123,9 @@ private:
     uint64_t               face_sequence_ = 0;
     std::array<uint32_t, 2> face_coordinate_size_{};
     rclcpp::TimerBase::SharedPtr face_timer_;
+    rclcpp::TimerBase::SharedPtr ptz_timer_;
+    int active_ptz_command_ = 0, active_ptz_speed_ = 0;
+    std::chrono::steady_clock::time_point ptz_deadline_;
     std::vector<QMetaObject::Connection> camera_connections_;
 
     OnSetParametersCallbackHandle::SharedPtr param_cb_handle_;
@@ -132,6 +143,8 @@ private:
     // ---- 服务 ----
     rclcpp::Service<srv::CapturePicture>::SharedPtr           capture_srv_;
     rclcpp::Service<srv::SetPTZPose>::SharedPtr               set_ptz_pose_srv_;
+    rclcpp::Service<srv::GetPTZPose>::SharedPtr               get_ptz_pose_srv_;
+    rclcpp::Service<srv::ControlPTZ>::SharedPtr               control_ptz_srv_;
     rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr        login_srv_;
     rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr        logout_srv_;
     rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr        start_stream_srv_;

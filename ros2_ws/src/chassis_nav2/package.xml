@@ -33,6 +33,8 @@
   <exec_depend>pointcloud_to_laserscan</exec_depend>
   <exec_depend>twist_mux</exec_depend>
   <exec_depend>nav2_bringup</exec_depend>
+  <exec_depend>nav2_amcl</exec_depend>
+  <exec_depend>nav2_rviz_plugins</exec_depend>
   <exec_depend>nav2_smac_planner</exec_depend>
   <exec_depend>nav2_regulated_pure_pursuit_controller</exec_depend>
 

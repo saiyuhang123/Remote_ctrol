@@ -42,6 +42,18 @@ class ServicesTest : public QObject {
 private slots:
   void initTestCase() { rclcpp::init(0, nullptr, rclcpp::InitOptions(), rclcpp::SignalHandlerOptions::None); }
   void cleanupTestCase() { rclcpp::shutdown(); }
+  void amclProfileUsesOccupancyMapAndPreservesOtherBackends() {
+    const auto &amcl = desktopProfiles().at(2);
+    QCOMPARE(amcl.id, QString("slam_navigation"));
+    QVERIFY(amcl.name.contains("AMCL")); QCOMPARE(amcl.backend, QString("slam_toolbox"));
+    auto args = ProcessManager::launchArguments(config(), amcl, "/tmp/slam_map", true, false, false, "lio");
+    QVERIFY(args.contains("amcl_localization.launch.py")); QVERIFY(args.contains("map:=/tmp/slam_map.yaml"));
+    QVERIFY(!args.contains("map_file:=/tmp/slam_map"));
+    args = ProcessManager::launchArguments(config(), desktopProfiles().at(4), "/tmp/carto", true, false, false, "lio");
+    QVERIFY(args.contains("map_file:=/tmp/carto"));
+    args = ProcessManager::launchArguments(config(), desktopProfiles().at(3), "/tmp/slam_map", true, false, false, "lio");
+    QVERIFY(args.contains("slam_2d_mapping.launch.py"));
+  }
   void launchPreservesLiteralArgumentsAndStopsOnlyOwnedProcess() {
     auto c = config(); c.projectRoot = QDir(DESKTOP_UI_SOURCE_DIR).absoluteFilePath("..");
     if (!QFileInfo::exists(c.projectRoot + "/ros2_ws/install/setup.bash")) QSKIP("Project ROS overlay is required for local launch tests");

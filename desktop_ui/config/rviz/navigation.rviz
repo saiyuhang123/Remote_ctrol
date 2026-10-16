@@ -459,11 +459,11 @@ Visualization Manager:
     Class: rviz_default_plugins/Pose
     Color: 255; 0; 0
     Enabled: true
-    Head Length: 0.20000000298023224
-    Head Radius: 0.10000000149011612
-    Name: 导航目标点
-    Shaft Length: 0.5
-    Shaft Radius: 0.029999999329447746
+    Head Length: 0.35
+    Head Radius: 0.18
+    Name: 所选目标箭头
+    Shaft Length: 0.8
+    Shaft Radius: 0.06
     Shape: Arrow
     Topic:
       Depth: 5
@@ -471,7 +471,7 @@ Visualization Manager:
       Filter size: 10
       History Policy: Keep Last
       Reliability Policy: Reliable
-      Value: /goal_pose
+      Value: /desktop_ui/selected_goal
     Value: true
   - Alpha: 1
     Class: rviz_default_plugins/Polygon
@@ -527,7 +527,7 @@ Visualization Manager:
       Name: Current View
       Near Clip Distance: 0.009999999776482582
       Pitch: 0.43479740619659424
-      Target Frame: base_link
+      Target Frame: <Fixed Frame>
       Value: Orbit (rviz)
       Yaw: 1.3802610635757446
     Saved: null

@@ -83,8 +83,8 @@ controller_server:
     general_goal_checker:
       stateful: true  # 进入容差即锁定成功，避免终点附近抖动反复判定
       plugin: nav2_controller::SimpleGoalChecker
-      # 位置 10cm 精确到点；朝向容差放开（任意朝向均判到达，用户要求只管位置）
-      xy_goal_tolerance: 0.10
+      # 位置容差 20cm；朝向容差放开（任意朝向均判到达，用户要求只管位置）
+      xy_goal_tolerance: 0.20
       yaw_goal_tolerance: 6.283
     FollowPath:
       plugin: nav2_regulated_pure_pursuit_controller::RegulatedPurePursuitController
@@ -94,7 +94,7 @@ controller_server:
       max_lookahead_dist: 1.5
       rotate_to_heading_angular_vel: 0.5
       transform_tolerance: 0.5
-      xy_goal_tolerance: 0.10
+      xy_goal_tolerance: 0.20
       use_rotate_to_heading: false
       max_angular_accel: 1.5
       allow_reversing: true

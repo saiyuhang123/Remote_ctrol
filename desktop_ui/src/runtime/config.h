@@ -5,7 +5,8 @@
 
 struct DesktopConfig {
   QString resourceDir, projectRoot;
-  QString gatewayUrl, backendUrl, defaultProfile, baseFrame, odomTopic, imageTopic, batteryTopic;
+  QString backendUrl, defaultProfile, baseFrame, odomTopic, imageTopic, batteryTopic;
+  QString cameraParamsFile;
   double maxLinear = .3, maxAngular = .5;
   int feedbackTimeoutMs = 1500, serviceTimeoutMs = 15000;
   static DesktopConfig load(const QString &path, const QString &resources, const QString &project);

@@ -165,7 +165,7 @@ def scan_nodes(hw):
                  remappings=[('cloud_in', '/velodyne_points_cropped'), ('scan', '/scan')], output='screen')]
 
 
-def navigation_nodes(map_yaml, hw, params_file, use_map_server=True):
+def navigation_nodes(map_yaml, hw, params_file, use_map_server=True, localization_names=()):
     from nav2_common.launch import ReplaceString, RewrittenYaml
     base, angle, footprint = geometry(hw)
     # 优先使用实测最小转弯半径（hardware.yaml chassis.min_turning_radius）。
@@ -203,8 +203,9 @@ def navigation_nodes(map_yaml, hw, params_file, use_map_server=True):
         names.append(executable)
     if use_map_server:
         nodes.append(Node(package='nav2_lifecycle_manager', executable='lifecycle_manager',
-                          name='lifecycle_manager_map', parameters=[{'use_sim_time': False,
-                          'autostart': True, 'node_names': ['map_server']}], output='screen'))
+                          name='lifecycle_manager_localization' if localization_names else 'lifecycle_manager_map',
+                          parameters=[{'use_sim_time': False, 'autostart': True,
+                                       'node_names': ['map_server', *localization_names]}], output='screen'))
     nodes.append(Node(package='nav2_lifecycle_manager', executable='lifecycle_manager',
                       name='lifecycle_manager_navigation', parameters=[{'use_sim_time': False,
                       'autostart': True, 'node_names': names}], output='screen'))

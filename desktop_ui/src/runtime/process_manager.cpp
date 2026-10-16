@@ -57,6 +57,9 @@ QStringList ProcessManager::launchArguments(const DesktopConfig &, const Profile
     args << "pcd_map:=" + prefix + ".pcd";
     args << "odom_source:=" + (p.mapping ? QString("lio") : odom);
     if (!p.mapping) args << "map:=" + prefix + ".yaml";
-  } else if (!p.mapping) args << "map:=" + prefix + ".yaml" << "map_file:=" + prefix;
+  } else if (!p.mapping) {
+    args << "map:=" + prefix + ".yaml";
+    if (p.backend == "cartographer") args << "map_file:=" + prefix;
+  }
   return args;
 }

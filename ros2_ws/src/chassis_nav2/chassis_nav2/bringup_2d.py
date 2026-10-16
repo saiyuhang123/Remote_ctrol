@@ -1,4 +1,6 @@
-"""2D 管线：slam_toolbox 或 cartographer 提供 map->odom；odom->base_link 固定由 EKF（轮速+IMU）发布。
+"""2D 管线：SLAM Toolbox 建图、AMCL 定位，或 Cartographer 建图/定位。
+
+map->odom 由所选定位/建图节点提供；odom->base_link 固定由 EKF（轮速+IMU）发布。
 
 与 3D 管线（bringup.py，FAST-LIO）互不混用；slam_toolbox 与 cartographer 两个 2D 后端
 配置、地图文件、Nav2 参数各自独立，运行时三选一，不可同时启动。
@@ -31,21 +33,19 @@ def cartographer_nodes(nav_share, args, mapping):
     return nodes
 
 
-def slam_toolbox_nodes(nav_share, args, mapping):
+def slam_nodes(nav_share, args, mapping):
     if mapping:
         return [Node(package='slam_toolbox', executable='async_slam_toolbox_node', name='slam_toolbox',
                      parameters=[str(nav_share/'config/slam_toolbox_mapping.yaml'),
                                  {'use_sim_time': False}], output='screen')]
-    posegraph = Path(bringup.existing_file(args['map_file'] + '.posegraph',
-                                           'slam_toolbox 序列化地图')).with_suffix('')
-    return [Node(package='slam_toolbox', executable='localization_slam_toolbox_node',
-                 name='slam_toolbox',
-                 parameters=[str(nav_share/'config/slam_toolbox_localization.yaml'),
-                             {'use_sim_time': False, 'map_file_name': str(posegraph)}],
+    params = bringup.existing_file(args.get('amcl_params', str(nav_share/'config/amcl.yaml')),
+                                  'AMCL 参数')
+    return [Node(package='nav2_amcl', executable='amcl', name='amcl',
+                 parameters=[params, {'use_sim_time': False}],
                  output='screen')]
 
 
-BACKENDS = {'slam_toolbox': slam_toolbox_nodes, 'cartographer': cartographer_nodes}
+BACKENDS = {'slam_toolbox': slam_nodes, 'cartographer': cartographer_nodes}
 
 
 def assemble(args, mapping, backend):
@@ -68,7 +68,7 @@ def assemble(args, mapping, backend):
         nodes.append(bringup.chassis_node(hw))
     if args['enable_control'].lower() == 'true':
         nodes.append(bringup.bridge_node(hw))
-    # 轮速 + IMU 经 EKF 发 odom->base_link 与 /odom，slam_toolbox 与 Nav2 共用
+    # 轮速 + IMU 经 EKF 发 odom->base_link 与 /odom，定位节点与 Nav2 共用
     nodes.append(bringup.wheel_node(hw, '/odom_raw', 'wheel_odom', False, '/odom_wheel'))
     nodes.append(bringup.ekf_node(hw))
     nodes.append(Node(package='twist_mux', executable='twist_mux',
@@ -89,8 +89,9 @@ def assemble(args, mapping, backend):
     else:
         nav2_params = bringup.existing_file(args['nav2_params'], 'Nav2 参数')
         nodes.extend(bringup.navigation_nodes(bringup.existing_file(args['map'], 'Nav2 栅格地图'),
-                                              hw, nav2_params, use_map_server=True))
-        rviz_config = str(nav_share/'config/localization_nav.rviz')
+                                              hw, nav2_params, use_map_server=True,
+                                              localization_names=('amcl',) if backend == 'slam_toolbox' else ()))
+        rviz_config = str(nav_share/('config/amcl_nav.rviz' if backend == 'slam_toolbox' else 'config/localization_nav.rviz'))
     if args['rviz'].lower() == 'true':
         nodes.append(Node(package='rviz2', executable='rviz2',
                           arguments=['-d', rviz_config],

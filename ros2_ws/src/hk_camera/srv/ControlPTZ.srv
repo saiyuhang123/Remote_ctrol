@@ -1,0 +1,8 @@
+# SDK commands: 11 zoom in, 12 zoom out, 21 up, 22 down, 23 left, 24 right.
+# Start requests renew a 500 ms lease. Stop requests always stop the active move.
+uint8 command
+uint8 speed
+bool stop
+---
+bool success
+string message
