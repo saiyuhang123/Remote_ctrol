@@ -20,7 +20,8 @@ public:
   void stop();
   static QStringList launchArguments(const DesktopConfig &config, const Profile &profile,
                                     const QString &mapPrefix, bool sensors, bool chassis,
-                                    bool control, const QString &odomSource);
+                                    bool control, const QString &odomSource,
+                                    const QString &navigationYaml = QString());
   static QStringList environmentArguments(const DesktopConfig &config, const QStringList &arguments);
 signals:
   void output(const QString &text);

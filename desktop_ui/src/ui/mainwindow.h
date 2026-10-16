@@ -4,8 +4,8 @@
 #include <QJsonArray>
 #include <QMainWindow>
 #include <QVector>
-class CameraPanel; class LocalController; class BusinessClient; class ProcessManager; class MapSaver; class RvizHost;
-class QCheckBox; class QComboBox; class QDoubleSpinBox; class QLabel; class QLineEdit;
+class CameraPanel; class LocalController; class BusinessClient; class ProcessManager; class MapSaver; class RvizHost; class MapEditorDialog;
+class QAction; class QCheckBox; class QComboBox; class QDoubleSpinBox; class QLabel; class QLineEdit;
 class QPlainTextEdit; class QProgressBar; class QPushButton; class QTableWidget; class QStackedWidget;
 class DashBoard;
 namespace ads { class CDockManager; }
@@ -31,6 +31,7 @@ private:
   void sendGoal(double x, double y, double yaw);
   void sendInitialPose(double x, double y, double yaw);
   void startSession();
+  void openMapEditor();
   void showPoints(const QJsonArray &points);
   bool allowed() const;
   DesktopConfig config_;
@@ -47,7 +48,7 @@ private:
   QString lastNavigationEvent_;
   QComboBox *profiles_ = nullptr, *odom_ = nullptr;
   QCheckBox *enableControl_ = nullptr, *manage_ = nullptr, *sensors_ = nullptr, *chassis_ = nullptr, *bridge_ = nullptr;
-  QLineEdit *backendUrl_ = nullptr, *mapPrefix_ = nullptr;
+  QLineEdit *backendUrl_ = nullptr, *mapPrefix_ = nullptr, *navigationYaml_ = nullptr;
   QDoubleSpinBox *goalX_ = nullptr, *goalY_ = nullptr, *goalYaw_ = nullptr, *speed_ = nullptr, *turn_ = nullptr;
   CameraPanel *cameraPanel_ = nullptr;
   QLabel *connection_ = nullptr, *pose_ = nullptr, *velocity_ = nullptr, *stopState_ = nullptr, *navState_ = nullptr;
@@ -58,5 +59,8 @@ private:
   QPlainTextEdit *logs_ = nullptr;
   QTableWidget *points_ = nullptr;
   QPushButton *start_ = nullptr, *stop_ = nullptr, *save_ = nullptr, *take_ = nullptr, *unlock_ = nullptr;
+  MapEditorDialog *mapEditor_ = nullptr;
+  QAction *mapEditorAction_ = nullptr;
+  int lastProfileIndex_ = -1;
   QVector<QPushButton *> directionButtons_, writeButtons_;
 };

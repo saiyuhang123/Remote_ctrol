@@ -7,6 +7,8 @@ set(CMAKE_AUTOUIC ON)
 set(CMAKE_AUTORCC ON)
 set(CMAKE_INCLUDE_CURRENT_DIR ON)
 find_package(Qt5 5.15 REQUIRED COMPONENTS Widgets Network Svg Test)
+find_package(yaml-cpp REQUIRED)
+find_package(nav2_map_server REQUIRED)
 find_package(ament_cmake REQUIRED)
 foreach(dep rclcpp rclcpp_action nav2_msgs rviz_common rviz_rendering rviz_default_plugins nav_msgs geometry_msgs sensor_msgs std_msgs std_srvs action_msgs tf2_ros)
   find_package(${dep} REQUIRED)
@@ -21,6 +23,19 @@ add_subdirectory(third_party/dockWidget EXCLUDE_FROM_ALL)
 add_library(desktop_protocol STATIC src/runtime/config.cpp)
 target_include_directories(desktop_protocol PUBLIC src)
 target_link_libraries(desktop_protocol PUBLIC Qt5::Widgets Qt5::Network)
+
+# Pure local map editor: Qt + yaml-cpp only. It never links ROS, business HTTP,
+# chassis or navigation code.
+add_library(desktop_map_editor STATIC
+  src/map_editor/map_document.cpp
+  src/map_editor/map_io.cpp
+  src/map_editor/map_edit_command.cpp
+  src/ui/widgets/map_canvas.cpp
+  src/ui/map_editor_dialog.cpp
+)
+target_include_directories(desktop_map_editor PUBLIC src)
+target_link_libraries(desktop_map_editor PUBLIC Qt5::Widgets ${YAML_CPP_LIBRARIES})
+
 add_library(desktop_app STATIC
   src/ui/mainwindow.cpp src/ui/mainwindow.ui src/ui/camera_panel.cpp
   src/ui/widgets/dashboard.cpp src/rviz/rviz_host.cpp
@@ -28,7 +43,7 @@ add_library(desktop_app STATIC
   src/runtime/process_manager.cpp src/runtime/map_saver.cpp
   resources/images.qrc resources/media.qrc)
 target_include_directories(desktop_app PUBLIC src src/ui)
-target_link_libraries(desktop_app PUBLIC desktop_protocol qt5advanceddocking Qt5::Svg)
+target_link_libraries(desktop_app PUBLIC desktop_protocol desktop_map_editor qt5advanceddocking Qt5::Svg)
 target_compile_definitions(desktop_app PUBLIC DESKTOP_UI_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
 ament_target_dependencies(desktop_app PUBLIC rclcpp rclcpp_action nav2_msgs rviz_common rviz_rendering nav_msgs geometry_msgs sensor_msgs std_msgs std_srvs action_msgs tf2_ros)
 foreach(dep yunle_msgs hk_camera ocr_interfaces slam_toolbox cartographer_ros_msgs)
@@ -49,6 +64,22 @@ if(BUILD_TESTING)
   target_link_libraries(desktop_protocol_test PRIVATE desktop_app Qt5::Test)
   add_test(NAME desktop_protocol COMMAND desktop_protocol_test)
   set_tests_properties(desktop_protocol PROPERTIES TIMEOUT 45 ENVIRONMENT "QT_QPA_PLATFORM=offscreen;ROS_DOMAIN_ID=221;ROS_LOCALHOST_ONLY=1;ROS_LOG_DIR=${CMAKE_CURRENT_BINARY_DIR}/test_ros_logs")
+
+  add_executable(desktop_map_editor_test tests/map_editor_test.cpp)
+  target_link_libraries(desktop_map_editor_test PRIVATE desktop_map_editor Qt5::Test)
+  add_test(NAME desktop_map_editor COMMAND desktop_map_editor_test)
+  set_tests_properties(desktop_map_editor PROPERTIES TIMEOUT 45 ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+
+  add_executable(desktop_map_editor_ui_test tests/map_editor_ui_test.cpp)
+  target_link_libraries(desktop_map_editor_ui_test PRIVATE desktop_map_editor Qt5::Test)
+  add_test(NAME desktop_map_editor_ui COMMAND desktop_map_editor_ui_test)
+  set_tests_properties(desktop_map_editor_ui PROPERTIES TIMEOUT 45 ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+
+  add_executable(desktop_map_editor_nav2_test tests/map_editor_nav2_test.cpp)
+  target_link_libraries(desktop_map_editor_nav2_test PRIVATE desktop_map_editor Qt5::Test)
+  ament_target_dependencies(desktop_map_editor_nav2_test PUBLIC nav2_map_server rclcpp nav_msgs)
+  add_test(NAME desktop_map_editor_nav2 COMMAND desktop_map_editor_nav2_test)
+  set_tests_properties(desktop_map_editor_nav2 PROPERTIES TIMEOUT 30 ENVIRONMENT "QT_QPA_PLATFORM=offscreen;ROS_DOMAIN_ID=208;ROS_LOCALHOST_ONLY=1;ROS_LOG_DIR=${CMAKE_CURRENT_BINARY_DIR}/test_ros_logs")
   add_executable(desktop_ros_services_test tests/ros_services_test.cpp)
   target_link_libraries(desktop_ros_services_test PRIVATE desktop_app Qt5::Test)
   foreach(dep hk_camera ocr_interfaces slam_toolbox cartographer_ros_msgs)

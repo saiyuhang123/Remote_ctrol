@@ -1,13 +1,18 @@
 #include "ui/mainwindow.h"
+#include "ui/map_editor_dialog.h"
 #include "runtime/config.h"
 #include "rviz/rviz_host.h"
+#include <QAction>
 #include <QCheckBox>
 #include <QComboBox>
 #include <QDoubleSpinBox>
 #include <QDir>
+#include <QFile>
 #include <QLabel>
+#include <QLineEdit>
 #include <QPushButton>
 #include <QScreen>
+#include <QTemporaryDir>
 #include <QTest>
 #include <QTimer>
 #include <geometry_msgs/msg/pose_with_covariance_stamped.hpp>
@@ -138,6 +143,35 @@ private slots:
     MainWindow window(config, false); window.show(); window.activateWindow();
     QVERIFY(QTest::qWaitForWindowExposed(&window));
     auto *rviz = window.findChild<RvizHost *>(); QVERIFY(rviz);
+    // Main-window map-editor entry must work even while vehicle control is not enabled.
+    auto *editorAction = window.findChild<QAction *>(QStringLiteral("mapEditorAction"));
+    auto *navigationYaml = window.findChild<QLineEdit *>(QStringLiteral("navigationYaml"));
+    auto *mapPrefix = window.findChild<QLineEdit *>(QStringLiteral("mapPrefix"));
+    QVERIFY(editorAction && navigationYaml && mapPrefix);
+    QVERIFY(editorAction->isEnabled());
+    QTemporaryDir editorMapDirectory;
+    QVERIFY(editorMapDirectory.isValid());
+    const QString editorImage = editorMapDirectory.filePath(QStringLiteral("map.pgm"));
+    const QString editorYaml = editorMapDirectory.filePath(QStringLiteral("map.yaml"));
+    {
+      QFile image(editorImage);
+      QVERIFY(image.open(QIODevice::WriteOnly));
+      QVERIFY(image.write(QByteArray("P5\n4 3\n255\n") + QByteArray(12, char(205))) == 23);
+      QFile yaml(editorYaml);
+      QVERIFY(yaml.open(QIODevice::WriteOnly));
+      QVERIFY(yaml.write("image: map.pgm\nmode: trinary\nresolution: 0.05\n"
+                         "origin: [-1.25, 3.5, 0.0]\n"
+                         "negate: 0\nfree_thresh: 0.25\noccupied_thresh: 0.65\n") > 0);
+    }
+    mapPrefix->setText(editorMapDirectory.filePath(QStringLiteral("map")));
+    editorAction->trigger();
+    QTRY_VERIFY(window.findChild<MapEditorDialog *>() != nullptr);
+    auto *editorDialog = window.findChild<MapEditorDialog *>();
+    QVERIFY(editorDialog && editorDialog->document());
+    QCOMPARE(editorDialog->document()->width(), 4);
+    QCOMPARE(editorDialog->document()->height(), 3);
+    editorDialog->close();
+    QTRY_VERIFY(window.findChild<MapEditorDialog *>() == nullptr);
     auto *frame = rviz->findChild<rviz_common::VisualizationFrame *>(); QVERIFY(frame);
     auto *manager = frame->getManager(); auto *panel = manager->getRenderPanel();
     auto *globalDisplay = display(manager, "全局点云地图"); QVERIFY(globalDisplay && globalDisplay->isEnabled());

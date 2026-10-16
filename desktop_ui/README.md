@@ -24,6 +24,7 @@
 | 路线 / 巡检计划入口 | “打开路线 / 巡检计划管理”按钮 | 打开原有业务网页，未在 Qt 内另建一套路线/计划编辑器或自动执行器 |
 | 本机会话管理 | 显式启动所选建图/导航流程、设置地图路径、选择是否启动雷达/IMU、底盘驱动和控制桥、选择里程计源、停止自身启动的会话 | 默认只连接已有系统；检测重复管线，只管理本应用启动的进程组；底盘与控制桥默认关闭 |
 | 地图保存 | FAST-LIO PCD 与自动二维切片保存、SLAM Toolbox 序列化与栅格保存、Cartographer 状态快照与栅格保存 | 一次点击保存建图状态和导航 PGM/YAML；FAST-LIO 自动串联 `/map_save`、`pcd2pgm` 和 Nav2 存图工具 |
+| 地图编辑 | 独立窗口打开已有 PGM/YAML，绘制障碍/空闲/未知/直线，调整笔刷大小，缩放/平移/适应窗口，撤销/重做和备份另存；保存后自动填入“导航栅格 YAML” | 纯本地 Qt + yaml-cpp，不依赖 ROS、网关或业务后端；第一版编辑 P5/trinary 栅格并保留源图，另存结果供下次导航启动使用 |
 | 消息与会话日志 | 窗口内显示带时间的操作消息、服务结果、连接异常、存图结果和子进程输出 | 便于逐项检查接口，不把发送请求当成操作完成 |
 | 离线验证与截图 | 离线观察模式、六模式自动检查、定时退出、保存整个界面截图、截图成功/失败提示与退出码 | 通过启动参数使用；`xvfb-run` 下在虚拟显示器运行，不弹出桌面窗口 |
 
@@ -42,6 +43,7 @@
 | 业务后端适配 | [business_client.cpp](src/adapters/business_client.cpp) | 通过 HTTP 读取、新增和删除现有后端点位，不直接访问 SQLite |
 | 本地进程管理 | [process_manager.cpp](src/runtime/process_manager.cpp) | 组合原 ROS2 启动入口及参数，加载环境，管理自身子进程与进程组，转发启动日志 |
 | 地图保存流程 | [map_saver.cpp](src/runtime/map_saver.cpp) | 按建图后端组织状态保存与栅格导出，管理超时、保存中状态和产物检查 |
+| 本地地图编辑器 | [src/map_editor](src/map_editor/)、[map_editor_dialog.cpp](src/ui/map_editor_dialog.cpp)、[map_canvas.cpp](src/ui/widgets/map_canvas.cpp) | 独立的 PGM/YAML 文档模型、三态笔刷与直线编辑、撤销/重做、坐标换算、备份及版本化另存；不链接 ROS 或业务后端 |
 | FAST-LIO 栅格导出 | [export_fastlio_map.py](scripts/export_fastlio_map.py)、[切片参数](config/fastlio_map_export.yaml) | 独立进程完成 PCD 高度过滤、二维投影与 Nav2 PGM/YAML 保存；独立话题避免串图，失败保留旧栅格 |
 | 配置与模式定义 | [config.cpp](src/runtime/config.cpp)、[desktop.json](config/desktop.json) | 管理连接地址、话题、限幅、超时、六种模式及其坐标系和启动入口 |
 | 程序入口与离线运行 | [main.cpp](src/main.cpp) | Qt/ROS2 初始化与退出、命令行参数、隔离模式、自动检查、定时退出和截图结果输出 |
@@ -52,10 +54,10 @@
 
 ## 尚未实现的相关能力
 
-地图编辑的范围、模块划分、三套导航接入和验收标准见 [地图编辑开发计划](../地图编辑开发计划.md)。目前仅完成计划，适合交给其他 AI 或新会话继续实现。
+基础二维栅格地图编辑已实现；完整路线/禁行区图层、实时热切换及后续扩展范围见 [地图编辑开发计划](../地图编辑开发计划.md)。
 
 - 自动巡检执行器、多点循环、定时无人值守调度，以及到点后自动串联云台、抓拍、OCR 与结果记录。
-- Qt 内的地图编辑、指定路径编辑与执行，以及完整路线/计划编辑器。
+- Qt 内的指定路径编辑与执行、完整路线/计划编辑器、独立禁行区图层和运行中热切换地图。
 - 智能掉头、精准停靠及新的阿克曼控制或 Nav2 行为插件；本次移植没有改变车辆运动算法或精度。
 - 网页与 Qt 之间由服务端强制执行的控制权互斥。
 
@@ -72,7 +74,7 @@
 
 构建结果为 `desktop_ui/build/robot_desktop`。脚本自动加载 Humble 与现有工作空间 overlay，默认使用 2 个编译任务，可设置 `DESKTOP_BUILD_JOBS`。输出目录可通过 `DESKTOP_BUILD_DIR` 指定，不复用原 ROS2 工作空间的构建目录。
 
-桌面依赖安装脚本为 `scripts/install_dependencies.sh`，需要的主要开发包为 `qtbase5-private-dev`、`libqt5svg5-dev`。ROS2 / RViz2 沿用现有环境。相机、OCR 和电池集成在构建时自动检测本项目的 `hk_camera`、`ocr_interfaces`、`yunle_msgs` 消息包；缺失时相应功能显示不可用，不要求修改原构建流程。
+桌面依赖安装脚本为 `scripts/install_dependencies.sh`，需要的主要开发包为 `qtbase5-private-dev`、`libqt5svg5-dev`、`libyaml-cpp-dev`。ROS2 / RViz2 沿用现有环境。相机、OCR 和电池集成在构建时自动检测本项目的 `hk_camera`、`ocr_interfaces`、`yunle_msgs` 消息包；缺失时相应功能显示不可用，不要求修改原构建流程。
 
 当前终端没有图形桌面时可离线预览：
 
@@ -183,6 +185,20 @@ FAST-LIO 建图模式点击“保存当前建图产物”后，默认得到 `map
 
 参数位于 [config/fastlio_map_export.yaml](config/fastlio_map_export.yaml)：默认高度 `-0.10～2.0 m`、分辨率 `0.05 m`、半径过滤 `0.2 m / 6 邻点`、导出超时 `180 s`，修改后下次保存生效。高度按 PCD 坐标系解释，与现有手动切片命令一致；不额外平移/旋转，也不自动调用 `clean_map.py` 修改像素。保存 YAML 时使用投影消息的完整原点及分辨率，避免当前 Nav2 存图工具截短原点小数导致偏移。切片复用已构建的 `pcd2pgm` 和 `nav2_map_server`，需要 ROS2 Python 的 `rclpy/nav_msgs/ament_index_python` 及 `python3-yaml`。保存过程在后台执行，界面日志依次报告 PCD、切片和栅格保存结果。
 
+## 本地地图编辑
+
+主窗口工具栏“地图编辑”打开独立窗口，默认尝试加载当前地图前缀对应的 YAML，也可通过“打开地图”选择其他 `.yaml`。选择 `.pgm` 时只有在同目录存在同名 `.yaml/.yml` 时才会打开，不会猜测原点或分辨率。
+
+- 工具支持障碍、空闲、未知和直线；笔刷大小以栅格数显示并换算米数，滚轮缩放，右键/中键拖拽平移，“适应窗口”恢复视图。
+- 一次按下到松开算一步撤销；直线松开后才提交，拖动期间只显示预览。保存前窗口标题和状态栏会提示未保存修改。
+- “另存为”默认生成 `<原名>_edited.yaml`，图片使用带时间戳的新文件名；不覆盖源 YAML/PGM。若目标已存在，会先备份旧 YAML 和它引用的图片，再用 `QSaveFile` 提交新 YAML。
+- 保存成功后会填入主窗口“导航栅格 YAML”输入框；该字段留空时三套导航仍使用原地图前缀的 `.yaml`。FAST-LIO 的 `pcd_map` 和 Cartographer 的 `map_file` 不会被编辑图替换，编辑图只在下次导航启动时作为 `map:=...` 使用。
+- 当前假设已知：205 像素不一定等于未知。已有三套地图的 `free_thresh=0.25` 下，真实 Nav2 Map Server 会把 205 解析为空闲；编辑器按当前 YAML 的 `negate` 和阈值推导三态编码，不会写死 205。
+
+合成地图的离线编辑预览：
+
+![本地地图编辑窗口](docs/map_editor_preview.png)
+
 ## 视频、云台、OCR 与点位
 
 “相机监控”独立于六种导航/建图模式，无需网关、业务后端或雷达即可使用：
@@ -220,14 +236,17 @@ cd ..
 
 ## 验证与代码边界
 
-`scripts/build.sh` 构建后运行测试；也可手动运行：
+`scripts/build.sh` 构建后运行测试；也可手动运行，但必须先加载 ROS2 与项目 overlay，否则测试找不到 `hk_camera` 等动态类型库：
 
 ```bash
+source /opt/ros/humble/setup.bash
+source ros2_ws/install/setup.bash
 ctest --test-dir desktop_ui/build --output-on-failure
 ```
 
 测试使用隔离 ROS 域中的模拟 Nav2 Action、话题和服务。GUI 测试在 Xvfb 中验证地图/点云接收及彩色像素、无定位 TF 时的真实 RViz 点选、本地目标下发和取消、接管与松键停车；不启动实车底盘、导航执行器或相机。没有实车运动精度验收。新增 `desktop_map_saver` 测试模拟 `/map_save`，实际调用 PCD 切片及 Nav2 栅格工具，覆盖自动三文件保存、带空格/中文/引号的路径、原点精度、隔离其他地图、过滤失败/超时保留旧图、失败后重试和导出进程退出。
+新增地图编辑测试：`desktop_map_editor` 覆盖 P5 解析、阈值语义、坐标换算、撤销/重做、备份与另存；`desktop_map_editor_ui` 在 offscreen 环境用真实鼠标事件验证三态笔刷、撤销/重做和保存；`desktop_map_editor_nav2` 调用 Humble 的真实 `nav2_map_server::loadMapFromYaml`，确认未知/空闲/障碍分别输出 -1/0/100，并确认现有 205 灰度在 `free_thresh=0.25` 下真实解析为空闲。
 
-本机已完成构建、五组自动测试和六种模式的离线切换。相机模拟测试另外覆盖登录/取流、视频像素与过期、设备范围、按住方向控制、松开与取消使能后的停止。服务测试还覆盖模拟相机/OCR/存图响应、超时及本地进程管理。海康实机已验证 1920×1080 预览、云台/变倍信息读取及 SDK 抓拍，未下发实际转动或变倍。详细结果与离线预览见 [移植与验证记录](移植与验证记录.md)。
+本机已完成构建、八组自动测试和六种模式的离线切换。相机模拟测试另外覆盖登录/取流、视频像素与过期、设备范围、按住方向控制、松开与取消使能后的停止。服务测试还覆盖模拟相机/OCR/存图响应、超时及本地进程管理。海康实机已验证 1920×1080 预览、云台/变倍信息读取及 SDK 抓拍，未下发实际转动或变倍。详细结果与离线预览见 [移植与验证记录](移植与验证记录.md)。
 
-代码分为 `src/ui`、`src/rviz`、`src/adapters`、`src/runtime`。后续智能掉头、精准停靠应在独立 ROS2 导航行为或控制模块实现；这个桌面端提供操作和诊断入口，不改变原 FAST-LIO、Nav2 或底盘参数。
+代码分为 `src/ui`、`src/map_editor`、`src/rviz`、`src/adapters`、`src/runtime`。后续智能掉头、精准停靠应在独立 ROS2 导航行为或控制模块实现；这个桌面端提供操作和诊断入口，不改变原 FAST-LIO、Nav2 或底盘参数。

@@ -1,5 +1,6 @@
 #include "ui/mainwindow.h"
 #include "ui/camera_panel.h"
+#include "ui/map_editor_dialog.h"
 #include "ui_mainwindow.h"
 #include "adapters/business_client.h"
 #include "adapters/local_controller.h"
@@ -102,6 +103,9 @@ void MainWindow::setupUi() {
   for (int i = 0; i < desktopProfiles().size(); ++i) { profiles_->addItem(desktopProfiles()[i].name); if (desktopProfiles()[i].id == config_.defaultProfile) selected = i; }
   profiles_->setCurrentIndex(selected); tools->addWidget(profiles_);
   auto *load = tools->addAction("加载显示"); connect(load, &QAction::triggered, this, &MainWindow::applyProfile);
+  mapEditorAction_ = tools->addAction(QIcon(":/images/edit.svg"), "地图编辑");
+  mapEditorAction_->setObjectName("mapEditorAction");
+  connect(mapEditorAction_, &QAction::triggered, this, &MainWindow::openMapEditor);
   auto *panels = tools->addAction("显示项 / 视角"); panels->setCheckable(true);
   connect(panels, &QAction::toggled, this, [this](bool visible) { if (rviz_) rviz_->setPanelsVisible(visible); });
   auto *initial = tools->addAction(QIcon(":/images/reloc2.svg"), "点选初始位姿"); connect(initial, &QAction::triggered, this, [this] { rviz_->selectTool("rviz_default_plugins/SetInitialPose"); });
@@ -153,7 +157,8 @@ void MainWindow::setupUi() {
   manualLayout->addLayout(grid); left->addWidget(manual);
   auto *runtime = new QGroupBox("本机会话（默认仅连接已有系统）"); auto *run = new QVBoxLayout(runtime);
   manage_ = new QCheckBox("由界面启动与管理所选流程"); run->addWidget(manage_);
-  mapPrefix_ = new QLineEdit; mapPrefix_->setPlaceholderText("地图绝对路径，不带扩展名"); run->addWidget(mapPrefix_);
+  mapPrefix_ = new QLineEdit; mapPrefix_->setObjectName("mapPrefix"); mapPrefix_->setPlaceholderText("地图绝对路径，不带扩展名"); run->addWidget(mapPrefix_);
+  navigationYaml_ = new QLineEdit; navigationYaml_->setObjectName("navigationYaml"); navigationYaml_->setPlaceholderText("可选：编辑后的导航栅格 YAML 绝对路径；留空使用上方前缀 .yaml"); run->addWidget(navigationYaml_);
   sensors_ = new QCheckBox("启动雷达 / IMU"); sensors_->setChecked(true); chassis_ = new QCheckBox("启动底盘驱动"); bridge_ = new QCheckBox("启用底盘控制桥"); run->addWidget(sensors_); run->addWidget(chassis_); run->addWidget(bridge_);
   odom_ = new QComboBox; odom_->addItems({"lio", "wheel", "wheel_imu"}); run->addWidget(odom_);
   start_ = button("启动所选流程（不另起 RViz）", run); connect(start_, &QPushButton::clicked, this, &MainWindow::startSession);
@@ -212,10 +217,14 @@ void MainWindow::setupUi() {
 void MainWindow::setProfileIndex(int index) { profiles_->setCurrentIndex(index); }
 void MainWindow::applyProfile() {
   if (process_->running() || saver_->busy()) { log("请先结束当前会话后再切换模式"); return; }
+  const int profileIndex = profiles_->currentIndex();
+  const bool profileChanged = profileIndex != lastProfileIndex_;
   controller_->stopManual();
   if (rviz_ && !rviz_->loadProfile(config_.resourceDir + "/config/rviz/" + profile().rvizFile)) log("RViz 显示配置不存在");
   ros_->setFixedFrame(profile().fixedFrame);
   mapPrefix_->setText(config_.projectRoot + "/maps/" + profile().backend + "/map");
+  if (profileChanged) navigationYaml_->clear();
+  lastProfileIndex_ = profileIndex;
   state_.poseValid = false;
   log("已加载显示：" + profile().name + "；此操作不切换后台算法"); updateControls();
 }
@@ -233,6 +242,8 @@ void MainWindow::updateControls() {
   stop_->setEnabled(!offline_ && running && !busy);
   save_->setEnabled(ok && profile().mapping && !busy);
   profiles_->setEnabled(!running && !busy); mapPrefix_->setReadOnly(running || busy);
+  if (navigationYaml_) navigationYaml_->setReadOnly(running || busy);
+  if (mapEditorAction_) mapEditorAction_->setEnabled(!busy);
   sensors_->setEnabled(!running); chassis_->setEnabled(!running); bridge_->setEnabled(!running); odom_->setEnabled(!running);
 }
 void MainWindow::updateSnapshot(const RobotSnapshot &s) {
@@ -265,18 +276,44 @@ void MainWindow::startSession() {
   if (offline_ || !manage_->isChecked() || process_->running()) return;
   const auto prefix = mapPrefix_->text().trimmed();
   if (!QFileInfo(prefix).isAbsolute() || prefix.isEmpty()) { log("地图路径需要为绝对路径，且不带扩展名"); return; }
+  const QString navigationYaml = navigationYaml_->text().trimmed();
+  if (!navigationYaml.isEmpty()) {
+    const QFileInfo file(navigationYaml);
+    if (!file.isAbsolute() || !file.isFile()) { log("导航栅格 YAML 需要是存在的绝对路径文件：" + navigationYaml); return; }
+  }
   if (profile().backend == "fastlio" && profile().navigation) {
     const QFileInfo pcd(prefix + ".pcd");
     if (!pcd.isFile() || pcd.size() == 0) { log("无法启动 FAST-LIO 定位导航：PCD 地图不存在或为空：" + pcd.filePath() + "；请先完成建图保存，或选择配套的有效地图"); return; }
   }
   const auto conflicts = ros_->conflictingNodes();
   if (!conflicts.isEmpty()) { log("已有机器人管线，请使用连接模式；如需重启，先从原启动入口停止：" + conflicts.join(", ")); return; }
-  const QStringList args = ProcessManager::launchArguments(config_, profile(), prefix, sensors_->isChecked(), chassis_->isChecked(), bridge_->isChecked(), odom_->currentText());
+  const QStringList args = ProcessManager::launchArguments(config_, profile(), prefix, sensors_->isChecked(), chassis_->isChecked(), bridge_->isChecked(), odom_->currentText(), navigationYaml);
   log("启动本机会话：" + args.join(' ')); process_->start(args);
   if (profile().backend == "fastlio" && profile().navigation) log("FAST-LIO 定位需先点选车辆当前位置与朝向；ICP 成功后才会建立 map TF，Nav2 随后继续激活");
   if (profile().id == "slam_navigation") log("AMCL 已启动：请启用操作并点选车辆实际位置与朝向；收到激光后建立 map TF，Nav2 随后继续激活");
   log("车辆操作使用本地 ROS2；首次行驶前需明确点击解除急停");
 }
+void MainWindow::openMapEditor() {
+  if (mapEditor_) {
+    mapEditor_->raise();
+    mapEditor_->activateWindow();
+    return;
+  }
+  QString initial = navigationYaml_->text().trimmed();
+  if (initial.isEmpty()) initial = mapPrefix_->text().trimmed() + ".yaml";
+  auto *editor = new MapEditorDialog(initial, this);
+  editor->setAttribute(Qt::WA_DeleteOnClose);
+  mapEditor_ = editor;
+  connect(editor, &MapEditorDialog::mapSaved, this, [this](const QString &yamlPath, const QString &sourceYamlPath) {
+    navigationYaml_->setText(yamlPath);
+    log("地图编辑已保存：" + yamlPath + "（来源：" + sourceYamlPath + "）；已填入导航栅格 YAML，下次启动导航使用");
+  });
+  connect(editor, &QObject::destroyed, this, [this] { mapEditor_ = nullptr; });
+  editor->show();
+  editor->raise();
+  editor->activateWindow();
+}
+
 void MainWindow::showPoints(const QJsonArray &items) {
   points_->setRowCount(0);
   for (const auto &value : items) {
@@ -289,6 +326,7 @@ void MainWindow::showPoints(const QJsonArray &items) {
 void MainWindow::log(const QString &text) { if (logs_) logs_->appendPlainText(QDateTime::currentDateTime().toString("HH:mm:ss ") + text.trimmed()); statusBar()->showMessage(text.trimmed().left(180), 7000); }
 void MainWindow::closeEvent(QCloseEvent *event) {
   if (process_->running() || saver_->busy()) { log("请先完成地图保存，并停止本界面启动的会话后退出"); event->ignore(); return; }
+  if (mapEditor_ && !mapEditor_->maybeSave()) { event->ignore(); return; }
   controller_->stopManual(); event->accept();
 }
 void MainWindow::changeEvent(QEvent *event) { if (event->type() == QEvent::ActivationChange && !isActiveWindow() && controller_) controller_->stopManual(); QMainWindow::changeEvent(event); }

@@ -52,17 +52,20 @@ void ProcessManager::stop() {
   });
 }
 QStringList ProcessManager::launchArguments(const DesktopConfig &, const Profile &p, const QString &prefix,
-                                          bool sensors, bool chassis, bool control, const QString &odom) {
+                                          bool sensors, bool chassis, bool control, const QString &odom,
+                                          const QString &navigationYaml) {
   auto boolean = [](bool v) { return v ? "true" : "false"; };
+  const QString navigationMap =
+      navigationYaml.trimmed().isEmpty() ? prefix + ".yaml" : navigationYaml.trimmed();
   QStringList args{"ros2", "launch", "chassis_nav2", p.launchFile, "rviz:=false",
                    QString("start_sensors:=") + boolean(sensors), QString("start_chassis:=") + boolean(chassis),
                    QString("enable_control:=") + boolean(control)};
   if (p.backend == "fastlio") {
     args << "pcd_map:=" + prefix + ".pcd";
     args << "odom_source:=" + (p.mapping ? QString("lio") : odom);
-    if (!p.mapping) args << "map:=" + prefix + ".yaml";
+    if (!p.mapping) args << "map:=" + navigationMap;
   } else if (!p.mapping) {
-    args << "map:=" + prefix + ".yaml";
+    args << "map:=" + navigationMap;
     if (p.backend == "cartographer") args << "map_file:=" + prefix;
   }
   return args;

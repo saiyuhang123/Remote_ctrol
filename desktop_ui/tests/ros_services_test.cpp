@@ -54,6 +54,28 @@ private slots:
     QVERIFY(args.contains("map_file:=/tmp/carto"));
     args = ProcessManager::launchArguments(config(), desktopProfiles().at(3), "/tmp/slam_map", true, false, false, "lio");
     QVERIFY(args.contains("slam_2d_mapping.launch.py"));
+
+    const QString edited = "/tmp/maps/edited map '中文'.yaml";
+    const auto fastlioNavigation = ProcessManager::launchArguments(
+        config(), desktopProfiles().at(0), "/tmp/fastlio/source", true, false, false, "wheel_imu", edited);
+    QVERIFY(fastlioNavigation.contains("pcd_map:=/tmp/fastlio/source.pcd"));
+    QVERIFY(fastlioNavigation.contains("map:=" + edited));
+    QVERIFY(!fastlioNavigation.contains("map:=/tmp/fastlio/source.yaml"));
+
+    const auto cartographerNavigation = ProcessManager::launchArguments(
+        config(), desktopProfiles().at(4), "/tmp/cartographer/source", true, false, false, "lio", edited);
+    QVERIFY(cartographerNavigation.contains("map_file:=/tmp/cartographer/source"));
+    QVERIFY(cartographerNavigation.contains("map:=" + edited));
+
+    const auto amclOverride = ProcessManager::launchArguments(
+        config(), desktopProfiles().at(2), "/tmp/slam/source", true, false, false, "lio", edited);
+    QVERIFY(amclOverride.contains("map:=" + edited));
+    QVERIFY(!amclOverride.contains("map_file:="));
+
+    const auto mapping = ProcessManager::launchArguments(
+        config(), desktopProfiles().at(3), "/tmp/slam/source", true, false, false, "lio", edited);
+    QVERIFY(mapping.contains("slam_2d_mapping.launch.py"));
+    QVERIFY(!mapping.contains("map:=" + edited));
   }
   void launchPreservesLiteralArgumentsAndStopsOnlyOwnedProcess() {
     auto c = config(); c.projectRoot = QDir(DESKTOP_UI_SOURCE_DIR).absoluteFilePath("..");
