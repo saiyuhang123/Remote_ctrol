@@ -154,8 +154,10 @@ def ekf_node(hw):
 def scan_nodes(hw):
     # 摄像头支柱等车身固定物裁剪：/scan 链路不经过 LIO 的 blind，需在入口抠掉
     scan_params = dict(hw['scan'], use_sim_time=False, target_frame='base_link',
-                       transform_tolerance=.1, angle_min=-math.pi, angle_max=math.pi,
-                       use_inf=True, inf_epsilon=1.)
+                       transform_tolerance=.1, use_inf=True, inf_epsilon=1.)
+    # 扫描角度窗口可在 hardware.yaml scan 段配置（屏蔽扇区），缺省全向 ±π
+    scan_params.setdefault('angle_min', -math.pi)
+    scan_params.setdefault('angle_max', math.pi)
     return [Node(package='chassis_nav2', executable='cloud_crop_box.py', name='cloud_crop_box',
                  parameters=[{'use_sim_time': False}], output='screen'),
             Node(package='pointcloud_to_laserscan', executable='pointcloud_to_laserscan_node',

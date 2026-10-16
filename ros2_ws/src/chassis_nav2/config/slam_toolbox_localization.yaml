@@ -28,8 +28,11 @@ slam_toolbox:
     stack_size_to_use: 40000000
     use_scan_matching: true
     use_scan_barycenter: true
-    minimum_travel_distance: 0.15
-    minimum_travel_heading: 0.17
+    # 定位修正的触发阈值：每次修正会把累计偏差一次性拉回。0.15m/10° 时单次修正可达
+    # 10~20cm（2026-10-16 bag 实测 map->odom 跳变 0.105/0.198/0.112m），路径被拽动导致
+    # 控制器反复饱和/失败重试（导航一顿一顿）。收紧到 5cm/5°：修正更频繁、单次幅度更小。
+    minimum_travel_distance: 0.05
+    minimum_travel_heading: 0.087
     scan_buffer_size: 10
     scan_buffer_maximum_scan_distance: 10.0
     link_match_minimum_response_fine: 0.1

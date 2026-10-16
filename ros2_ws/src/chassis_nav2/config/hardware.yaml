@@ -30,6 +30,10 @@ scan:
   range_max: 15.0
   angle_increment: 0.008726646 # 0.5 degree
   scan_time: 0.1
+  # 屏蔽正后方 45° 扇区（180°±22.5°，该方位打到车身/设备产生幽灵障碍）：
+  # 扫描窗口收窄为 ±157.5°，只保留前方 315°；缺省 ±π 为全向
+  angle_min: -2.7489
+  angle_max: 2.7489
 
 robot_geometry:
   confirmed: true            # 尺寸、轴距及最大转角已确认；底盘协调转向，上层按等效阿克曼计算
@@ -45,10 +49,9 @@ robot_geometry:
 wheel_odometry:
   confirmed: true            # 2026-10-15 bag 实测校准：见 speed_scale 注释
   rear_axle_translation: [-0.25, 0.0] # 假设 0.5m 轴距关于 base_link 居中；系估计值，需卷尺实测
-  # cur_speed 反馈约为真实速度的 4.5 倍（2026-10-15 bag：原地转 360°，IMU 实测 -367.6°，
-  # 轮速模型推算 -1666.4°，比值 4.53；直行 2m 反馈积分 8.5m，比值 4.25，两处互证）。
-  # 精确值建议卷尺量 3m 直线后微调：speed_scale = 实量距离 / odom_raw 积分距离。
-  speed_scale: 0.22
+  # cur_speed 反馈与真实速度的比例（2026-10-16 卷尺标定：两次 2m 直线分别推得 0.31 与
+  # 0.285，单次测量噪声 ±5%，取中值 0.29，残差 ±3% 由定位吸收）。
+  speed_scale: 0.29
   steering_scale: 1.0         # cur_steer 实测无明显比例误差（直行窗推算偏航率与 IMU 吻合）
   steering_bias_deg: 0.0      # cur_steer 加此零位偏差，再应用 feedback_steering_sign
   max_feedback_gap: 0.5       # 反馈间隔超过此值，不推算丢失期间的位移
