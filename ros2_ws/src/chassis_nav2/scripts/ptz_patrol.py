@@ -14,15 +14,22 @@
   到达边界且距上次换向超过 3s 才触发。不假设"左/右指令使角度增/减"的方向约定，
   约定反了也会在另一侧边界自我纠正。
 
+俯仰（tilt_enabled，默认开）：云台控制是单指令通道，不能真正斜着走，
+所以做成扫描式——水平扫到头 → 俯仰 tilt_seconds 秒 → 反向水平扫 → 反向俯仰……
+上下交替进行，长期不会朝一个方向跑偏。
+
 相机节点没启动时只周期性告警。
 """
 import rclpy
+from rclpy.duration import Duration
 from rclpy.node import Node
 
 from hk_camera.srv import ControlPTZ, GetPTZPose, SetPTZPose
 
 PAN_LEFT = 23    # 海康 SDK 指令：左
 PAN_RIGHT = 24   # 海康 SDK 指令：右
+TILT_UP = 21     # 海康 SDK 指令：上
+TILT_DOWN = 22   # 海康 SDK 指令：下
 MIN_FLIP_GAP = 3.0   # 角度边界换向的最小间隔，防边界抖动
 
 
@@ -34,6 +41,9 @@ class PtzPatrol(Node):
         self.declare_parameter('sweep_seconds', 20.0)   # 单侧扫掠时长（时间兜底换向）
         self.declare_parameter('pan_min', -1.0)         # >=0 且 < pan_max 时启用角度边界换向（度）
         self.declare_parameter('pan_max', -1.0)
+        self.declare_parameter('tilt_enabled', True)    # 水平换向时顺带俯仰一段（扫描式，见模块说明）
+        self.declare_parameter('tilt_speed', 2)         # 俯仰速度档 1~7
+        self.declare_parameter('tilt_seconds', 3.0)     # 每次俯仰时长；上下交替，长期不跑偏
         self.declare_parameter('home_pan', -1.0)        # 三个 home_* 都设了，关停后回该姿态
         self.declare_parameter('home_tilt', -1.0)
         self.declare_parameter('home_zoom', -1.0)
@@ -44,6 +54,8 @@ class PtzPatrol(Node):
 
         self._moving = False                    # 我们认为云台正在转
         self._direction = PAN_LEFT
+        self._tilt_dir = TILT_UP
+        self._tilt_until = None                 # 非 None 表示正在俯仰段（时刻）
         self._last_flip = self.get_clock().now()  # 上次换向时刻
         self._ctrl_pending = False
         self._pose_pending = False
@@ -67,24 +79,40 @@ class PtzPatrol(Node):
                                    throttle_duration_sec=10.0)
             return
         now = self.get_clock().now()
-        elapsed = (now - self._last_flip).nanoseconds * 1e-9
-        flip = elapsed >= self.get_parameter('sweep_seconds').value
-        if not flip and elapsed > MIN_FLIP_GAP and \
-                self._use_pan_bounds() and self._pan is not None:
-            pmin = self.get_parameter('pan_min').value
-            pmax = self.get_parameter('pan_max').value
-            if self._pan <= pmin or self._pan >= pmax:
-                flip = True
-        if flip:
-            self._direction = PAN_RIGHT if self._direction == PAN_LEFT else PAN_LEFT
-            self._last_flip = now
+        if self._tilt_until is not None:
+            # 俯仰段：时间到就水平换向、交替俯仰方向，回到水平扫
+            if now >= self._tilt_until:
+                self._tilt_until = None
+                self._tilt_dir = TILT_DOWN if self._tilt_dir == TILT_UP else TILT_UP
+                self._direction = PAN_RIGHT if self._direction == PAN_LEFT else PAN_LEFT
+                self._last_flip = now
+        else:
+            elapsed = (now - self._last_flip).nanoseconds * 1e-9
+            flip = elapsed >= self.get_parameter('sweep_seconds').value
+            if not flip and elapsed > MIN_FLIP_GAP and \
+                    self._use_pan_bounds() and self._pan is not None:
+                pmin = self.get_parameter('pan_min').value
+                pmax = self.get_parameter('pan_max').value
+                if self._pan <= pmin or self._pan >= pmax:
+                    flip = True
+            if flip:
+                if self.get_parameter('tilt_enabled').value and \
+                        self.get_parameter('tilt_seconds').value > 0:
+                    self._tilt_until = now + Duration(
+                        seconds=self.get_parameter('tilt_seconds').value)
+                else:
+                    self._direction = PAN_RIGHT if self._direction == PAN_LEFT else PAN_LEFT
+                    self._last_flip = now
         if not self._ctrl_pending:
-            self._send_start()
+            if self._tilt_until is not None:
+                self._send_start(self._tilt_dir, self.get_parameter('tilt_speed').value)
+            else:
+                self._send_start(self._direction, self.get_parameter('pan_speed').value)
 
-    def _send_start(self):
+    def _send_start(self, command, speed):
         req = ControlPTZ.Request()
-        req.command = self._direction
-        req.speed = max(1, min(7, int(self.get_parameter('pan_speed').value)))
+        req.command = command
+        req.speed = max(1, min(7, int(speed)))
         req.stop = False
         self._ctrl_pending = True
         future = self._ctrl.call_async(req)
