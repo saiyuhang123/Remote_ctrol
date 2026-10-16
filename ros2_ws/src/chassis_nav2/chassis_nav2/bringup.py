@@ -209,7 +209,7 @@ def navigation_nodes(map_yaml, hw, params_file, use_map_server=True, localizatio
     nodes.append(Node(package='nav2_lifecycle_manager', executable='lifecycle_manager',
                       name='lifecycle_manager_navigation', parameters=[{'use_sim_time': False,
                       'autostart': True, 'node_names': names}], output='screen'))
-    # 导航联动海康云台巡航：有目标在执行时相机左右扫掠；相机节点不在时自动空转
+    # 海康云台巡航节点（与导航解耦，默认关闭；ros2 param set /ptz_patrol enabled true 开启）
     nodes.append(Node(package='chassis_nav2', executable='ptz_patrol.py', name='ptz_patrol',
                       output='screen'))
     return nodes

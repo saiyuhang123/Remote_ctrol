@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
-"""导航期间驱动海康相机云台左右巡航（多角度巡检展示）。
+"""海康相机云台左右巡航（多角度巡检展示），与导航完全解耦、手动开关。
 
-监听 /navigate_to_pose 动作状态：有目标在执行时，通过 /hk_camera/control_ptz
-以固定速度左右扫掠；导航结束（或节点退出后租约 500ms 不续）云台自停。
-hk_camera 的 control_ptz 是 500ms 租约制，本节点 5Hz 续租，节点死掉云台自动停。
+开启后通过 /hk_camera/control_ptz 以固定速度左右扫掠；关闭或节点退出
+（租约 500ms 不续）云台自停。hk_camera 的 control_ptz 是 500ms 租约制，
+本节点 5Hz 续租，节点死掉云台自动停。
+
+开关：ros2 param set /ptz_patrol enabled true|false（默认 false，不转）。
+节点随 Nav2 三套方案自动拉起（默认静默空转），也可单独 ros2 run chassis_nav2 ptz_patrol.py。
 
 换向策略（两种同时生效，先到先换）：
 - 时间兜底：单侧扫满 sweep_seconds 秒换向，不需要任何角度反馈；
@@ -11,41 +14,34 @@ hk_camera 的 control_ptz 是 500ms 租约制，本节点 5Hz 续租，节点死
   到达边界且距上次换向超过 3s 才触发。不假设"左/右指令使角度增/减"的方向约定，
   约定反了也会在另一侧边界自我纠正。
 
-相机节点没启动时只周期性告警，不影响导航；运行中可 ros2 param set /ptz_patrol enabled false 关停。
+相机节点没启动时只周期性告警。
 """
 import rclpy
-from action_msgs.msg import GoalStatus, GoalStatusArray
 from rclpy.node import Node
 
 from hk_camera.srv import ControlPTZ, GetPTZPose, SetPTZPose
 
 PAN_LEFT = 23    # 海康 SDK 指令：左
 PAN_RIGHT = 24   # 海康 SDK 指令：右
-ACTIVE = (GoalStatus.STATUS_ACCEPTED, GoalStatus.STATUS_EXECUTING)
 MIN_FLIP_GAP = 3.0   # 角度边界换向的最小间隔，防边界抖动
 
 
 class PtzPatrol(Node):
     def __init__(self):
         super().__init__('ptz_patrol')
-        self.declare_parameter('enabled', True)         # 总开关
+        self.declare_parameter('enabled', False)        # 总开关，默认不转，手动开启
         self.declare_parameter('pan_speed', 2)          # 海康速度档 1~7
         self.declare_parameter('sweep_seconds', 20.0)   # 单侧扫掠时长（时间兜底换向）
         self.declare_parameter('pan_min', -1.0)         # >=0 且 < pan_max 时启用角度边界换向（度）
         self.declare_parameter('pan_max', -1.0)
-        self.declare_parameter('home_pan', -1.0)        # 三个 home_* 都设了，导航结束后回该姿态
+        self.declare_parameter('home_pan', -1.0)        # 三个 home_* 都设了，关停后回该姿态
         self.declare_parameter('home_tilt', -1.0)
         self.declare_parameter('home_zoom', -1.0)
-        self.declare_parameter('status_topic', '/navigate_to_pose/_action/status')
 
         self._ctrl = self.create_client(ControlPTZ, '/hk_camera/control_ptz')
         self._pose = self.create_client(GetPTZPose, '/hk_camera/get_ptz_pose')
         self._set = self.create_client(SetPTZPose, '/hk_camera/set_ptz_pose')
-        self.create_subscription(GoalStatusArray, self.get_parameter('status_topic').value,
-                                 self._on_status, 10)
 
-        self._active = False                    # 动作服务器报告有目标在执行
-        self._last_status = None                # 最近一次状态消息时间
         self._moving = False                    # 我们认为云台正在转
         self._direction = PAN_LEFT
         self._last_flip = self.get_clock().now()  # 上次换向时刻
@@ -54,16 +50,7 @@ class PtzPatrol(Node):
         self._pan = None                        # 最近一次云台水平角（仅角度模式轮询）
         self.create_timer(0.2, self._tick)      # 5Hz 续租/换向
         self.create_timer(1.0, self._poll_pose)
-        self.get_logger().info('ptz_patrol 就绪：导航执行中云台左右巡航')
-
-    def _on_status(self, msg):
-        self._last_status = self.get_clock().now()
-        self._active = any(s.status in ACTIVE for s in msg.status_list)
-
-    def _navigating(self):
-        # 状态话题由动作服务器周期发布；超过 5s 无消息视为导航栈已退出
-        return (self._active and self._last_status is not None and
-                (self.get_clock().now() - self._last_status).nanoseconds < 5e9)
+        self.get_logger().info('ptz_patrol 就绪：ros2 param set /ptz_patrol enabled true 开始巡航')
 
     def _use_pan_bounds(self):
         pmin = self.get_parameter('pan_min').value
@@ -71,7 +58,7 @@ class PtzPatrol(Node):
         return 0 <= pmin < pmax <= 360
 
     def _tick(self):
-        if not self.get_parameter('enabled').value or not self._navigating():
+        if not self.get_parameter('enabled').value:
             if self._moving:
                 self._send_stop()
             return
@@ -150,8 +137,8 @@ class PtzPatrol(Node):
             return
         req = SetPTZPose.Request()
         req.pan, req.tilt, req.zoom = float(pan), float(tilt), float(zoom)
-        self._set.call_async(req)   # 尽力而为，回位失败不影响导航
-        self.get_logger().info(f'导航结束，云台回位 pan={pan} tilt={tilt} zoom={zoom}')
+        self._set.call_async(req)   # 尽力而为，回位失败不影响其他功能
+        self.get_logger().info(f'巡航停止，云台回位 pan={pan} tilt={tilt} zoom={zoom}')
 
 
 def main():
