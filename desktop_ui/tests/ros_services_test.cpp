@@ -1,6 +1,7 @@
 #include "adapters/ros_adapter.h"
 #include "runtime/process_manager.h"
 #include <QDir>
+#include <QFile>
 #include <QFileInfo>
 #include <QSignalSpy>
 #include <QTemporaryDir>
@@ -84,6 +85,51 @@ private slots:
     QCOMPARE(results.at(0).at(1).toBool(), false);
     QVERIFY(results.at(0).at(2).toString().contains("超时"));
     QTest::qWait(700); QCOMPARE(results.size(), 1);
+  }
+  void stopLetsLauncherForwardOneInterruptToChild() {
+    auto c = config(); c.projectRoot = QDir(DESKTOP_UI_SOURCE_DIR).absoluteFilePath("..");
+    QTemporaryDir directory;
+    const auto marker = directory.filePath("child_save_result");
+    const QString child = R"PY(
+import signal, sys, time
+from pathlib import Path
+count = 0
+def stop(*_):
+    global count
+    count += 1
+    if count > 1:
+        Path(sys.argv[1]).write_text('duplicate interrupt')
+        sys.exit(12)
+    time.sleep(.3)
+    Path(sys.argv[1]).write_text('snapshot preserved')
+    sys.exit(0)
+signal.signal(signal.SIGINT, stop)
+print('child_ready', flush=True)
+time.sleep(30)
+)PY";
+    const QString launcher = R"PY(
+import signal, subprocess, sys, time
+child = subprocess.Popen([sys.executable, '-u', '-c', sys.argv[1], sys.argv[2]])
+def stop(*_):
+    time.sleep(.1)
+    child.send_signal(signal.SIGINT)
+    sys.exit(child.wait())
+signal.signal(signal.SIGINT, stop)
+time.sleep(30)
+)PY";
+    ProcessManager process(c);
+    QSignalSpy output(&process, &ProcessManager::output), finished(&process, &ProcessManager::finished);
+    QVERIFY(process.start({"python3", "-u", "-c", launcher, child, marker}));
+    QTRY_VERIFY_WITH_TIMEOUT(([&output] {
+      for (const auto &line : output) if (line.at(0).toString().contains("child_ready")) return true;
+      return false;
+    })(), 5000);
+    process.stop();
+    process.stop(); // Repeated stop clicks must not forward another SIGINT.
+    QTRY_COMPARE_WITH_TIMEOUT(finished.size(), 1, 5000);
+    QCOMPARE(finished.at(0).at(0).toInt(), 0);
+    QFile result(marker); QVERIFY(result.open(QIODevice::ReadOnly));
+    QCOMPARE(result.readAll(), QByteArray("snapshot preserved"));
   }
   void mapSaveUsesBackendServiceTypes() {
     FixtureExecutor fixture;

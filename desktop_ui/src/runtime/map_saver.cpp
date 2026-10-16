@@ -4,13 +4,13 @@
 #include <QFileInfo>
 #include <QTimer>
 
-MapSaver::MapSaver(const DesktopConfig &c, RosAdapter *ros, QObject *parent) : QObject(parent), ros_(ros), export_(c) {
+MapSaver::MapSaver(const DesktopConfig &c, RosAdapter *ros, QObject *parent) : QObject(parent), ros_(ros), export_(c), resourceDir_(c.resourceDir) {
   connect(&export_, &ProcessManager::output, this, &MapSaver::message);
   connect(&export_, &ProcessManager::finished, this, [this](int code) {
     if (!busy_) return;
     const QFileInfo yaml(prefix_ + ".yaml"), pgm(prefix_ + ".pgm");
     const bool valid = code == 0 && yaml.size() > 0 && pgm.size() > 0 && yaml.lastModified() >= started_.addMSecs(-1000) && pgm.lastModified() >= started_.addMSecs(-1000);
-    finish(valid, valid ? "状态文件与导航栅格已保存：" + prefix_ : "栅格导出失败或文件为空，请查看日志；建图会话仍保留");
+    finish(valid, valid ? (backend_ == "fastlio" ? "PCD、PGM、YAML 已保存：" : "状态文件与导航栅格已保存：") + prefix_ : "栅格导出失败或文件为空，请查看日志；已保存的建图产物和建图会话仍保留");
   });
   connect(ros_, &RosAdapter::requestFinished, this, [this](const QString &op, bool ok, const QString &detail) {
     if (op != "save_state" || !busy_) return;
@@ -19,7 +19,10 @@ MapSaver::MapSaver(const DesktopConfig &c, RosAdapter *ros, QObject *parent) : Q
     if (backend_ == "fastlio") {
       const QFileInfo pcd(prefix_ + ".pcd");
       const bool exists = pcd.size() > 0 && pcd.lastModified() >= started_.addMSecs(-1000);
-      finish(exists, exists ? "PCD 已保存。二维导航栅格请使用现有 pcd2pgm 流程导出：" + prefix_ + ".pcd" : "服务返回成功，但所选本机路径未发现有效 PCD；检查实际建图输出路径");
+      if (!exists) { finish(false, "服务返回成功，但所选本机路径未发现有效 PCD；检查实际建图输出路径"); return; }
+      if (!export_.start({"python3", "-u", resourceDir_ + "/scripts/export_fastlio_map.py",
+                          "--prefix", prefix_, "--config", resourceDir_ + "/config/fastlio_map_export.yaml"}))
+        finish(false, "PCD 已保存，但无法启动二维栅格导出工具");
       return;
     }
     auto validFile = [this](const QString &suffix) { const QFileInfo f(prefix_ + suffix); return f.size() > 0 && f.lastModified() >= started_.addMSecs(-1000); };

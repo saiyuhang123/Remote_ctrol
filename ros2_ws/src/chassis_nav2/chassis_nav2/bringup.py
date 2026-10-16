@@ -276,6 +276,8 @@ def configure(context):
         fast['map_file_path'] = str(output)
     else:
         fast['map_file_path'] = existing_file(args['pcd_map'], '定位 PCD 地图')
+        if Path(fast['map_file_path']).stat().st_size == 0:
+            raise ValueError(f"定位 PCD 地图为空：{fast['map_file_path']}；请重新建图保存，或选择同一地图对应的有效 PCD/PGM/YAML，不能只使用栅格文件")
     nodes.append(Node(package='fast_lio_localization', executable='fastlio_mapping', name='fast_lio_mapping',
                       parameters=[profile_path, fast], output='screen'))
     nodes.append(Node(package='chassis_nav2', executable='lio_odometry.py',

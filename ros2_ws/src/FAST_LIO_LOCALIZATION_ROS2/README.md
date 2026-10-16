@@ -8,6 +8,17 @@
 请优先使用 `ros2 launch chassis_nav2 mapping.launch.py` 或 `localization.launch.py`，
 显式传入 `pcd_map`。下文保留上游算法说明；低层 launch 和零值配置不代表新车已标定。
 
+PCD 保存采用同目录临时文件写完后替换。成功调用 `/map_save` 后，退出建图保留该快照，避免覆盖基于它生成的 PGM/YAML；继续建图后需要再次调用保存来更新快照。未显式保存时，退出仍尝试自动保存 PCD。Qt 的保存按钮另外负责自动生成配套栅格。
+
+保存与退出回归（构建并 source 工作空间后，从项目根目录执行）：
+
+```bash
+ctest --test-dir ros2_ws/build/fast_lio_localization --output-on-failure
+python3 ros2_ws/src/FAST_LIO_LOCALIZATION_ROS2/tests/test_map_save_runtime.py
+```
+
+运行测试使用 ROS 域 211 的合成雷达/IMU 和临时地图，验证建图、保存、二维导出、停止后文件哈希保持以及重新加载 PCD；不启动实车传感器或底盘驱动。
+
 ROS 2 port providing FAST-LIO LiDAR–IMU odometry + global (map-based) localization + map publishing + transform (TF) fusion.
 
 ## Overview

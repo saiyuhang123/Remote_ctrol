@@ -63,6 +63,7 @@
 #include <livox_ros_driver2/msg/custom_msg.hpp>
 #endif
 #include <filesystem>
+#include "atomic_map_save.h"
 #include "preprocess.h"
 #include <ikd-Tree/ikd_Tree.h>
 
@@ -77,6 +78,7 @@ double T1[MAXN], s_plot[MAXN], s_plot2[MAXN], s_plot3[MAXN], s_plot4[MAXN], s_pl
 double match_time = 0, solve_time = 0, solve_const_H_time = 0;
 int    kdtree_size_st = 0, kdtree_size_end = 0, add_point_size = 0, kdtree_delete_counter = 0;
 bool   runtime_pos_log = false, pcd_save_en = false, time_sync_en = false, extrinsic_est_en = true, path_en = true;
+bool map_saved_by_service = false;
 /**************************/
 
 float res_last[100000] = {0.0};
@@ -587,9 +589,10 @@ bool save_to_pcd()
 {
     if (map_file_path.empty() || pcl_wait_save->empty()) return false;
     try {
-        const auto parent = std::filesystem::path(map_file_path).parent_path();
-        if (!parent.empty()) std::filesystem::create_directories(parent);
-        return pcl::io::savePCDFileBinary(map_file_path, *pcl_wait_save) == 0;
+        fast_lio::save_map_atomically(map_file_path, [](const std::string &temporary) {
+            return pcl::io::savePCDFileBinary(temporary, *pcl_wait_save);
+        });
+        return true;
     } catch (const std::exception &error) {
         std::cerr << "Cannot save PCD: " << error.what() << std::endl;
         return false;
@@ -1106,6 +1109,7 @@ private:
         if (pcd_save_en)
         {
             res->success = save_to_pcd();
+            if (res->success) map_saved_by_service = true;
             res->message = res->success ? "Map saved." : "No map points or PCD write failed.";
         }
         else
@@ -1156,7 +1160,9 @@ int main(int argc, char** argv)
     /**************** save map ****************/
     /* 1. make sure you have enough memories
     /* 2. pcd save will largely influence the real-time performences **/
-    if (pcd_save_en && !pcl_wait_save->empty()) {
+    // An explicit snapshot may already have matching PGM/YAML files. Keep that
+    // snapshot on shutdown; another save must be requested explicitly.
+    if (pcd_save_en && !map_saved_by_service && !pcl_wait_save->empty()) {
         if (!save_to_pcd()) std::cerr << "Map save failed: " << map_file_path << std::endl;
     }
 

@@ -116,6 +116,15 @@ endif()
 
 ament_target_dependencies(fastlio_mapping ${dependencies})
 
+include(CTest)
+if(BUILD_TESTING)
+  add_executable(atomic_map_save_test tests/atomic_map_save_test.cpp)
+  target_include_directories(atomic_map_save_test PRIVATE include ${PCL_INCLUDE_DIRS})
+  target_link_libraries(atomic_map_save_test ${PCL_LIBRARIES} Eigen3::Eigen)
+  add_test(NAME atomic_map_save COMMAND atomic_map_save_test)
+  set_tests_properties(atomic_map_save PROPERTIES TIMEOUT 20)
+endif()
+
 # ---------------- Install --------------- #
 install(TARGETS fastlio_mapping
   DESTINATION lib/${PROJECT_NAME}

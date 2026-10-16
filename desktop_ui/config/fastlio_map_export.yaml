@@ -1,0 +1,9 @@
+# 高度以保存的 PCD 坐标系为准，沿用《建图导航命令.md》的切片参数。
+# 不对 PCD 另作平移或旋转，确保与 FAST-LIO + ICP 定位地图对齐。
+z_min: -0.10
+z_max: 2.0
+resolution: 0.05
+radius: 0.2
+min_neighbors: 6
+# 包含 PCD 加载、过滤、等待地图和保存文件的总时间；超时保留 PCD 与旧栅格。
+timeout_sec: 180.0

@@ -23,7 +23,7 @@
 | 任务点位 | 刷新已有点位、显示坐标和朝向、保存当前位置为点位、删除所选点位、选点填入目标框 | 复用 `/api/points`；选点后不会自动发车，保存当前位置要求有效的 `map` 位姿 |
 | 路线 / 巡检计划入口 | “打开路线 / 巡检计划管理”按钮 | 打开原有业务网页，未在 Qt 内另建一套路线/计划编辑器或自动执行器 |
 | 本机会话管理 | 显式启动所选建图/导航流程、设置地图路径、选择是否启动雷达/IMU、底盘驱动和控制桥、选择里程计源、停止自身启动的会话 | 默认只连接已有系统；检测重复管线，只管理本应用启动的进程组；底盘与控制桥默认关闭 |
-| 地图保存 | FAST-LIO PCD 保存、SLAM Toolbox 序列化与栅格保存、Cartographer 状态快照与栅格保存 | 调用已有服务和存图工具，检查返回结果与文件产物；FAST-LIO 的二维栅格转换继续使用现有 `pcd2pgm` 流程 |
+| 地图保存 | FAST-LIO PCD 与自动二维切片保存、SLAM Toolbox 序列化与栅格保存、Cartographer 状态快照与栅格保存 | 一次点击保存建图状态和导航 PGM/YAML；FAST-LIO 自动串联 `/map_save`、`pcd2pgm` 和 Nav2 存图工具 |
 | 消息与会话日志 | 窗口内显示带时间的操作消息、服务结果、连接异常、存图结果和子进程输出 | 便于逐项检查接口，不把发送请求当成操作完成 |
 | 离线验证与截图 | 离线观察模式、六模式自动检查、定时退出、保存整个界面截图、截图成功/失败提示与退出码 | 通过启动参数使用；`xvfb-run` 下在虚拟显示器运行，不弹出桌面窗口 |
 
@@ -42,6 +42,7 @@
 | 业务后端适配 | [business_client.cpp](src/adapters/business_client.cpp) | 通过 HTTP 读取、新增和删除现有后端点位，不直接访问 SQLite |
 | 本地进程管理 | [process_manager.cpp](src/runtime/process_manager.cpp) | 组合原 ROS2 启动入口及参数，加载环境，管理自身子进程与进程组，转发启动日志 |
 | 地图保存流程 | [map_saver.cpp](src/runtime/map_saver.cpp) | 按建图后端组织状态保存与栅格导出，管理超时、保存中状态和产物检查 |
+| FAST-LIO 栅格导出 | [export_fastlio_map.py](scripts/export_fastlio_map.py)、[切片参数](config/fastlio_map_export.yaml) | 独立进程完成 PCD 高度过滤、二维投影与 Nav2 PGM/YAML 保存；独立话题避免串图，失败保留旧栅格 |
 | 配置与模式定义 | [config.cpp](src/runtime/config.cpp)、[desktop.json](config/desktop.json) | 管理连接地址、话题、限幅、超时、六种模式及其坐标系和启动入口 |
 | 程序入口与离线运行 | [main.cpp](src/main.cpp) | Qt/ROS2 初始化与退出、命令行参数、隔离模式、自动检查、定时退出和截图结果输出 |
 | 迁移资源与第三方控件 | [resources](resources/)、[third_party/dockWidget](third_party/dockWidget/)、[NOTICE.md](NOTICE.md) | 保存迁移的图标、媒体与停靠控件，保留来源及许可说明 |
@@ -168,11 +169,17 @@ Qt → 本地 ROS2 /cmd_vel_teleop → twist_mux → 原底盘控制链
 
 | 建图后端 | 保存流程 |
 | --- | --- |
-| FAST-LIO | 调用 `/map_save` 保存建图节点配置的 PCD；检查所选路径，二维导航栅格继续使用项目现有 `pcd2pgm` 流程 |
+| FAST-LIO | 调用 `/map_save` 保存 PCD → 等待成功并检查文件 → 运行 `pcd2pgm` 生成二维栅格 → `map_saver_cli` 保存同前缀 `.pgm/.yaml` |
 | SLAM Toolbox | `/slam_toolbox/serialize_map` 保存 `.posegraph/.data`，然后 `map_saver_cli` 保存 `/map` 的 YAML/PGM |
 | Cartographer | `/write_state` 保存包含未完成子图的 `.pbstream` 快照，然后保存 `/map` 的 YAML/PGM；不自动结束轨迹 |
 
 保存按钮不会结束建图进程。FAST-LIO 服务不接受新文件路径：连接已有建图时，路径必须与那个节点的实际输出配置一致。保存失败时查看界面日志和原节点日志，不能把“已发送请求”当成保存完成。
+
+FAST-LIO 的 PCD 先写入同目录临时文件，成功后再替换目标文件，避免退出或写入失败把旧地图清空。一次显式 `/map_save` 成功后，退出建图会保留这份快照及其配套栅格；若继续建图并希望更新地图，请再次点击保存。没有显式保存时，退出仍保留原有的 PCD 自动保存行为。定位导航启动前会拒绝不存在或零字节的 PCD。
+
+FAST-LIO 建图模式点击“保存当前建图产物”后，默认得到 `maps/fastlio/map.pcd`、`map.pgm` 和 `map.yaml`。PGM/YAML 来自本次保存的 PCD，不订阅机器人正在使用的 `/map` 或其他工具的 `/projected_map`；每次导出都创建独立命名空间和话题，完成或失败后清理本次导出进程。先在同目录的临时目录生成并检查栅格，再替换目标文件；切片失败时保留新 PCD 和原有 PGM/YAML，并在日志说明失败。
+
+参数位于 [config/fastlio_map_export.yaml](config/fastlio_map_export.yaml)：默认高度 `-0.10～2.0 m`、分辨率 `0.05 m`、半径过滤 `0.2 m / 6 邻点`、导出超时 `180 s`，修改后下次保存生效。高度按 PCD 坐标系解释，与现有手动切片命令一致；不额外平移/旋转，也不自动调用 `clean_map.py` 修改像素。保存 YAML 时使用投影消息的完整原点及分辨率，避免当前 Nav2 存图工具截短原点小数导致偏移。切片复用已构建的 `pcd2pgm` 和 `nav2_map_server`，需要 ROS2 Python 的 `rclpy/nav_msgs/ament_index_python` 及 `python3-yaml`。保存过程在后台执行，界面日志依次报告 PCD、切片和栅格保存结果。
 
 ## 视频、云台、OCR 与点位
 
@@ -217,8 +224,8 @@ cd ..
 ctest --test-dir desktop_ui/build --output-on-failure
 ```
 
-测试使用隔离 ROS 域中的模拟 Nav2 Action、话题和服务。GUI 测试在 Xvfb 中验证地图/点云接收及彩色像素、无定位 TF 时的真实 RViz 点选、本地目标下发和取消、接管与松键停车；不启动实车底盘、导航执行器或相机。没有实车运动精度验收。
+测试使用隔离 ROS 域中的模拟 Nav2 Action、话题和服务。GUI 测试在 Xvfb 中验证地图/点云接收及彩色像素、无定位 TF 时的真实 RViz 点选、本地目标下发和取消、接管与松键停车；不启动实车底盘、导航执行器或相机。没有实车运动精度验收。新增 `desktop_map_saver` 测试模拟 `/map_save`，实际调用 PCD 切片及 Nav2 栅格工具，覆盖自动三文件保存、带空格/中文/引号的路径、原点精度、隔离其他地图、过滤失败/超时保留旧图、失败后重试和导出进程退出。
 
-本机已完成构建、四组自动测试和六种模式的离线切换。相机模拟测试另外覆盖登录/取流、视频像素与过期、设备范围、按住方向控制、松开与取消使能后的停止。服务测试还覆盖模拟相机/OCR/存图响应、超时及本地进程管理。海康实机已验证 1920×1080 预览、云台/变倍信息读取及 SDK 抓拍，未下发实际转动或变倍。详细结果与离线预览见 [移植与验证记录](移植与验证记录.md)。
+本机已完成构建、五组自动测试和六种模式的离线切换。相机模拟测试另外覆盖登录/取流、视频像素与过期、设备范围、按住方向控制、松开与取消使能后的停止。服务测试还覆盖模拟相机/OCR/存图响应、超时及本地进程管理。海康实机已验证 1920×1080 预览、云台/变倍信息读取及 SDK 抓拍，未下发实际转动或变倍。详细结果与离线预览见 [移植与验证记录](移植与验证记录.md)。
 
 代码分为 `src/ui`、`src/rviz`、`src/adapters`、`src/runtime`。后续智能掉头、精准停靠应在独立 ROS2 导航行为或控制模块实现；这个桌面端提供操作和诊断入口，不改变原 FAST-LIO、Nav2 或底盘参数。

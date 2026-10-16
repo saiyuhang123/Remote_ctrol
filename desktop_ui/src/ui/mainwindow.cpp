@@ -158,6 +158,7 @@ void MainWindow::setupUi() {
   odom_ = new QComboBox; odom_->addItems({"lio", "wheel", "wheel_imu"}); run->addWidget(odom_);
   start_ = button("启动所选流程（不另起 RViz）", run); connect(start_, &QPushButton::clicked, this, &MainWindow::startSession);
   save_ = button("保存当前建图产物", run); connect(save_, &QPushButton::clicked, this, [this] { if (allowed()) saver_->save(profile(), mapPrefix_->text().trimmed()); });
+  save_->setToolTip("保存建图状态及导航 YAML/PGM；FAST-LIO 保存 PCD 后自动进行二维切片");
   stop_ = button("停止本界面启动的流程", run); connect(stop_, &QPushButton::clicked, this, [this] { if (saver_->busy()) return; controller_->emergencyStop(); process_->stop(); });
   connect(manage_, &QCheckBox::toggled, this, [this] { updateControls(); });
   left->addWidget(runtime); left->addStretch();
@@ -264,6 +265,10 @@ void MainWindow::startSession() {
   if (offline_ || !manage_->isChecked() || process_->running()) return;
   const auto prefix = mapPrefix_->text().trimmed();
   if (!QFileInfo(prefix).isAbsolute() || prefix.isEmpty()) { log("地图路径需要为绝对路径，且不带扩展名"); return; }
+  if (profile().backend == "fastlio" && profile().navigation) {
+    const QFileInfo pcd(prefix + ".pcd");
+    if (!pcd.isFile() || pcd.size() == 0) { log("无法启动 FAST-LIO 定位导航：PCD 地图不存在或为空：" + pcd.filePath() + "；请先完成建图保存，或选择配套的有效地图"); return; }
+  }
   const auto conflicts = ros_->conflictingNodes();
   if (!conflicts.isEmpty()) { log("已有机器人管线，请使用连接模式；如需重启，先从原启动入口停止：" + conflicts.join(", ")); return; }
   const QStringList args = ProcessManager::launchArguments(config_, profile(), prefix, sensors_->isChecked(), chassis_->isChecked(), bridge_->isChecked(), odom_->currentText());

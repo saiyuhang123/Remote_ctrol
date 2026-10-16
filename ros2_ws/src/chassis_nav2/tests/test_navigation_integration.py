@@ -536,6 +536,9 @@ class IntegrationTests(unittest.TestCase):
                 self.assertFalse(any(n['package'] == 'nav2_amcl' for n in nodes))
                 smoother = next(n for n in nodes if n.get('executable') == 'velocity_smoother')
                 self.assertIn(('cmd_vel_smoothed', '/cmd_vel_auto'), smoother['remappings'])
+                (p/'site.pcd').write_bytes(b'')
+                with self.assertRaisesRegex(ValueError, 'PCD 地图为空'):
+                    bringup.configure(SimpleNamespace(launch_configurations=args))
 
     def test_slam_map_uses_amcl_without_serialized_posegraph(self):
         from chassis_nav2 import bringup_2d
