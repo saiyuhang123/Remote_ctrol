@@ -78,6 +78,15 @@ void MapCanvas::refreshImage() {
     std::copy_n(document_->pixels().data() + static_cast<size_t>(row) * rowBytes, rowBytes,
                 image_.scanLine(row));
   }
+  update();
+}
+
+bool MapCanvas::cancelLinePreview() {
+  if (!linePreviewVisible_) return false;
+  linePreviewVisible_ = false;
+  emit statusMessage(QStringLiteral("已取消直线预览"));
+  update();
+  return true;
 }
 
 QPointF MapCanvas::cellToScreen(int u, int v) const {

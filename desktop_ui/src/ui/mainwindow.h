@@ -61,6 +61,8 @@ private:
   QPushButton *start_ = nullptr, *stop_ = nullptr, *save_ = nullptr, *take_ = nullptr, *unlock_ = nullptr;
   MapEditorDialog *mapEditor_ = nullptr;
   QAction *mapEditorAction_ = nullptr;
+  QString mapEditorProfileId_;
+  QString mapEditorSourcePrefix_;
   int lastProfileIndex_ = -1;
   QVector<QPushButton *> directionButtons_, writeButtons_;
 };

@@ -170,6 +170,18 @@ private slots:
     QVERIFY(editorDialog && editorDialog->document());
     QCOMPARE(editorDialog->document()->width(), 4);
     QCOMPARE(editorDialog->document()->height(), 3);
+    auto *profileSelector = window.findChild<QComboBox *>(QStringLiteral("profileSelector"));
+    QVERIFY(profileSelector != nullptr);
+    const int originalProfile = profileSelector->currentIndex();
+    window.setProfileIndex(4); // Cartographer navigation: different localization source
+    QCOMPARE(profileSelector->currentIndex(), 4);
+    QVERIFY(navigationYaml->text().isEmpty());
+    const QString mismatchTarget = editorMapDirectory.filePath(QStringLiteral("mismatch_edited.yaml"));
+    QString saveError;
+    QVERIFY2(editorDialog->saveToPath(mismatchTarget, &saveError), qPrintable(saveError));
+    QVERIFY(navigationYaml->text().isEmpty()); // never fill a map from another backend
+    window.setProfileIndex(originalProfile);
+    QTRY_COMPARE(profileSelector->currentIndex(), originalProfile);
     editorDialog->close();
     QTRY_VERIFY(window.findChild<MapEditorDialog *>() == nullptr);
     auto *frame = rviz->findChild<rviz_common::VisualizationFrame *>(); QVERIFY(frame);

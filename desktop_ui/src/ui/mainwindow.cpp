@@ -304,11 +304,26 @@ void MainWindow::openMapEditor() {
   auto *editor = new MapEditorDialog(initial, this);
   editor->setAttribute(Qt::WA_DeleteOnClose);
   mapEditor_ = editor;
+  mapEditorProfileId_ = profile().id;
+  mapEditorSourcePrefix_ = mapPrefix_->text().trimmed();
   connect(editor, &MapEditorDialog::mapSaved, this, [this](const QString &yamlPath, const QString &sourceYamlPath) {
+    const bool sameSource = !mapEditorProfileId_.isEmpty() &&
+                            profile().id == mapEditorProfileId_ &&
+                            mapPrefix_->text().trimmed() == mapEditorSourcePrefix_;
+    if (!sameSource) {
+      log(QStringLiteral("地图编辑来源模式或原地图前缀已变化，未自动填入导航栅格 YAML；"
+                         "请重新确认编辑图与当前定位文件对应后再手动选择：%1（来源：%2）")
+              .arg(yamlPath, sourceYamlPath));
+      return;
+    }
     navigationYaml_->setText(yamlPath);
     log("地图编辑已保存：" + yamlPath + "（来源：" + sourceYamlPath + "）；已填入导航栅格 YAML，下次启动导航使用");
   });
-  connect(editor, &QObject::destroyed, this, [this] { mapEditor_ = nullptr; });
+  connect(editor, &QObject::destroyed, this, [this] {
+    mapEditor_ = nullptr;
+    mapEditorProfileId_.clear();
+    mapEditorSourcePrefix_.clear();
+  });
   editor->show();
   editor->raise();
   editor->activateWindow();

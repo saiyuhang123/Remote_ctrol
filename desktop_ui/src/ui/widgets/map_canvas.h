@@ -28,6 +28,7 @@ public:
   void setPendingCommandHandler(std::function<void(std::unique_ptr<MapEditCommand>)> handler);
 
   void refreshImage();
+  bool cancelLinePreview();
   QPointF cellToScreen(int u, int v) const;
   bool screenToCell(const QPointF &point, int *u, int *v) const;
 

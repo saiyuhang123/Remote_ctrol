@@ -8,6 +8,7 @@
 #include <QDir>
 #include <QFileDialog>
 #include <QFileInfo>
+#include <QKeyEvent>
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QMessageBox>
@@ -188,7 +189,22 @@ void MapEditorDialog::closeEvent(QCloseEvent *event) {
     event->ignore();
     return;
   }
-  QDialog::closeEvent(event);
+  event->accept();
+}
+
+void MapEditorDialog::keyPressEvent(QKeyEvent *event) {
+  // Esc during a line preview cancels the preview instead of leaving the
+  // editor or discarding the whole document.
+  if (event->key() == Qt::Key_Escape && canvas_ && canvas_->cancelLinePreview()) {
+    event->accept();
+    return;
+  }
+  QDialog::keyPressEvent(event);
+}
+
+void MapEditorDialog::reject() {
+  if (!maybeSave()) return;
+  QDialog::reject();
 }
 
 bool MapEditorDialog::maybeSave() {

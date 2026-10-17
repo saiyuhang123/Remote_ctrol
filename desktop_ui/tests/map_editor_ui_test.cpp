@@ -3,11 +3,14 @@
 #include "ui/map_editor_dialog.h"
 #include "ui/widgets/map_canvas.h"
 
+#include <QApplication>
 #include <QComboBox>
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
+#include <QMessageBox>
 #include <QPushButton>
+#include <QTimer>
 #include <QTemporaryDir>
 #include <QTest>
 #include <vector>
@@ -92,6 +95,47 @@ private slots:
     QCOMPARE(dialog.document()->pixel(0, 2), uint8_t(0));
     QCOMPARE(dialog.document()->pixel(3, 2), uint8_t(0));
     QVERIFY(dialog.isDirty());
+
+    // Esc during a line preview must cancel the preview, not close a dirty
+    // document or open the save/discard prompt.
+    tool->setCurrentIndex(3);
+    const uint8_t pixelBeforeEscape = dialog.document()->pixel(2, 1);
+    const QPointF escapeLineStart = canvas->cellToScreen(2, 1) + cellStep / 2.0;
+    QTest::mousePress(canvas, Qt::LeftButton, Qt::NoModifier, escapeLineStart.toPoint());
+    QTest::keyClick(&dialog, Qt::Key_Escape);
+    QVERIFY(dialog.isVisible());
+    QCOMPARE(dialog.document()->pixel(2, 1), pixelBeforeEscape);
+  }
+
+  void escapeOnDirtyDocumentPromptsBeforeClosing() {
+    QTemporaryDir directory;
+    QVERIFY(directory.isValid());
+    const QString yaml = writeSyntheticMap(directory.path());
+    QVERIFY(!yaml.isEmpty());
+
+    MapEditorDialog dialog(yaml);
+    dialog.resize(640, 480);
+    dialog.show();
+    QVERIFY(QTest::qWaitForWindowExposed(&dialog));
+    auto *canvas = dialog.findChild<MapCanvas *>(QStringLiteral("mapCanvas"));
+    QVERIFY(canvas != nullptr);
+    canvas->fitToView();
+    const QPointF center = (canvas->cellToScreen(1, 1) + canvas->cellToScreen(2, 2)) / 2.0;
+    QTest::mouseClick(canvas, Qt::LeftButton, Qt::NoModifier, center.toPoint());
+    QVERIFY(dialog.isDirty());
+
+    bool promptShown = false;
+    QTimer::singleShot(100, [&promptShown] {
+      auto *message = qobject_cast<QMessageBox *>(QApplication::activeModalWidget());
+      if (message) {
+        promptShown = true;
+        if (auto *discard = message->button(QMessageBox::Discard)) discard->click();
+      }
+    });
+    QTest::keyClick(&dialog, Qt::Key_Escape);
+    QTest::qWait(150);
+    QVERIFY(promptShown);
+    QVERIFY(!dialog.isVisible());
   }
 
   void savesEditedMapAndMarksClean() {

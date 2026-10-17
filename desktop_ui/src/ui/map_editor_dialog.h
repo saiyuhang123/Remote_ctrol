@@ -23,9 +23,11 @@ public:
   bool isDirty() const { return history_.currentRevision() != savedRevision_; }
   MapCanvas *mapCanvas() const { return canvas_; }
   MapDocument *document() const { return document_.get(); }
+  void reject() override;
 
 protected:
   void closeEvent(QCloseEvent *event) override;
+  void keyPressEvent(QKeyEvent *event) override;
 
 signals:
   void mapSaved(const QString &yamlPath, const QString &sourceYamlPath);
