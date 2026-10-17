@@ -181,16 +181,21 @@ MapEditorDialog::MapEditorDialog(const QString &initialYamlPath, QWidget *parent
   infoToggleButton_->setObjectName(QStringLiteral("mapEditorInfoToggle"));
   infoToggleButton_->setCheckable(true);
   infoToggleButton_->setIcon(style()->standardIcon(QStyle::SP_FileDialogDetailedView));
+  saveButton_ = new QPushButton(QStringLiteral("保存"), topBar);
+  saveButton_->setObjectName(QStringLiteral("mapEditorSave"));
+  saveButton_->setIcon(style()->standardIcon(QStyle::SP_DialogSaveButton));
+  saveButton_->setToolTip(QStringLiteral("保存到当前地图 (Ctrl+S)"));
+  saveButton_->setProperty("primary", true);
   saveAsButton_ = new QPushButton(QStringLiteral("另存为"), topBar);
   saveAsButton_->setObjectName(QStringLiteral("mapEditorSaveAs"));
-  saveAsButton_->setIcon(style()->standardIcon(QStyle::SP_DialogSaveButton));
-  saveAsButton_->setProperty("primary", true);
+  saveAsButton_->setToolTip(QStringLiteral("另存为 (Ctrl+Shift+S)"));
   topLayout->addWidget(openButton_);
   topLayout->addWidget(undoButton_);
   topLayout->addWidget(redoButton_);
   topLayout->addSpacing(6);
   topLayout->addWidget(currentFileLabel_, 1);
   topLayout->addWidget(infoToggleButton_);
+  topLayout->addWidget(saveButton_);
   topLayout->addWidget(saveAsButton_);
   root->addWidget(topBar);
 
@@ -464,6 +469,7 @@ MapEditorDialog::MapEditorDialog(const QString &initialYamlPath, QWidget *parent
 
   // File, view and status actions.
   connect(openButton_, &QPushButton::clicked, this, &MapEditorDialog::chooseOpen);
+  connect(saveButton_, &QPushButton::clicked, this, &MapEditorDialog::saveDirect);
   connect(saveAsButton_, &QPushButton::clicked, this, [this] { saveAs(); });
   connect(undoButton_, &QPushButton::clicked, this, [this] {
     if (history_.undo()) canvas_->refreshImage();
@@ -525,6 +531,11 @@ MapEditorDialog::MapEditorDialog(const QString &initialYamlPath, QWidget *parent
   connect(redoShortcutShiftZ, &QShortcut::activated, this, [this, editingInput] {
     if (!editingInput()) redoButton_->click();
   });
+  saveShortcut_ = new QShortcut(QKeySequence::Save, this);
+  saveShortcut_->setObjectName(QStringLiteral("mapEditorSaveShortcut"));
+  connect(saveShortcut_, &QShortcut::activated, this, [this] {
+    if (saveButton_ && saveButton_->isEnabled()) saveDirect();
+  });
   saveAsShortcut_ = new QShortcut(QKeySequence(QStringLiteral("Ctrl+Shift+S")), this);
   saveAsShortcut_->setObjectName(QStringLiteral("mapEditorSaveAsShortcut"));
   connect(saveAsShortcut_, &QShortcut::activated, this, [this] {
@@ -549,6 +560,38 @@ bool MapEditorDialog::loadMap(const QString &yamlPath, QString *error) {
   setDocument(std::make_unique<MapDocument>(std::move(loaded)));
   setOperationMessage(QStringLiteral("已打开：%1").arg(document_->metadata().sourceYamlPath), false);
   return true;
+}
+
+bool MapEditorDialog::saveCurrent(QString *error) {
+  if (!document_) {
+    if (error) *error = QStringLiteral("当前没有打开地图");
+    setOperationMessage(QStringLiteral("保存失败：当前没有打开地图"), true);
+    return false;
+  }
+  QString backup;
+  QString internalError;
+  if (!MapIo::save(document_.get(), &internalError, &backup)) {
+    if (error) *error = internalError;
+    setOperationMessage(QStringLiteral("保存失败：%1").arg(internalError), true);
+    return false;
+  }
+  savedRevision_ = history_.currentRevision();
+  const QString source = document_->metadata().sourceYamlPath;
+  updateUi();
+  QString message = QStringLiteral("已保存到当前地图：%1")
+                        .arg(document_->metadata().lastExportYamlPath);
+  if (!backup.isEmpty()) message += QStringLiteral("；原文件备份：%1").arg(backup);
+  setOperationMessage(message, false);
+  emit mapSaved(document_->metadata().lastExportYamlPath, source);
+  if (error) error->clear();
+  return true;
+}
+
+void MapEditorDialog::saveDirect() {
+  QString error;
+  if (!saveCurrent(&error) && document_) {
+    QMessageBox::critical(this, QStringLiteral("保存失败"), error);
+  }
 }
 
 bool MapEditorDialog::saveToPath(const QString &targetYamlPath, QString *error) {
@@ -689,7 +732,9 @@ void MapEditorDialog::updateUi() {
   undoButton_->setEnabled(history_.canUndo());
   redoButton_->setEnabled(history_.canRedo());
   const bool documentAvailable = document_ != nullptr;
+  saveButton_->setEnabled(documentAvailable);
   saveAsButton_->setEnabled(documentAvailable);
+  if (saveShortcut_) saveShortcut_->setEnabled(documentAvailable);
   if (saveAsShortcut_) saveAsShortcut_->setEnabled(documentAvailable);
   if (!document_) {
     currentFileLabel_->setText(QStringLiteral("未打开地图"));

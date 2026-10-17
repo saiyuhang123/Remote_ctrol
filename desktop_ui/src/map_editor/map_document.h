@@ -24,13 +24,18 @@ struct MapMetadata {
   double occupiedThresh = 0.65;
   QString mode = QStringLiteral("trinary");
 
-  // Immutable source identity and the latest export target. Hashes are SHA-256
+  // Immutable original source identity, the current active file (loaded file
+  // or latest save target), and the latest export target. Hashes are SHA-256
   // of the complete files and are used to detect external modifications.
   QString sourceYamlPath;
   QString sourceImagePath;
+  QString activeYamlPath;
+  QString activeImagePath;
   QString lastExportYamlPath;
   QByteArray sourceYamlHash;
   QByteArray sourceImageHash;
+  QByteArray activeYamlHash;
+  QByteArray activeImageHash;
   QByteArray lastExportYamlHash;
 };
 
@@ -47,6 +52,8 @@ public:
   int index(int u, int v) const { return v * metadata_.width + u; }
 
   const MapMetadata &metadata() const { return metadata_; }
+  void setActiveTarget(const QString &yamlPath, const QString &imagePath,
+                       const QByteArray &yamlHash, const QByteArray &imageHash);
   void setLastExportInfo(const QString &yamlPath, const QByteArray &yamlHash);
 
   const std::vector<uint8_t> &pixels() const { return pixels_; }

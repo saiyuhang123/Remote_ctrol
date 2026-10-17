@@ -276,11 +276,15 @@ private slots:
     MapEditorDialog dialog{QString()};
     dialog.show();
     QVERIFY(QTest::qWaitForWindowExposed(&dialog));
+    auto *save = button(&dialog, QStringLiteral("mapEditorSave"));
     auto *saveAs = button(&dialog, QStringLiteral("mapEditorSaveAs"));
-    auto *shortcut = dialog.findChild<QShortcut *>(QStringLiteral("mapEditorSaveAsShortcut"));
-    QVERIFY(saveAs && shortcut);
+    auto *saveShortcut = dialog.findChild<QShortcut *>(QStringLiteral("mapEditorSaveShortcut"));
+    auto *saveAsShortcut = dialog.findChild<QShortcut *>(QStringLiteral("mapEditorSaveAsShortcut"));
+    QVERIFY(save && saveAs && saveShortcut && saveAsShortcut);
+    QVERIFY(!save->isEnabled());
     QVERIFY(!saveAs->isEnabled());
-    QVERIFY(!shortcut->isEnabled());
+    QVERIFY(!saveShortcut->isEnabled());
+    QVERIFY(!saveAsShortcut->isEnabled());
 
     bool modalShown = false;
     QTimer::singleShot(100, [&modalShown] {
@@ -299,8 +303,51 @@ private slots:
     QVERIFY(!yaml.isEmpty());
     QString error;
     QVERIFY2(dialog.loadMap(yaml, &error), qPrintable(error));
+    QVERIFY(save->isEnabled());
     QVERIFY(saveAs->isEnabled());
-    QVERIFY(shortcut->isEnabled());
+    QVERIFY(saveShortcut->isEnabled());
+    QVERIFY(saveAsShortcut->isEnabled());
+  }
+
+  void directSaveWritesCurrentYamlAndBacksUp() {
+    QTemporaryDir directory;
+    QVERIFY(directory.isValid());
+    const QString yaml = writeSyntheticMap(directory.path());
+    QVERIFY(!yaml.isEmpty());
+    const QString image = directory.filePath(QStringLiteral("map.pgm"));
+    QFile sourceImage(image);
+    QVERIFY(sourceImage.open(QIODevice::ReadOnly));
+    const QByteArray originalImage = sourceImage.readAll();
+
+    MapEditorDialog dialog(yaml);
+    dialog.show();
+    QVERIFY(QTest::qWaitForWindowExposed(&dialog));
+    auto *canvas = dialog.findChild<MapCanvas *>(QStringLiteral("mapCanvas"));
+    auto *save = button(&dialog, QStringLiteral("mapEditorSave"));
+    QVERIFY(canvas && save);
+    clickCell(canvas, 1, 1);
+    QVERIFY(dialog.isDirty());
+    QTest::mouseClick(save, Qt::LeftButton);
+    QVERIFY(!dialog.isDirty());
+    QCOMPARE(dialog.document()->metadata().lastExportYamlPath, QFileInfo(yaml).absoluteFilePath());
+    auto *operation = dialog.findChild<QLabel *>(QStringLiteral("mapEditorOperationMessage"));
+    QVERIFY(operation && operation->text().contains(QStringLiteral("已保存到当前地图")));
+    QCOMPARE(QDir(directory.path()).entryList({QStringLiteral("map_backup_*")},
+                                              QDir::Dirs | QDir::NoDotAndDotDot).size(),
+             1);
+
+    MapDocument reloaded;
+    QString error;
+    QVERIFY2(MapIo::load(yaml, &reloaded, &error), qPrintable(error));
+    QCOMPARE(reloaded.semanticValue(reloaded.pixel(1, 1)), 100);
+    QFile imageAfter(image);
+    QVERIFY(imageAfter.open(QIODevice::ReadOnly));
+    QCOMPARE(imageAfter.readAll(), originalImage);
+
+    clickCell(canvas, 2, 1);
+    QVERIFY(dialog.isDirty());
+    QVERIFY2(dialog.saveCurrent(&error), qPrintable(error));
+    QVERIFY(!dialog.isDirty());
   }
 
   void savesEditedMapAndMarksClean() {

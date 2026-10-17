@@ -239,6 +239,40 @@ private slots:
     }
   }
 
+  void directSaveWritesBackCurrentYamlWithBackupAndSupportsRepeat() {
+    QTemporaryDir directory;
+    QVERIFY(directory.isValid());
+    const std::vector<uint8_t> pixels(20, 205);
+    const QString yaml = writeSyntheticMap(directory.path(), QStringLiteral("map"), pixels, 5, 4);
+    QVERIFY(!yaml.isEmpty());
+    const QString image = directory.filePath(QStringLiteral("map.pgm"));
+    const QByteArray originalImage = readBytes(image);
+    const QByteArray originalYaml = readBytes(yaml);
+
+    MapDocument document;
+    QString error;
+    QVERIFY2(MapIo::load(yaml, &document, &error), qPrintable(error));
+    document.pixels()[0] = 0;
+    QString backup;
+    QVERIFY2(MapIo::save(&document, &error, &backup), qPrintable(error));
+    QVERIFY(QFileInfo(backup).isDir());
+    QCOMPARE(document.metadata().lastExportYamlPath, QFileInfo(yaml).absoluteFilePath());
+    QCOMPARE(readBytes(image), originalImage);
+    QVERIFY(readBytes(yaml) != originalYaml);
+
+    MapDocument reloaded;
+    QVERIFY2(MapIo::load(yaml, &reloaded, &error), qPrintable(error));
+    QCOMPARE(reloaded.pixel(0, 0), uint8_t(0));
+
+    // The active file identity must refresh after the in-place save so a
+    // second save does not fail its external-modification check.
+    document.pixels()[1] = 0;
+    QVERIFY2(MapIo::save(&document, &error, nullptr), qPrintable(error));
+    MapDocument reloadedAgain;
+    QVERIFY2(MapIo::load(yaml, &reloadedAgain, &error), qPrintable(error));
+    QCOMPARE(reloadedAgain.pixel(1, 0), uint8_t(0));
+  }
+
   void invalidMetadataIsRejected() {
     QTemporaryDir directory;
     QVERIFY(directory.isValid());

@@ -21,6 +21,7 @@ public:
 
   bool maybeSave();
   bool loadMap(const QString &yamlPath, QString *error = nullptr);
+  bool saveCurrent(QString *error = nullptr);
   bool saveToPath(const QString &targetYamlPath, QString *error = nullptr);
   bool isDirty() const { return history_.currentRevision() != savedRevision_; }
   MapCanvas *mapCanvas() const { return canvas_; }
@@ -43,6 +44,7 @@ signals:
 
 private slots:
   void chooseOpen();
+  void saveDirect();
   bool saveAs();
 
 private:
@@ -68,6 +70,7 @@ private:
   MapCanvas *canvas_ = nullptr;
   QSpinBox *brushSpin_ = nullptr;
   QPushButton *openButton_ = nullptr;
+  QPushButton *saveButton_ = nullptr;
   QPushButton *saveAsButton_ = nullptr;
   QPushButton *undoButton_ = nullptr;
   QPushButton *redoButton_ = nullptr;
@@ -98,6 +101,7 @@ private:
   QLabel *fileStateLabel_ = nullptr;
   QLabel *operationMessageLabel_ = nullptr;
   QShortcut *saveAsShortcut_ = nullptr;
+  QShortcut *saveShortcut_ = nullptr;
 
   QString navigationSelectedYaml_;
   QString toolSummaryFullText_;

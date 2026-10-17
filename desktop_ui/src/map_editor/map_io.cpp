@@ -301,22 +301,24 @@ bool backupExistingTarget(const QString &targetYamlPath, QString *backupDir, QSt
 
 YAML::Node baseYamlForSave(MapDocument *document, QString *error) {
   YAML::Node root;
-  if (!document->metadata().sourceYamlPath.isEmpty()) {
+  const MapMetadata &metadata = document->metadata();
+  const QString baseYamlPath =
+      metadata.activeYamlPath.isEmpty() ? metadata.sourceYamlPath : metadata.activeYamlPath;
+  if (!baseYamlPath.isEmpty()) {
     try {
-      root = YAML::LoadFile(document->metadata().sourceYamlPath.toStdString());
+      root = YAML::LoadFile(baseYamlPath.toStdString());
     } catch (const std::exception &exception) {
-      if (error) *error = QStringLiteral("重新读取源 YAML 失败：%1").arg(QString::fromUtf8(exception.what()));
+      if (error) *error = QStringLiteral("重新读取当前 YAML 失败：%1").arg(QString::fromUtf8(exception.what()));
       return {};
     }
     if (!root.IsMap()) {
-      if (error) *error = QStringLiteral("源 YAML 不是映射结构");
+      if (error) *error = QStringLiteral("当前 YAML 不是映射结构");
       return {};
     }
   } else {
     root = YAML::Node(YAML::NodeType::Map);
   }
 
-  const MapMetadata &metadata = document->metadata();
   if (!root["resolution"]) root["resolution"] = metadata.resolution;
   if (!root["origin"]) {
     YAML::Node origin(YAML::NodeType::Sequence);
@@ -354,6 +356,103 @@ bool verifySavedMap(const QString &targetYamlPath, const QString &expectedImage,
     if (error) *error = QStringLiteral("导出后的 PGM 尺寸校验失败");
     return false;
   }
+  return true;
+}
+
+bool saveDocument(MapDocument *document, const QString &targetYamlPath,
+                  bool allowOverwriteExisting, bool allowSourceTarget,
+                  QString *error, QString *backupDir) {
+  if (backupDir) backupDir->clear();
+  if (!document || !document->valid()) {
+    if (error) *error = QStringLiteral("没有可保存的有效地图文档");
+    return false;
+  }
+
+  QString target = targetYamlPath.trimmed();
+  if (target.isEmpty()) {
+    if (error) *error = QStringLiteral("保存路径为空");
+    return false;
+  }
+  QString suffix = QFileInfo(target).suffix();
+  if (suffix.isEmpty()) {
+    target += QStringLiteral(".yaml");
+    suffix = QStringLiteral("yaml");
+  }
+  if (suffix.compare(QStringLiteral("yaml"), Qt::CaseInsensitive) != 0 &&
+      suffix.compare(QStringLiteral("yml"), Qt::CaseInsensitive) != 0) {
+    if (error) *error = QStringLiteral("导航地图只能保存为 .yaml 或 .yml 文件");
+    return false;
+  }
+
+  const QFileInfo targetInfo(target);
+  const QString targetAbsolute = targetInfo.absoluteFilePath();
+  const MapMetadata &metadata = document->metadata();
+  if (!allowSourceTarget && !metadata.sourceYamlPath.isEmpty() &&
+      canonicalOrAbsolute(targetAbsolute) == canonicalOrAbsolute(metadata.sourceYamlPath)) {
+    if (error) *error = QStringLiteral("另存为不能覆盖源 YAML，请使用“保存”");
+    return false;
+  }
+
+  const QString activeYaml = metadata.activeYamlPath.isEmpty()
+                                 ? metadata.sourceYamlPath
+                                 : metadata.activeYamlPath;
+  const QString activeImage = metadata.activeImagePath.isEmpty()
+                                  ? metadata.sourceImagePath
+                                  : metadata.activeImagePath;
+  const QByteArray activeYamlHash = metadata.activeYamlHash.isEmpty()
+                                        ? metadata.sourceYamlHash
+                                        : metadata.activeYamlHash;
+  const QByteArray activeImageHash = metadata.activeImageHash.isEmpty()
+                                         ? metadata.sourceImageHash
+                                         : metadata.activeImageHash;
+  if (!activeYaml.isEmpty()) {
+    if (!MapIo::fileMatchesHash(activeYaml, activeYamlHash, error)) return false;
+    if (!activeImage.isEmpty() && !MapIo::fileMatchesHash(activeImage, activeImageHash, error)) return false;
+  }
+
+  const bool targetExists = QFileInfo::exists(targetAbsolute);
+  if (targetExists && !allowOverwriteExisting) {
+    if (error) *error = QStringLiteral("目标文件已存在，需要确认后才能备份覆盖");
+    return false;
+  }
+  if (!QDir().mkpath(targetInfo.absolutePath())) {
+    if (error) *error = QStringLiteral("无法创建保存目录：%1").arg(targetInfo.absolutePath());
+    return false;
+  }
+
+  QString backup;
+  if (targetExists && !backupExistingTarget(targetAbsolute, &backup, error)) return false;
+
+  const QString imageName = uniqueImageName(targetAbsolute);
+  const QString imagePath = QDir(targetInfo.absolutePath()).absoluteFilePath(imageName);
+  if (!writePgmAtomically(imagePath, document->width(), document->height(),
+                          document->pixels(), error)) {
+    return false;
+  }
+
+  PgmImage stagedImage;
+  if (!readPgmFile(imagePath, &stagedImage, nullptr, error)) return false;
+  if (stagedImage.width != document->width() || stagedImage.height != document->height() ||
+      stagedImage.pixels != document->pixels()) {
+    if (error) *error = QStringLiteral("保存 PGM 的尺寸或像素与文档不一致");
+    return false;
+  }
+
+  YAML::Node root = baseYamlForSave(document, error);
+  if (!root.IsMap()) return false;
+  root["image"] = imageName.toStdString();
+  if (!writeYamlAtomically(targetAbsolute, root, error)) return false;
+  if (!verifySavedMap(targetAbsolute, imageName, document->width(), document->height(), error)) {
+    return false;
+  }
+
+  const QByteArray yamlHash = MapIo::fileHash(targetAbsolute, error);
+  if (yamlHash.isEmpty()) return false;
+  const QByteArray imageHash = MapIo::fileHash(imagePath, error);
+  if (imageHash.isEmpty()) return false;
+  document->setActiveTarget(targetAbsolute, imagePath, yamlHash, imageHash);
+  document->setLastExportInfo(targetAbsolute, yamlHash);
+  if (backupDir) *backupDir = backup;
   return true;
 }
 }  // namespace
@@ -467,6 +566,10 @@ bool MapIo::load(const QString &yamlPath, MapDocument *out, QString *error) {
   metadata.sourceImagePath = QFileInfo(imagePath).absoluteFilePath();
   metadata.sourceYamlHash = QCryptographicHash::hash(yamlBytes, QCryptographicHash::Sha256);
   metadata.sourceImageHash = QCryptographicHash::hash(imageBytes, QCryptographicHash::Sha256);
+  metadata.activeYamlPath = metadata.sourceYamlPath;
+  metadata.activeImagePath = metadata.sourceImagePath;
+  metadata.activeYamlHash = metadata.sourceYamlHash;
+  metadata.activeImageHash = metadata.sourceImageHash;
 
   MapDocument document(std::move(metadata), std::move(pgm.pixels));
   if (!document.valid()) {
@@ -479,87 +582,22 @@ bool MapIo::load(const QString &yamlPath, MapDocument *out, QString *error) {
   return true;
 }
 
+bool MapIo::save(MapDocument *document, QString *error, QString *backupDir) {
+  if (!document) {
+    if (error) *error = QStringLiteral("当前没有可保存的地图文档");
+    return false;
+  }
+  const QString target = document->metadata().activeYamlPath.isEmpty()
+                             ? document->metadata().sourceYamlPath
+                             : document->metadata().activeYamlPath;
+  if (target.trimmed().isEmpty()) {
+    if (error) *error = QStringLiteral("当前地图没有可写回的 YAML 路径，请使用另存为");
+    return false;
+  }
+  return saveDocument(document, target, true, true, error, backupDir);
+}
+
 bool MapIo::saveAs(MapDocument *document, const QString &targetYamlPath,
                    bool allowOverwriteExisting, QString *error, QString *backupDir) {
-  if (backupDir) backupDir->clear();
-  if (!document || !document->valid()) {
-    if (error) *error = QStringLiteral("没有可保存的有效地图文档");
-    return false;
-  }
-
-  QString target = targetYamlPath.trimmed();
-  if (target.isEmpty()) {
-    if (error) *error = QStringLiteral("导出路径为空");
-    return false;
-  }
-  QString suffix = QFileInfo(target).suffix();
-  if (suffix.isEmpty()) {
-    target += QStringLiteral(".yaml");
-    suffix = QStringLiteral("yaml");
-  }
-  if (suffix.compare(QStringLiteral("yaml"), Qt::CaseInsensitive) != 0 &&
-      suffix.compare(QStringLiteral("yml"), Qt::CaseInsensitive) != 0) {
-    if (error) *error = QStringLiteral("导航地图只能另存为 .yaml 或 .yml 文件");
-    return false;
-  }
-
-  const QFileInfo targetInfo(target);
-  const QString targetAbsolute = targetInfo.absoluteFilePath();
-  const MapMetadata &metadata = document->metadata();
-
-  if (!metadata.sourceYamlPath.isEmpty()) {
-    if (canonicalOrAbsolute(targetAbsolute) == canonicalOrAbsolute(metadata.sourceYamlPath)) {
-      if (error) *error = QStringLiteral("第一版不允许把源 YAML 作为导出目标，请另存为");
-      return false;
-    }
-    if (!fileMatchesHash(metadata.sourceYamlPath, metadata.sourceYamlHash, error)) return false;
-    if (!fileMatchesHash(metadata.sourceImagePath, metadata.sourceImageHash, error)) return false;
-  }
-
-  const bool targetExists = QFileInfo::exists(targetAbsolute);
-  if (targetExists && !allowOverwriteExisting) {
-    if (error) *error = QStringLiteral("目标文件已存在，需要确认后才能备份覆盖");
-    return false;
-  }
-  if (!QDir().mkpath(targetInfo.absolutePath())) {
-    if (error) *error = QStringLiteral("无法创建导出目录：%1").arg(targetInfo.absolutePath());
-    return false;
-  }
-
-  QString backup;
-  if (targetExists && !backupExistingTarget(targetAbsolute, &backup, error)) return false;
-
-  const QString imageName = uniqueImageName(targetAbsolute);
-  const QString imagePath = QDir(targetInfo.absolutePath()).absoluteFilePath(imageName);
-  if (!writePgmAtomically(imagePath, document->width(), document->height(),
-                          document->pixels(), error)) {
-    return false;
-  }
-
-  // Verify the staged image before the YAML is committed. If this fails, the
-  // previous target YAML still references its complete old image.
-  PgmImage stagedImage;
-  if (!readPgmFile(imagePath, &stagedImage, nullptr, error)) return false;
-  if (stagedImage.width != document->width() || stagedImage.height != document->height() ||
-      stagedImage.pixels != document->pixels()) {
-    if (error) *error = QStringLiteral("导出 PGM 的尺寸或像素与文档不一致");
-    return false;
-  }
-
-  YAML::Node root = baseYamlForSave(document, error);
-  if (!root.IsMap()) return false;
-  root["image"] = imageName.toStdString();
-  if (!writeYamlAtomically(targetAbsolute, root, error)) return false;
-  if (!verifySavedMap(targetAbsolute, imageName, document->width(), document->height(), error)) {
-    return false;
-  }
-
-  document->setLastExportInfo(targetAbsolute, QCryptographicHash::hash(
-      [&targetAbsolute] {
-        QFile file(targetAbsolute);
-        return file.open(QIODevice::ReadOnly) ? file.readAll() : QByteArray();
-      }(),
-      QCryptographicHash::Sha256));
-  if (backupDir) *backupDir = backup;
-  return true;
+  return saveDocument(document, targetYamlPath, allowOverwriteExisting, false, error, backupDir);
 }

@@ -10,6 +10,8 @@
 class MapIo {
 public:
   static bool load(const QString &yamlPath, MapDocument *out, QString *error = nullptr);
+  static bool save(MapDocument *document, QString *error = nullptr,
+                   QString *backupDir = nullptr);
   static bool saveAs(MapDocument *document, const QString &targetYamlPath,
                      bool allowOverwriteExisting, QString *error = nullptr,
                      QString *backupDir = nullptr);

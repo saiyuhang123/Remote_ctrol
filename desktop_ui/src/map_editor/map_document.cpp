@@ -44,6 +44,14 @@ void MapDocument::setPixelByIndex(int index, uint8_t value) {
   pixels_[static_cast<size_t>(index)] = value;
 }
 
+void MapDocument::setActiveTarget(const QString &yamlPath, const QString &imagePath,
+                                  const QByteArray &yamlHash, const QByteArray &imageHash) {
+  metadata_.activeYamlPath = yamlPath;
+  metadata_.activeImagePath = imagePath;
+  metadata_.activeYamlHash = yamlHash;
+  metadata_.activeImageHash = imageHash;
+}
+
 void MapDocument::setLastExportInfo(const QString &yamlPath, const QByteArray &yamlHash) {
   metadata_.lastExportYamlPath = yamlPath;
   metadata_.lastExportYamlHash = yamlHash;
