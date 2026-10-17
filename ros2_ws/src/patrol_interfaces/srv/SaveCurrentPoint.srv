@@ -1,0 +1,7 @@
+string map_id
+string name
+string request_id
+---
+bool success
+string message
+PatrolPoint point

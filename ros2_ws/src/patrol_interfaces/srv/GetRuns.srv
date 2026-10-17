@@ -1,0 +1,7 @@
+string map_id
+string route_id
+uint32 limit
+---
+bool success
+string message
+RunRecord[] runs

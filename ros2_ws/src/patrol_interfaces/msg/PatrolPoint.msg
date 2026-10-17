@@ -1,0 +1,9 @@
+string point_id
+string map_id
+string name
+float64 x
+float64 y
+float64 yaw
+string source
+builtin_interfaces/Time sampled_at
+uint64 revision

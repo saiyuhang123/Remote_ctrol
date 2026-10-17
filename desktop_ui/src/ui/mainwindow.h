@@ -4,7 +4,7 @@
 #include <QJsonArray>
 #include <QMainWindow>
 #include <QVector>
-class CameraPanel; class LocalController; class BusinessClient; class ProcessManager; class MapSaver; class RvizHost; class MapEditorDialog;
+class CameraPanel; class LocalController; class BusinessClient; class ProcessManager; class MapSaver; class RvizHost; class MapEditorDialog; class PatrolClient; class PatrolPage;
 class QAction; class QCheckBox; class QComboBox; class QDoubleSpinBox; class QLabel; class QLineEdit;
 class QPlainTextEdit; class QProgressBar; class QPushButton; class QTableWidget; class QStackedWidget;
 class DashBoard;
@@ -32,6 +32,7 @@ private:
   void sendInitialPose(double x, double y, double yaw);
   void startSession();
   void openMapEditor();
+  void openPatrolPage();
   bool mapEditorSourceMatchesCurrent() const;
   void refreshEditorNavigationFeedback();
   void showPoints(const QJsonArray &points);
@@ -62,7 +63,11 @@ private:
   QTableWidget *points_ = nullptr;
   QPushButton *start_ = nullptr, *stop_ = nullptr, *save_ = nullptr, *take_ = nullptr, *unlock_ = nullptr;
   MapEditorDialog *mapEditor_ = nullptr;
+  PatrolClient *patrolClient_ = nullptr;
+  PatrolPage *patrolPage_ = nullptr;
+  QWidget *patrolWindow_ = nullptr;
   QAction *mapEditorAction_ = nullptr;
+  QAction *patrolAction_ = nullptr;
   QString mapEditorProfileId_;
   QString mapEditorSourcePrefix_;
   QString mapEditorInitialSourceYaml_;

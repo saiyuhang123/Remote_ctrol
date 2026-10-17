@@ -145,9 +145,10 @@ private slots:
     auto *rviz = window.findChild<RvizHost *>(); QVERIFY(rviz);
     // Main-window map-editor entry must work even while vehicle control is not enabled.
     auto *editorAction = window.findChild<QAction *>(QStringLiteral("mapEditorAction"));
+    auto *patrolAction = window.findChild<QAction *>(QStringLiteral("patrolAction"));
     auto *navigationYaml = window.findChild<QLineEdit *>(QStringLiteral("navigationYaml"));
     auto *mapPrefix = window.findChild<QLineEdit *>(QStringLiteral("mapPrefix"));
-    QVERIFY(editorAction && navigationYaml && mapPrefix);
+    QVERIFY(editorAction && patrolAction && navigationYaml && mapPrefix);
     QVERIFY(editorAction->isEnabled());
     QTemporaryDir editorMapDirectory;
     QVERIFY(editorMapDirectory.isValid());

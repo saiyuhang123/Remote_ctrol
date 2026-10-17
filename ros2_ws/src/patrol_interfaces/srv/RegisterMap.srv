@@ -1,0 +1,10 @@
+string map_id
+string name
+string backend
+string frame_id
+string navigation_yaml
+string localization_file
+---
+bool success
+string message
+MapBinding map

@@ -1,0 +1,9 @@
+string route_id
+string map_id
+string name
+RouteStep[] steps
+uint64 expected_revision
+---
+bool success
+string message
+PatrolRoute route

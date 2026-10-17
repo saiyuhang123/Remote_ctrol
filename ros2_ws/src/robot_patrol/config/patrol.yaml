@@ -1,0 +1,21 @@
+robot_patrol:
+  ros__parameters:
+    # Override with an absolute path in deployment or test environments.
+    database_path: "~/.local/share/robot_patrol/patrol.sqlite3"
+    map_frame: "map"
+    base_frame: "base_link"
+    point_timeout_sec: 300.0
+    settle_timeout_sec: 10.0
+    settle_linear_threshold: 0.03
+    settle_angular_threshold: 0.05
+    settle_duration_sec: 0.8
+    feedback_max_age_sec: 1.5
+    tf_max_age_sec: 1.5
+    map_feedback_timeout_sec: 2.0
+    # Keep true for any vehicle execution. Tests must provide a fresh guard_ready.
+    require_guard: true
+    guard_timeout_sec: 2.0
+    dwell_resume_position_tolerance_m: 0.5
+    dwell_resume_yaw_tolerance_rad: 0.35
+    min_dispatch_interval_sec: 0.5
+    status_period_sec: 1.0

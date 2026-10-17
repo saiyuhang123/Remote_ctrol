@@ -1,0 +1,13 @@
+string run_id
+string route_id
+string map_id
+uint8 state
+uint32 completed_loops
+uint32 completed_steps
+bool success
+string error_code
+string message
+uint64 route_revision
+uint64 map_revision
+builtin_interfaces/Time started_at
+builtin_interfaces/Time finished_at

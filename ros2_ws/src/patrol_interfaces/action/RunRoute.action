@@ -1,0 +1,17 @@
+string request_id
+string owner_session_id
+string route_id
+string map_id
+uint64 route_revision
+uint64 map_revision
+uint32 loop_count
+---
+bool success
+uint8 final_state
+string run_id
+uint32 completed_loops
+uint64 completed_steps
+string error_code
+string message
+---
+PatrolStatus status

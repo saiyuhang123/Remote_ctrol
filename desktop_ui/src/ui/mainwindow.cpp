@@ -1,6 +1,8 @@
 #include "ui/mainwindow.h"
 #include "ui/camera_panel.h"
 #include "ui/map_editor_dialog.h"
+#include "patrol/patrol_client.h"
+#include "patrol/patrol_page.h"
 #include "ui_mainwindow.h"
 #include "adapters/business_client.h"
 #include "adapters/local_controller.h"
@@ -67,6 +69,7 @@ MainWindow::MainWindow(const DesktopConfig &config, bool offline, QWidget *paren
   controller_ = new LocalController(ros_, config.maxLinear, config.maxAngular, config.feedbackTimeoutMs, this);
   process_ = new ProcessManager(config, this);
   saver_ = new MapSaver(config, ros_, this);
+  patrolClient_ = new PatrolClient(this);
   setupUi();
   connect(controller_, &LocalController::message, this, &MainWindow::log);
   connect(business_, &BusinessClient::message, this, &MainWindow::log);
@@ -93,6 +96,11 @@ MainWindow::MainWindow(const DesktopConfig &config, bool offline, QWidget *paren
   updateControls();
 }
 MainWindow::~MainWindow() {
+  if (patrolWindow_) {
+    delete patrolWindow_;
+    patrolWindow_ = nullptr;
+    patrolPage_ = nullptr;
+  }
   // Children are destroyed by QObject after MainWindow's own members have
   // already been destroyed. Tear the editor down while `this` is still a
   // complete object, and disconnect its destroyed callback first.
@@ -132,6 +140,10 @@ void MainWindow::setupUi() {
   mapEditorAction_ = tools->addAction(QIcon(":/images/edit.svg"), "地图编辑");
   mapEditorAction_->setObjectName("mapEditorAction");
   connect(mapEditorAction_, &QAction::triggered, this, &MainWindow::openMapEditor);
+  patrolAction_ = tools->addAction("路线巡航");
+  patrolAction_->setObjectName("patrolAction");
+  patrolAction_->setToolTip("本地点位、路线和多点巡航");
+  connect(patrolAction_, &QAction::triggered, this, &MainWindow::openPatrolPage);
   auto *panels = tools->addAction("显示项 / 视角"); panels->setCheckable(true);
   connect(panels, &QAction::toggled, this, [this](bool visible) { if (rviz_) rviz_->setPanelsVisible(visible); });
   auto *initial = tools->addAction(QIcon(":/images/reloc2.svg"), "点选初始位姿"); connect(initial, &QAction::triggered, this, [this] { rviz_->selectTool("rviz_default_plugins/SetInitialPose"); });
@@ -273,6 +285,7 @@ void MainWindow::updateControls() {
   profiles_->setEnabled(!running && !busy); mapPrefix_->setReadOnly(running || busy);
   if (navigationYaml_) navigationYaml_->setReadOnly(running || busy);
   if (mapEditorAction_) mapEditorAction_->setEnabled(!busy);
+  if (patrolAction_) patrolAction_->setEnabled(patrolClient_ && patrolClient_->available());
   sensors_->setEnabled(!running); chassis_->setEnabled(!running); bridge_->setEnabled(!running); odom_->setEnabled(!running);
 }
 void MainWindow::updateSnapshot(const RobotSnapshot &s) {
@@ -377,6 +390,57 @@ void MainWindow::openMapEditor() {
   editor->show();
   editor->raise();
   editor->activateWindow();
+}
+
+void MainWindow::openPatrolPage() {
+  if (patrolWindow_) {
+    patrolWindow_->raise();
+    patrolWindow_->activateWindow();
+    return;
+  }
+  if (!patrolClient_ || !patrolClient_->available()) {
+    log("本地路线巡航不可用：请先构建 patrol_interfaces 和 robot_patrol");
+    return;
+  }
+  QString navYaml = navigationYaml_->text().trimmed();
+  const QString prefix = mapPrefix_->text().trimmed();
+  if (navYaml.isEmpty()) navYaml = prefix + ".yaml";
+  QString localizationFile;
+  if (profile().backend == "fastlio") localizationFile = prefix + ".pcd";
+  else if (profile().backend == "cartographer") localizationFile = prefix + ".pbstream";
+  auto *dialog = new QDialog(this);
+  dialog->setObjectName("patrolWindow");
+  dialog->setWindowTitle("路线巡航");
+  dialog->setAttribute(Qt::WA_DeleteOnClose);
+  dialog->resize(1180, 760);
+  auto *layout = new QVBoxLayout(dialog);
+  layout->setContentsMargins(0, 0, 0, 0);
+  auto startPermission = [this](QString *reason) {
+    const auto deny = [reason](const QString &text) {
+      if (reason) *reason = text;
+      return false;
+    };
+    if (offline_) return deny(QStringLiteral("离线模式禁止发送巡航目标"));
+    if (!profile().navigation) return deny(QStringLiteral("请先切换到定位导航模式"));
+    if (!allowed()) return deny(QStringLiteral("请先启用操作"));
+    if (!state_.poseValid || state_.frame != QStringLiteral("map"))
+      return deny(QStringLiteral("等待有效的 map 定位"));
+    if (!state_.navigationAvailable) return deny(QStringLiteral("Nav2 尚未就绪"));
+    if (!state_.estopValid) return deny(QStringLiteral("急停状态未知或已过期"));
+    if (state_.estopped) return deny(QStringLiteral("请先明确解除急停"));
+    return true;
+  };
+  patrolPage_ = new PatrolPage(patrolClient_, navYaml, profile().backend,
+                               localizationFile, profile().name, offline_, startPermission, dialog);
+  layout->addWidget(patrolPage_);
+  patrolWindow_ = dialog;
+  connect(dialog, &QObject::destroyed, this, [this] {
+    patrolWindow_ = nullptr;
+    patrolPage_ = nullptr;
+  });
+  dialog->show();
+  dialog->raise();
+  dialog->activateWindow();
 }
 
 void MainWindow::showPoints(const QJsonArray &items) {

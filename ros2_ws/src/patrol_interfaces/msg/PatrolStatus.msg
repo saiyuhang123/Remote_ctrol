@@ -1,0 +1,32 @@
+# State constants shared by the executor, CLI and Qt.
+uint8 IDLE=0
+uint8 VALIDATING=1
+uint8 DISPATCHING=2
+uint8 NAVIGATING=3
+uint8 SETTLING=4
+uint8 DWELLING=5
+uint8 PAUSING=6
+uint8 PAUSED=7
+uint8 CANCELING=8
+uint8 CANCELED=9
+uint8 SUCCEEDED=10
+uint8 FAILED=11
+uint8 INTERRUPTED=12
+uint8 STOPPING=13
+
+string instance_id
+uint64 sequence
+string run_id
+string route_id
+string map_id
+uint8 state
+uint32 loop_index
+uint32 total_loops
+uint32 step_index
+uint32 step_count
+string current_point_name
+float64 dwell_remaining
+string error_code
+string message
+string current_goal_id
+bool active

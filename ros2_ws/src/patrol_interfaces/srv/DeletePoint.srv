@@ -1,0 +1,5 @@
+string point_id
+uint64 expected_revision
+---
+bool success
+string message

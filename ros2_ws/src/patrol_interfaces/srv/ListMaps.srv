@@ -1,0 +1,5 @@
+---
+bool success
+string message
+MapBinding[] maps
+MapBinding active_map
