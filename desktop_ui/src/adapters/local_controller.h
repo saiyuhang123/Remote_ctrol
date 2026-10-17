@@ -14,6 +14,8 @@ public:
   bool controlEnabled() const { return enabled_; }
   bool manualReady() const { return manualReady_; }
   void setControlEnabled(bool enabled);
+  void setPatrolActive(bool active);
+  void setMotionState(bool valid, double linear, double angular);
   void updateFeedback(bool estopped, bool navActive, bool navKnown, bool fresh);
   bool takeManualControl();
   bool move(double linear, double angular);
@@ -28,11 +30,16 @@ signals:
   void message(const QString &text);
 private:
   bool feedbackFresh() const;
+  bool stationaryFreshFor(int durationMs) const;
   RosAdapter *ros_;
   QTimer repeat_, preparation_;
-  QElapsedTimer preparationAge_, feedbackAge_;
+  QElapsedTimer preparationAge_, feedbackAge_, motionAge_;
   int feedbackTimeoutMs_;
   double maxLinear_, maxAngular_, linear_ = 0., angular_ = 0.;
   bool enabled_ = false, manualReady_ = false, manualMoving_ = false, unlockWaiting_ = false;
   bool estopped_ = true, navActive_ = false, navKnown_ = false, fresh_ = false;
+  bool patrolActive_ = false;
+  bool motionValid_ = false;
+  double actualLinear_ = 0., actualAngular_ = 0.;
+  QElapsedTimer stationaryAge_;
 };

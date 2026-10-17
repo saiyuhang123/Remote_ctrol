@@ -23,6 +23,7 @@ setup(
     entry_points={
         "console_scripts": [
             "patrol_node = robot_patrol.node:main",
+            "patrol_guard = robot_patrol.guard:main",
             "patrol_cli = robot_patrol.cli:main",
         ],
     },

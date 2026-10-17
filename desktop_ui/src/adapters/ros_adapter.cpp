@@ -22,6 +22,9 @@
 #include <mutex>
 #include <map>
 #include <thread>
+#ifdef DESKTOP_HAS_PATROL_INTERFACES
+#include <patrol_interfaces/msg/executor_heartbeat.hpp>
+#endif
 #ifdef DESKTOP_HAS_YUNLE_MSGS
 #include <yunle_msgs/msg/battery.hpp>
 #endif
@@ -96,7 +99,8 @@ struct RosAdapter::Impl {
   QImage latestImage;
   QTimer *imagePump = nullptr;
   RobotSnapshot state;
-  qint64 odomTime = 0, stopTime = 0, batteryTime = 0, imageTime = 0;
+  qint64 odomTime = 0, stopTime = 0, guardTime = 0, batteryTime = 0, imageTime = 0;
+  qint64 patrolHeartbeatTime = 0, patrolLockTime = 0;
   bool navReceived = false;
   std::map<quint64, std::function<void()>> cancelPending;
   quint64 nextRequest = 0;
@@ -148,6 +152,21 @@ struct RosAdapter::Impl {
         state.estopped = m->data; stopTime = nowMs();
         if (m->data && estopCommand.load() == 0) estopCommand.store(1);
       }));
+    subscriptions.push_back(node->create_subscription<std_msgs::msg::Bool>(
+      "/patrol/guard_ready", rclcpp::QoS(10), [this](std_msgs::msg::Bool::ConstSharedPtr m) {
+        state.guardReady = m->data; guardTime = nowMs();
+      }));
+    subscriptions.push_back(node->create_subscription<std_msgs::msg::Bool>(
+      "/patrol/stop_lock", rclcpp::QoS(10), [this](std_msgs::msg::Bool::ConstSharedPtr m) {
+        state.patrolLocked = m->data; patrolLockTime = nowMs();
+      }));
+#ifdef DESKTOP_HAS_PATROL_INTERFACES
+    subscriptions.push_back(node->create_subscription<patrol_interfaces::msg::ExecutorHeartbeat>(
+      "/patrol/executor_heartbeat", rclcpp::QoS(10),
+      [this](patrol_interfaces::msg::ExecutorHeartbeat::ConstSharedPtr) {
+        patrolHeartbeatTime = nowMs();
+      }));
+#endif
     subscriptions.push_back(node->create_subscription<action_msgs::msg::GoalStatusArray>(
       "/navigate_to_pose/_action/status", rclcpp::QoS(1).reliable().transient_local(),
       [this](action_msgs::msg::GoalStatusArray::ConstSharedPtr m) {
@@ -197,6 +216,14 @@ struct RosAdapter::Impl {
     const auto current = nowMs();
     state.speedValid = odomTime && current - odomTime < config.feedbackTimeoutMs;
     state.estopValid = stopTime && current - stopTime < config.feedbackTimeoutMs;
+    state.guardValid = guardTime && current - guardTime < config.feedbackTimeoutMs;
+    if (!state.guardValid) state.guardReady = false;
+    const bool patrolHeartbeatFresh = patrolHeartbeatTime &&
+        current - patrolHeartbeatTime < config.feedbackTimeoutMs;
+    const bool patrolLockFresh = patrolLockTime &&
+        current - patrolLockTime < config.feedbackTimeoutMs;
+    state.patrolInterlockValid = patrolHeartbeatFresh || patrolLockFresh;
+    if (!patrolLockFresh) state.patrolLocked = false;
     state.batteryValid = batteryTime && current - batteryTime < 5000;
     const bool navPublisher = node->count_publishers("/navigate_to_pose/_action/status") > 0;
     state.navigationKnown = !navPublisher || navReceived || cancellationKnown.load();
@@ -372,13 +399,14 @@ QStringList RosAdapter::capabilities() const {
   return list;
 }
 QStringList RosAdapter::conflictingNodes() const {
-  const QStringList names{"controller_server", "planner_server", "bt_navigator", "amcl", "slam_toolbox", "cartographer_node", "fast_lio_mapping", "laser_mapping", "map_server", "twist_mux", "chassis_driver", "jd03_odometry", "ekf_filter_node", "robot_state_publisher", "rslidar_sdk_node", "imuDriverNode", "lio_odometry", "global_localization", "transform_fusion", "pointcloud_to_scan", "cloud_crop_box"};
+  const QStringList names{"controller_server", "planner_server", "bt_navigator", "amcl", "slam_toolbox", "cartographer_node", "fast_lio_mapping", "laser_mapping", "map_server", "twist_mux", "chassis_driver", "jd03_odometry", "ekf_filter_node", "robot_state_publisher", "rslidar_sdk_node", "imuDriverNode", "lio_odometry", "global_localization", "transform_fusion", "pointcloud_to_scan", "cloud_crop_box", "robot_patrol", "patrol_guard"};
   QStringList found;
   for (const auto &name : impl_->node->get_node_names()) {
     const auto qname = QString::fromStdString(name);
     if (names.contains(qname.section('/', -1)) || qname.section('/', -1).startsWith("tf_base_link_to_")) found << qname;
   }
-  for (const auto &topic : {"/cmd_vel", "/odom", "/scan", "/map", "/Odometry", "/cloud_registered"})
+  for (const auto &topic : {"/cmd_vel", "/odom", "/scan", "/map", "/Odometry", "/cloud_registered",
+                            "/patrol/stop_lock", "/patrol/executor_heartbeat"})
     if (impl_->node->count_publishers(topic) > 0) found << QString::fromLatin1(topic) + "（已有发布者）";
   return found;
 }

@@ -99,21 +99,25 @@ def test_pause_during_dwell_reconfirms_and_repositions(tmp_path):
 
     store, mapping = make_store(tmp_path)
     driver = OffPointDriver()
-    route = snapshot(["A"], dwell=0.3)
+    route = snapshot(["A"], dwell=1.0)
     run_id = "run1"
     store.create_run(run_id, "route", mapping.map_id, 1, mapping.revision,
                      route.as_dict(), 1, 1, 1)
     dwelling = threading.Event()
+    paused = threading.Event()
     def status_cb(status):
         if status.get("state") == 5:
             dwelling.set()
+        if status.get("state") == 7:
+            paused.set()
     engine = PatrolEngine(store, route, run_id, 1, "owner", driver,
                           status_cb, settle_timeout=1.0,
                           point_timeout=1.0, min_dispatch_interval=0.0)
     def pause_resume():
         assert dwelling.wait(2.0)
         engine.request_pause()
-        time.sleep(0.1)
+        # Resume only after the state machine has actually entered PAUSED.
+        assert paused.wait(2.0)
         engine.request_resume()
     threading.Thread(target=pause_resume, daemon=True).start()
     result = engine.run()

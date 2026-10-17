@@ -11,7 +11,7 @@ from rclpy.node import Node
 from rclpy.action import ActionClient
 
 from patrol_interfaces.action import RunRoute
-from patrol_interfaces.msg import RouteStep
+from patrol_interfaces.msg import OperatorHeartbeat, RouteStep
 from patrol_interfaces.srv import (
     ControlRun,
     DeletePoint,
@@ -217,12 +217,28 @@ def main(args=None):
                 raise RuntimeError(response.message)
             print(response.message)
         elif parsed.command == "run-route":
+            owner_session = parsed.owner.strip()
+            if not owner_session:
+                raise RuntimeError("--owner 不能为空；patrol_guard 需要匹配操作端心跳")
+            heartbeat_pub = node.create_publisher(
+                OperatorHeartbeat, "/patrol/operator_heartbeat", 10)
+
+            def publish_heartbeat():
+                message = OperatorHeartbeat()
+                message.session_id = owner_session
+                message.client_id = "patrol_cli"
+                message.enabled = True
+                message.stamp = node.get_clock().now().to_msg()
+                heartbeat_pub.publish(message)
+
+            node.create_timer(0.2, publish_heartbeat)
+            publish_heartbeat()
             client = ActionClient(node, RunRoute, "/patrol/run_route")
             if not client.wait_for_server(timeout_sec=10.0):
                 raise RuntimeError("巡航 Action 不可用")
             goal = RunRoute.Goal()
             goal.request_id = "cli_" + str(time.time_ns())
-            goal.owner_session_id = parsed.owner
+            goal.owner_session_id = owner_session
             goal.route_id = parsed.route_id
             goal.map_id = parsed.map_id
             goal.loop_count = parsed.loops

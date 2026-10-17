@@ -5,6 +5,7 @@ robot_patrol:
     map_frame: "map"
     base_frame: "base_link"
     point_timeout_sec: 300.0
+    cancel_confirm_timeout_sec: 2.0
     settle_timeout_sec: 10.0
     settle_linear_threshold: 0.03
     settle_angular_threshold: 0.05
@@ -19,3 +20,24 @@ robot_patrol:
     dwell_resume_yaw_tolerance_rad: 0.35
     min_dispatch_interval_sec: 0.5
     status_period_sec: 1.0
+    executor_heartbeat_period_sec: 0.2
+    teleop_topic: "/cmd_vel_teleop"
+
+patrol_guard:
+  ros__parameters:
+    publish_period_sec: 0.05
+    executor_timeout_sec: 1.5
+    operator_timeout_sec: 1.5
+    startup_grace_sec: 1.0
+    odom_timeout_sec: 1.0
+    stop_linear_threshold: 0.03
+    stop_angular_threshold: 0.05
+    require_operator_heartbeat: true
+    require_mux_interlock: true
+    mux_timeout_sec: 3.0
+    mux_diagnostics_topic: "/diagnostics"
+    nav2_action_name: "/navigate_to_pose"
+    stale_goal_cancel_timeout_sec: 3.0
+    stale_goal_service_timeout_sec: 2.0
+    startup_nav_goal_quiet_sec: 2.0
+    unexpected_nav_goal_grace_sec: 0.75

@@ -18,6 +18,7 @@
 #include <QCloseEvent>
 #include <QComboBox>
 #include <QDateTime>
+#include <QElapsedTimer>
 #include <QDesktopServices>
 #include <QDir>
 #include <QDoubleSpinBox>
@@ -70,6 +71,9 @@ MainWindow::MainWindow(const DesktopConfig &config, bool offline, QWidget *paren
   process_ = new ProcessManager(config, this);
   saver_ = new MapSaver(config, ros_, this);
   patrolClient_ = new PatrolClient(this);
+  closeSafetyTimer_ = new QTimer(this);
+  closeSafetyTimer_->setInterval(200);
+  connect(closeSafetyTimer_, &QTimer::timeout, this, &MainWindow::pollCloseAfterSafetyStop);
   setupUi();
   connect(controller_, &LocalController::message, this, &MainWindow::log);
   connect(business_, &BusinessClient::message, this, &MainWindow::log);
@@ -78,10 +82,21 @@ MainWindow::MainWindow(const DesktopConfig &config, bool offline, QWidget *paren
   connect(saver_, &MapSaver::saved, this, [this](bool ok, const QString &text) { log((ok ? "保存成功：" : "保存未完成：") + text); });
   connect(saver_, &MapSaver::busyChanged, this, [this] { updateControls(); });
   connect(process_, &ProcessManager::output, this, &MainWindow::log);
-  connect(process_, &ProcessManager::runningChanged, this, [this] { updateControls(); });
-  connect(process_, &ProcessManager::finished, this, [this](int code) { log("本界面启动的会话已退出，退出码：" + QString::number(code)); });
+  connect(process_, &ProcessManager::runningChanged, this, [this](bool running) {
+    if (!running) sessionPatrolInterlock_ = false;
+    updateControls();
+  });
+  connect(process_, &ProcessManager::finished, this, [this](int code) {
+    sessionPatrolInterlock_ = false;
+    log("本界面启动的会话已退出，退出码：" + QString::number(code));
+    updateControls();
+  });
   connect(controller_, &LocalController::controlChanged, this, [this](bool yes) { QSignalBlocker block(enableControl_); enableControl_->setChecked(yes); updateControls(); });
   connect(controller_, &LocalController::manualChanged, this, [this](bool ready) { take_->setText(ready ? "手动已接管" : "手动接管（先取消导航）"); updateControls(); });
+  connect(patrolClient_, &PatrolClient::statusChanged, this, [this] {
+    syncPatrolState();
+    updateControls();
+  });
   connect(ros_, &RosAdapter::navigationEvent, this, [this](const QString &text) { lastNavigationEvent_ = text; navState_->setText("本地 Nav2：" + text); log(text); });
   connect(ros_, &RosAdapter::snapshot, this, &MainWindow::updateSnapshot);
   connect(ros_, &RosAdapter::goalRequested, this, &MainWindow::sendGoal);
@@ -150,8 +165,20 @@ void MainWindow::setupUi() {
   auto *goal = tools->addAction(QIcon(":/images/goal.svg"), "点选目标"); connect(goal, &QAction::triggered, this, [this] { rviz_->selectTool("rviz_default_plugins/SetGoal"); });
   tools->addSeparator();
   enableControl_ = new QCheckBox("启用操作"); enableControl_->setObjectName("enableControl"); tools->addWidget(enableControl_);
-  connect(enableControl_, &QCheckBox::toggled, this, [this](bool yes) { controller_->setControlEnabled(yes); updateControls(); });
-  auto *cancel = new QPushButton("取消导航"); cancel->setProperty("motion", true); tools->addWidget(cancel); writeButtons_ << cancel; connect(cancel, &QPushButton::clicked, controller_, &LocalController::cancelNavigation);
+  connect(enableControl_, &QCheckBox::toggled, this, [this](bool yes) {
+    if (patrolClient_) patrolClient_->setOperatorAuthorized(yes);
+    if (!yes) cancelPatrolRun(QStringLiteral("关闭操作许可"));
+    controller_->setControlEnabled(yes);
+    updateControls();
+  });
+  auto *cancel = new QPushButton("取消导航"); cancel->setProperty("motion", true); tools->addWidget(cancel); writeButtons_ << cancel;
+  connect(cancel, &QPushButton::clicked, this, [this] {
+    if (patrolClient_ && patrolClient_->hasActiveOrPendingRun()) {
+      cancelPatrolRun(QStringLiteral("取消导航"));
+      return;
+    }
+    controller_->cancelNavigation();
+  });
   auto *emergency = new QPushButton("急停"); emergency->setObjectName("emergencyStop"); emergency->setStyleSheet("background:#c93434;color:white;font-weight:bold;padding:8px 18px;"); tools->addWidget(emergency);
   emergency->setEnabled(!offline_); connect(emergency, &QPushButton::clicked, controller_, &LocalController::emergencyStop);
 
@@ -173,15 +200,23 @@ void MainWindow::setupUi() {
   goalX_ = number(nav, -100000, 100000, 0, 3); goalY_ = number(nav, -100000, 100000, 0, 3); goalYaw_ = number(nav, -180, 180, 0, 1);
   goalX_->setObjectName("goalX"); goalY_->setObjectName("goalY"); goalYaw_->setObjectName("goalYaw");
   navForm->addRow("X (m)", goalX_); navForm->addRow("Y (m)", goalY_); navForm->addRow("朝向 (°)", goalYaw_);
-  auto *send = new QPushButton("发送导航目标"); send->setObjectName("sendGoal"); navForm->addRow(send); writeButtons_ << send;
-  send->setProperty("motion", true);
-  connect(send, &QPushButton::clicked, this, [this] { sendGoal(goalX_->value(), goalY_->value(), goalYaw_->value()*pi/180.); });
+  sendGoalButton_ = new QPushButton("发送导航目标"); sendGoalButton_->setObjectName("sendGoal"); navForm->addRow(sendGoalButton_); writeButtons_ << sendGoalButton_;
+  sendGoalButton_->setProperty("motion", true);
+  sendGoalButton_->setToolTip("启用路线巡航联锁的会话只允许由巡航执行器发送 Nav2 目标");
+  connect(sendGoalButton_, &QPushButton::clicked, this, [this] { sendGoal(goalX_->value(), goalY_->value(), goalYaw_->value()*pi/180.); });
   auto *relocate = new QPushButton("设置初始位姿"); navForm->addRow(relocate); writeButtons_ << relocate;
   relocate->setObjectName("setInitialPose");
   connect(relocate, &QPushButton::clicked, this, [this] { sendInitialPose(goalX_->value(), goalY_->value(), goalYaw_->value()*pi/180.); });
   left->addWidget(nav);
   auto *manual = new QGroupBox("手动行驶 · 按住运动，松开停止"); auto *manualLayout = new QVBoxLayout(manual);
-  take_ = button("手动接管（先取消导航）", manualLayout); take_->setObjectName("takeManual"); connect(take_, &QPushButton::clicked, controller_, &LocalController::takeManualControl);
+  take_ = button("手动接管（先取消导航）", manualLayout); take_->setObjectName("takeManual");
+  connect(take_, &QPushButton::clicked, this, [this] {
+    if (patrolClient_ && patrolClient_->hasActiveOrPendingRun()) {
+      cancelPatrolRun(QStringLiteral("手动接管"));
+      log("已冻结巡航并请求取消；等待旧目标终止和车辆停稳后才允许手动行驶");
+    }
+    controller_->takeManualControl();
+  });
   unlock_ = button("解除急停（保持静止）", manualLayout); unlock_->setObjectName("releaseStop"); connect(unlock_, &QPushButton::clicked, controller_, &LocalController::releaseStop);
   auto *limits = new QFormLayout; speed_ = number(manual, .05, config_.maxLinear, .15); speed_->setSingleStep(.05); turn_ = number(manual, .05, config_.maxAngular, .25); turn_->setSingleStep(.05);
   limits->addRow("速度 (m/s)", speed_); limits->addRow("角速度 (rad/s)", turn_); manualLayout->addLayout(limits);
@@ -200,11 +235,21 @@ void MainWindow::setupUi() {
   connect(navigationYaml_, &QLineEdit::textChanged, this, [this] { refreshEditorNavigationFeedback(); });
   connect(mapPrefix_, &QLineEdit::textChanged, this, [this] { refreshEditorNavigationFeedback(); });
   sensors_ = new QCheckBox("启动雷达 / IMU"); sensors_->setChecked(true); chassis_ = new QCheckBox("启动底盘驱动"); bridge_ = new QCheckBox("启用底盘控制桥"); run->addWidget(sensors_); run->addWidget(chassis_); run->addWidget(bridge_);
+  patrolInterlock_ = new QCheckBox("启用路线巡航联锁（同时启动 patrol_node / patrol_guard）");
+  patrolInterlock_->setObjectName("enablePatrolInterlock");
+  patrolInterlock_->setToolTip("仅需要多点路线巡航时勾选；该会话禁用单点 Nav2 目标，手动驾驶不受影响。关闭时使用普通 twist_mux，单点导航和手动驾驶不依赖巡航服务");
+  run->addWidget(patrolInterlock_);
   odom_ = new QComboBox; odom_->addItems({"lio", "wheel", "wheel_imu"}); run->addWidget(odom_);
   start_ = button("启动所选流程（不另起 RViz）", run); connect(start_, &QPushButton::clicked, this, &MainWindow::startSession);
   save_ = button("保存当前建图产物", run); connect(save_, &QPushButton::clicked, this, [this] { if (allowed()) saver_->save(profile(), mapPrefix_->text().trimmed()); });
   save_->setToolTip("保存建图状态及导航 YAML/PGM；FAST-LIO 保存 PCD 后自动进行二维切片");
-  stop_ = button("停止本界面启动的流程", run); connect(stop_, &QPushButton::clicked, this, [this] { if (saver_->busy()) return; controller_->emergencyStop(); process_->stop(); });
+  stop_ = button("停止本界面启动的流程", run);
+  connect(stop_, &QPushButton::clicked, this, [this] {
+    if (saver_->busy()) return;
+    cancelPatrolRun(QStringLiteral("停止本界面流程"));
+    controller_->emergencyStop();
+    process_->stop();
+  });
   connect(manage_, &QCheckBox::toggled, this, [this] { updateControls(); });
   left->addWidget(runtime); left->addStretch();
   auto *controlArea = addDock("控制", control, ads::LeftDockWidgetArea);
@@ -274,10 +319,13 @@ void MainWindow::updateControls() {
   enableControl_->setEnabled(!offline_);
   cameraPanel_->setControlEnabled(ok);
   const bool motion = ok && controller_->controlEnabled();
+  const bool patrolRunning = patrolClient_ && patrolClient_->hasActiveOrPendingRun();
   for (auto *b : writeButtons_) { const auto cap = b->property("capability").toString(); b->setEnabled(ok && (!b->property("motion").toBool() || motion) && (cap.isEmpty() || ros_->capabilities().contains(cap))); }
-  take_->setEnabled(motion); unlock_->setEnabled(motion && !state_.navigationActive && (!state_.estopValid || state_.estopped));
-  const bool manual = motion && controller_->manualReady() && state_.estopValid && !state_.estopped && state_.navigationKnown && !state_.navigationActive;
+  take_->setEnabled(motion); unlock_->setEnabled(motion && !state_.navigationActive && !patrolRunning && (!state_.estopValid || state_.estopped));
+  const bool manual = motion && controller_->manualReady() && !patrolRunning && state_.estopValid && !state_.estopped && state_.navigationKnown && !state_.navigationActive;
   for (auto *b : directionButtons_) b->setEnabled(manual);
+  if (sendGoalButton_ && (sessionPatrolInterlock_ || state_.patrolInterlockValid))
+    sendGoalButton_->setEnabled(false);
   manage_->setEnabled(!offline_ && !running && !busy);
   start_->setEnabled(!offline_ && manage_->isChecked() && !running && !busy);
   stop_->setEnabled(!offline_ && running && !busy);
@@ -287,9 +335,38 @@ void MainWindow::updateControls() {
   if (mapEditorAction_) mapEditorAction_->setEnabled(!busy);
   if (patrolAction_) patrolAction_->setEnabled(patrolClient_ && patrolClient_->available());
   sensors_->setEnabled(!running); chassis_->setEnabled(!running); bridge_->setEnabled(!running); odom_->setEnabled(!running);
+  if (patrolInterlock_) patrolInterlock_->setEnabled(!offline_ && !running && profile().navigation && !profile().mapping);
 }
+void MainWindow::syncPatrolState() {
+  if (!controller_) return;
+  const auto patrol = patrolClient_ ? patrolClient_->status() : PatrolStatusInfo();
+  const bool patrolActive = patrolClient_ && patrolClient_->hasActiveOrPendingRun();
+  controller_->setPatrolActive(patrolActive);
+  if (patrolActive) {
+    navState_->setText(QString("本地巡航：%1 · %2 · 圈 %3/%4 · 点 %5/%6")
+                           .arg(PatrolClient::stateName(patrol.state),
+                                patrol.message.isEmpty() ? QStringLiteral("执行中") : patrol.message)
+                           .arg(patrol.loopIndex)
+                           .arg(patrol.totalLoops == 0 ? QStringLiteral("∞")
+                                                       : QString::number(patrol.totalLoops))
+                           .arg(patrol.stepIndex).arg(patrol.stepCount));
+  }
+}
+
+bool MainWindow::cancelPatrolRun(const QString &reason) {
+  if (!patrolClient_ || !patrolClient_->available()) return false;
+  if (!patrolClient_->hasActiveOrPendingRun()) return false;
+  const auto status = patrolClient_->status();
+  patrolClient_->cancelRunRoute();
+  if (!status.runId.isEmpty()) patrolClient_->controlRun(3, status.runId);
+  log(reason + "：已向本地巡航任务发送取消请求，等待停车确认");
+  return true;
+}
+
 void MainWindow::updateSnapshot(const RobotSnapshot &s) {
-  state_ = s; controller_->updateFeedback(s.estopped, s.navigationActive, s.navigationKnown, s.estopValid);
+  state_ = s;
+  controller_->setMotionState(s.speedValid, s.speed, s.yawRate);
+  controller_->updateFeedback(s.estopped, s.navigationActive, s.navigationKnown, s.estopValid);
   pose_->setText(s.poseValid ? QString("%1: x=%2 m  y=%3 m  朝向=%4°").arg(s.frame).arg(s.x, 0, 'f', 3).arg(s.y, 0, 'f', 3).arg(s.yaw*180./pi, 0, 'f', 1) : s.frame + " 位姿未接入 / 已过期");
   speedStack_->setCurrentIndex(s.speedValid ? 1 : 0);
   if (s.speedValid) dashboard_->set_speed(qRound(std::abs(s.speed)*100.));
@@ -302,6 +379,14 @@ void MainWindow::updateSnapshot(const RobotSnapshot &s) {
   updateControls();
 }
 void MainWindow::sendGoal(double x, double y, double yaw) {
+  if (sessionPatrolInterlock_ || state_.patrolInterlockValid) {
+    log("目标未发送：当前后端启用了路线巡航联锁，单点 Nav2 目标会绕过巡航执行器所有权；请使用路线巡航，或关闭联锁重启后再发送");
+    return;
+  }
+  if (patrolClient_ && patrolClient_->hasActiveOrPendingRun()) {
+    log("目标未发送：本地巡航任务或启动请求仍活动，请先取消整条巡航任务");
+    return;
+  }
   if (!offline_ && profile().navigation && ros_->previewGoal(x, y, yaw)) {
     goalX_->setValue(x); goalY_->setValue(y); goalYaw_->setValue(yaw*180./pi);
   }
@@ -309,6 +394,10 @@ void MainWindow::sendGoal(double x, double y, double yaw) {
   if (controller_->navigate(x, y, yaw)) log(QString("导航请求已发送：(%1, %2), %3°").arg(x).arg(y).arg(yaw*180./pi));
 }
 void MainWindow::sendInitialPose(double x, double y, double yaw) {
+  if (patrolClient_ && patrolClient_->hasActiveOrPendingRun()) {
+    log("初始位姿未发送：请先取消本地巡航任务并确认停车");
+    return;
+  }
   if (!allowed() || !profile().navigation) { log("初始位姿未发送：请启用操作并选择定位导航模式"); return; }
   if (profile().backend == "cartographer") { log("当前 Cartographer 纯定位入口不支持 /initialpose，请按原流程在建图起点启动"); return; }
   if (state_.navigationActive || (state_.speedValid && (std::abs(state_.speed) > .01 || std::abs(state_.yawRate) > .02))) { log("请先停止车辆并取消导航，再设置初始位姿"); return; }
@@ -329,8 +418,13 @@ void MainWindow::startSession() {
   }
   const auto conflicts = ros_->conflictingNodes();
   if (!conflicts.isEmpty()) { log("已有机器人管线，请使用连接模式；如需重启，先从原启动入口停止：" + conflicts.join(", ")); return; }
-  const QStringList args = ProcessManager::launchArguments(config_, profile(), prefix, sensors_->isChecked(), chassis_->isChecked(), bridge_->isChecked(), odom_->currentText(), navigationYaml);
-  log("启动本机会话：" + args.join(' ')); process_->start(args);
+  const bool enablePatrol = patrolInterlock_ && patrolInterlock_->isChecked();
+  const QStringList args = ProcessManager::launchArguments(config_, profile(), prefix, sensors_->isChecked(), chassis_->isChecked(), bridge_->isChecked(), odom_->currentText(), navigationYaml, enablePatrol);
+  log("启动本机会话：" + args.join(' '));
+  if (enablePatrol) log("已启用路线巡航联锁：本次 launch 将同时启动 patrol_node、patrol_guard 和巡逻 mux 锁；单点 Nav2 目标将被禁用");
+  const bool started = process_->start(args);
+  if (started) sessionPatrolInterlock_ = enablePatrol;
+  updateControls();
   if (profile().backend == "fastlio" && profile().navigation) log("FAST-LIO 定位需先点选车辆当前位置与朝向；ICP 成功后才会建立 map TF，Nav2 随后继续激活");
   if (profile().id == "slam_navigation") log("AMCL 已启动：请启用操作并点选车辆实际位置与朝向；收到激光后建立 map TF，Nav2 随后继续激活");
   log("车辆操作使用本地 ROS2；首次行驶前需明确点击解除急停");
@@ -415,7 +509,7 @@ void MainWindow::openPatrolPage() {
   dialog->resize(1180, 760);
   auto *layout = new QVBoxLayout(dialog);
   layout->setContentsMargins(0, 0, 0, 0);
-  auto startPermission = [this](QString *reason) {
+  auto basePermission = [this](QString *reason) {
     const auto deny = [reason](const QString &text) {
       if (reason) *reason = text;
       return false;
@@ -423,15 +517,33 @@ void MainWindow::openPatrolPage() {
     if (offline_) return deny(QStringLiteral("离线模式禁止发送巡航目标"));
     if (!profile().navigation) return deny(QStringLiteral("请先切换到定位导航模式"));
     if (!allowed()) return deny(QStringLiteral("请先启用操作"));
+    if (controller_ && controller_->manualReady())
+      return deny(QStringLiteral("请先结束手动接管并确认车辆停稳"));
     if (!state_.poseValid || state_.frame != QStringLiteral("map"))
       return deny(QStringLiteral("等待有效的 map 定位"));
     if (!state_.navigationAvailable) return deny(QStringLiteral("Nav2 尚未就绪"));
     if (!state_.estopValid) return deny(QStringLiteral("急停状态未知或已过期"));
     if (state_.estopped) return deny(QStringLiteral("请先明确解除急停"));
+    if (!state_.guardValid) return deny(QStringLiteral("patrol guard 心跳未知或已过期"));
+    if (!state_.guardReady) return deny(QStringLiteral("patrol guard 联锁未就绪，请检查心跳或复位联锁"));
     return true;
+  };
+  auto startPermission = [this, basePermission](QString *reason) {
+    if (!basePermission(reason)) return false;
+    if (patrolClient_ && patrolClient_->hasActiveOrPendingRun()) {
+      if (reason) *reason = QStringLiteral("已有巡航任务或启动请求正在处理");
+      return false;
+    }
+    return true;
+  };
+  auto resumePermission = [basePermission](QString *reason) {
+    // Resuming an already-paused run must not be rejected merely because
+    // that same run is still active and owns the single execution slot.
+    return basePermission(reason);
   };
   patrolPage_ = new PatrolPage(patrolClient_, navYaml, profile().backend,
                                localizationFile, profile().name, offline_, startPermission, dialog);
+  patrolPage_->setResumePermission(resumePermission);
   layout->addWidget(patrolPage_);
   patrolWindow_ = dialog;
   connect(dialog, &QObject::destroyed, this, [this] {
@@ -453,10 +565,46 @@ void MainWindow::showPoints(const QJsonArray &items) {
   }
 }
 void MainWindow::log(const QString &text) { if (logs_) logs_->appendPlainText(QDateTime::currentDateTime().toString("HH:mm:ss ") + text.trimmed()); statusBar()->showMessage(text.trimmed().left(180), 7000); }
+bool MainWindow::patrolRunActive() const {
+  return patrolClient_ && patrolClient_->hasActiveOrPendingRun();
+}
+bool MainWindow::vehicleStopConfirmed() const {
+  return state_.speedValid && std::abs(state_.speed) <= 0.03 &&
+         std::abs(state_.yawRate) <= 0.05;
+}
+void MainWindow::pollCloseAfterSafetyStop() {
+  if (!closeAfterStop_) return;
+  if (patrolRunActive() || state_.navigationActive) return;
+  if (vehicleStopConfirmed() || closeSafetyAge_.elapsed() >= 10000) {
+    closeAfterStop_ = false;
+    closeSafetyTimer_->stop();
+    close();
+  }
+}
 void MainWindow::closeEvent(QCloseEvent *event) {
   if (process_->running() || saver_->busy()) { log("请先完成地图保存，并停止本界面启动的会话后退出"); event->ignore(); return; }
   if (mapEditor_ && !mapEditor_->maybeSave()) { event->ignore(); return; }
-  controller_->stopManual(); event->accept();
+  controller_->stopManual();
+  const bool needsSafetyWait = patrolRunActive() || state_.navigationActive ||
+                               (state_.speedValid && !vehicleStopConfirmed());
+  if (needsSafetyWait || closeAfterStop_) {
+    if (!closeAfterStop_) {
+      closeAfterStop_ = true;
+      cancelPatrolRun(QStringLiteral("关闭桌面控制端"));
+      controller_->emergencyStop();
+      if (patrolClient_) patrolClient_->setOperatorAuthorized(false);
+      closeSafetyAge_.start();
+      closeSafetyTimer_->start();
+      log("正在取消巡航并等待车辆停稳，完成后窗口会自动关闭");
+    }
+    if (patrolRunActive() || state_.navigationActive) { event->ignore(); return; }
+    if (!vehicleStopConfirmed() && closeSafetyAge_.elapsed() < 10000) {
+      event->ignore(); return;
+    }
+    closeAfterStop_ = false;
+    closeSafetyTimer_->stop();
+  }
+  event->accept();
 }
 void MainWindow::changeEvent(QEvent *event) { if (event->type() == QEvent::ActivationChange && !isActiveWindow() && controller_) controller_->stopManual(); QMainWindow::changeEvent(event); }
 bool MainWindow::saveScreenshot(const QString &path) {

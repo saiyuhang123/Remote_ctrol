@@ -26,6 +26,7 @@ public:
 
   PatrolClient *client() const { return client_; }
   QString activeMapId() const { return activeMapId_; }
+  void setResumePermission(std::function<bool(QString *)> permission);
 
 private slots:
   void onMapsChanged();
@@ -78,6 +79,7 @@ private:
   QString profileName_;
   bool offline_ = false;
   std::function<bool(QString *)> startPermission_;
+  std::function<bool(QString *)> resumePermission_;
   QString activeMapId_;
   QString currentRouteId_;
   quint64 currentRouteRevision_ = 0;

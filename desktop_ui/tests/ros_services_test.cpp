@@ -7,6 +7,7 @@
 #include <QTemporaryDir>
 #include <QTest>
 #include <rclcpp/rclcpp.hpp>
+#include <std_msgs/msg/bool.hpp>
 #include <std_srvs/srv/trigger.hpp>
 #include <atomic>
 #include <thread>
@@ -49,6 +50,9 @@ private slots:
     QVERIFY(amcl.name.contains("AMCL")); QCOMPARE(amcl.backend, QString("slam_toolbox"));
     auto args = ProcessManager::launchArguments(config(), amcl, "/tmp/slam_map", true, false, false, "lio");
     QVERIFY(args.contains("amcl_localization.launch.py")); QVERIFY(args.contains("map:=/tmp/slam_map.yaml"));
+    QVERIFY(!args.contains("enable_patrol:=true"));
+    args = ProcessManager::launchArguments(config(), amcl, "/tmp/slam_map", true, false, false, "lio", {}, true);
+    QVERIFY(args.contains("enable_patrol:=true"));
     QVERIFY(!args.contains("map_file:=/tmp/slam_map"));
     args = ProcessManager::launchArguments(config(), desktopProfiles().at(4), "/tmp/carto", true, false, false, "lio");
     QVERIFY(args.contains("map_file:=/tmp/carto"));
@@ -59,12 +63,22 @@ private slots:
     const auto fastlioNavigation = ProcessManager::launchArguments(
         config(), desktopProfiles().at(0), "/tmp/fastlio/source", true, false, false, "wheel_imu", edited);
     QVERIFY(fastlioNavigation.contains("pcd_map:=/tmp/fastlio/source.pcd"));
+    QVERIFY(!fastlioNavigation.contains("enable_patrol:=true"));
+    const auto fastlioPatrol = ProcessManager::launchArguments(
+        config(), desktopProfiles().at(0), "/tmp/fastlio/source", true, false, false,
+        "wheel_imu", edited, true);
+    QVERIFY(fastlioPatrol.contains("enable_patrol:=true"));
     QVERIFY(fastlioNavigation.contains("map:=" + edited));
     QVERIFY(!fastlioNavigation.contains("map:=/tmp/fastlio/source.yaml"));
 
     const auto cartographerNavigation = ProcessManager::launchArguments(
         config(), desktopProfiles().at(4), "/tmp/cartographer/source", true, false, false, "lio", edited);
     QVERIFY(cartographerNavigation.contains("map_file:=/tmp/cartographer/source"));
+    QVERIFY(!cartographerNavigation.contains("enable_patrol:=true"));
+    const auto cartographerPatrol = ProcessManager::launchArguments(
+        config(), desktopProfiles().at(4), "/tmp/cartographer/source", true, false, false,
+        "lio", edited, true);
+    QVERIFY(cartographerPatrol.contains("enable_patrol:=true"));
     QVERIFY(cartographerNavigation.contains("map:=" + edited));
 
     const auto amclOverride = ProcessManager::launchArguments(
@@ -73,10 +87,48 @@ private slots:
     QVERIFY(!amclOverride.contains("map_file:="));
 
     const auto mapping = ProcessManager::launchArguments(
-        config(), desktopProfiles().at(3), "/tmp/slam/source", true, false, false, "lio", edited);
+        config(), desktopProfiles().at(3), "/tmp/slam/source", true, false, false, "lio", edited, true);
     QVERIFY(mapping.contains("slam_2d_mapping.launch.py"));
     QVERIFY(!mapping.contains("map:=" + edited));
+    QVERIFY(!mapping.contains("enable_patrol:=true"));
   }
+  void patrolCompanionNodesAreDetectedAsLaunchConflicts() {
+    auto patrol = std::make_shared<rclcpp::Node>("robot_patrol");
+    auto guard = std::make_shared<rclcpp::Node>("patrol_guard");
+    rclcpp::executors::SingleThreadedExecutor executor;
+    executor.add_node(patrol);
+    executor.add_node(guard);
+    std::thread spinner([&] { executor.spin(); });
+    RosAdapter adapter(config());
+    QStringList conflicts;
+    const bool found = QTest::qWaitFor([&] {
+      conflicts = adapter.conflictingNodes();
+      return conflicts.join(',').contains("robot_patrol") &&
+             conflicts.join(',').contains("patrol_guard");
+    }, 3000);
+    executor.cancel();
+    spinner.join();
+    QVERIFY2(found, qPrintable(conflicts.join(',')));
+  }
+
+  void externalPatrolInterlockIsDetectedFromBackendTopics() {
+    FixtureExecutor fixture;
+    auto lock = fixture.node->create_publisher<std_msgs::msg::Bool>("/patrol/stop_lock", 10);
+    auto timer = fixture.node->create_wall_timer(std::chrono::milliseconds(20), [lock] {
+      std_msgs::msg::Bool message;
+      message.data = false;
+      lock->publish(message);
+    });
+    Q_UNUSED(timer);
+    fixture.start();
+    RosAdapter adapter(config());
+    std::atomic_bool interlockDetected{false};
+    connect(&adapter, &RosAdapter::snapshot, this, [&](const RobotSnapshot &state) {
+      if (state.patrolInterlockValid) interlockDetected.store(true);
+    });
+    QTRY_VERIFY_WITH_TIMEOUT(interlockDetected.load(), 3000);
+  }
+
   void launchPreservesLiteralArgumentsAndStopsOnlyOwnedProcess() {
     auto c = config(); c.projectRoot = QDir(DESKTOP_UI_SOURCE_DIR).absoluteFilePath("..");
     if (!QFileInfo::exists(c.projectRoot + "/ros2_ws/install/setup.bash")) QSKIP("Project ROS overlay is required for local launch tests");

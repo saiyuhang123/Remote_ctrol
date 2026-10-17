@@ -33,7 +33,9 @@ class Nav2Driver:
                  settle_linear: float = 0.03, settle_angular: float = 0.05,
                  settle_duration: float = 0.8, feedback_max_age: float = 1.5,
                  tf_max_age: float = 1.5, resume_position_tolerance: float = 0.5,
-                 resume_yaw_tolerance: float = 0.35, callback_group=None):
+                 resume_yaw_tolerance: float = 0.35,
+                 cancel_confirm_timeout: float = 2.0, callback_group=None,
+                 goal_update_callback=None):
         self.node = node
         self.action_name = action_name
         self.map_frame = map_frame
@@ -47,12 +49,35 @@ class Nav2Driver:
         self.tf_max_age = float(tf_max_age)
         self.resume_position_tolerance = float(resume_position_tolerance)
         self.resume_yaw_tolerance = float(resume_yaw_tolerance)
+        self.cancel_confirm_timeout = max(0.2, float(cancel_confirm_timeout))
         self.client = ActionClient(node, NavigateToPose, action_name, callback_group=callback_group)
         self._current_handle = None
         self._handle_lock = threading.Lock()
         self.stop_unconfirmed = False
         self.last_error = ""
         self.last_goal_id = ""
+        self._goal_update_callback = goal_update_callback
+
+    @property
+    def current_nav_goal_id(self) -> str:
+        """Return the exact UUID Nav2 assigned to the active child goal."""
+        with self._handle_lock:
+            handle = self._current_handle
+        if handle is None:
+            return ""
+        try:
+            return bytes(handle.goal_id.uuid).hex()
+        except Exception:  # noqa: BLE001 - teardown race
+            return ""
+
+    def _notify_goal_changed(self) -> None:
+        callback = self._goal_update_callback
+        if callback is None:
+            return
+        try:
+            callback()
+        except Exception:  # noqa: BLE001 - liveness publication is best effort
+            pass
 
     def cancel_current(self) -> None:
         with self._handle_lock:
@@ -72,20 +97,24 @@ class Nav2Driver:
         with self._handle_lock:
             self._current_handle = handle
             self.stop_unconfirmed = True
+        self._notify_goal_changed()
 
         def clear(_future):
             with self._handle_lock:
                 if self._current_handle is handle:
                     self._current_handle = None
                 self.stop_unconfirmed = False
+            self._notify_goal_changed()
 
         result_future.add_done_callback(clear)
 
     def _wait_future(self, future, timeout: float, flags, status_cb,
-                     on_timeout: Callable[[], None] | None = None):
+                     on_timeout: Callable[[], None] | None = None,
+                     cancel_timeout: float | None = None):
         event = threading.Event()
         future.add_done_callback(lambda _future: event.set())
         deadline = time.monotonic() + timeout
+        cancel_deadline = None
         while True:
             if event.wait(0.05):
                 try:
@@ -93,7 +122,20 @@ class Nav2Driver:
                 except Exception as error:  # noqa: BLE001 - navigation boundary
                     self.last_error = str(error)
                     return None
-            if time.monotonic() >= deadline:
+            now = time.monotonic()
+            # A cancel/pause request gets an independent confirmation deadline.
+            # Waiting for the full per-point execution timeout would leave the
+            # vehicle moving long after the operator requested a stop.
+            if cancel_timeout is not None and (flags.cancel_requested or
+                                               flags.pause_requested):
+                if cancel_deadline is None:
+                    cancel_deadline = now + cancel_timeout
+                if now >= cancel_deadline:
+                    if on_timeout:
+                        on_timeout()
+                    self.last_error = "CANCEL_UNCONFIRMED"
+                    return None
+            if now >= deadline:
                 if on_timeout:
                     on_timeout()
                 self.last_error = "TIMEOUT"
@@ -136,8 +178,9 @@ class Nav2Driver:
                       message="导航中")
 
         send_future = self.client.send_goal_async(goal, feedback_callback=feedback_callback)
-        goal_handle = self._wait_future(send_future, min(15.0, self.point_timeout),
-                                        flags, status_cb)
+        goal_handle = self._wait_future(
+            send_future, min(15.0, self.point_timeout), flags, status_cb,
+            cancel_timeout=self.cancel_confirm_timeout)
         if goal_handle is None:
             # Never leave a late acceptance unsupervised. Keep the node's
             # stop-unconfirmed interlock until the late future is resolved.
@@ -157,13 +200,16 @@ class Nav2Driver:
         unconfirmed = False
         with self._handle_lock:
             self._current_handle = goal_handle
+        self._notify_goal_changed()
         try:
             if flags.cancel_requested or flags.pause_requested:
                 self.last_error = "CANCELED"
                 goal_handle.cancel_goal_async()
             result_future = goal_handle.get_result_async()
-            result = self._wait_future(result_future, self.point_timeout, flags, status_cb,
-                                       on_timeout=self.cancel_current)
+            result = self._wait_future(
+                result_future, self.point_timeout, flags, status_cb,
+                on_timeout=self.cancel_current,
+                cancel_timeout=self.cancel_confirm_timeout)
             if result is None:
                 # The result future did not reach a terminal state. Keep the
                 # task failed/cancel-unconfirmed rather than pretending the
@@ -190,6 +236,7 @@ class Nav2Driver:
             if not unconfirmed:
                 with self._handle_lock:
                     self._current_handle = None
+                self._notify_goal_changed()
 
     def _current_pose(self) -> tuple[float, float, float, int] | None:
         try:

@@ -14,6 +14,8 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/PatrolRoute.msg"
   "msg/PatrolStatus.msg"
   "msg/RunRecord.msg"
+  "msg/OperatorHeartbeat.msg"
+  "msg/ExecutorHeartbeat.msg"
   "srv/ListMaps.srv"
   "srv/RegisterMap.srv"
   "srv/SetActiveMap.srv"
@@ -26,6 +28,7 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "srv/DeleteRoute.srv"
   "srv/ControlRun.srv"
   "srv/GetRuns.srv"
+  "srv/ResetInterlock.srv"
   "action/RunRoute.action"
   DEPENDENCIES builtin_interfaces geometry_msgs std_msgs
 )

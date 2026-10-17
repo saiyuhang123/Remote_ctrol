@@ -1,0 +1,6 @@
+string request_id
+string session_id
+---
+bool success
+string message
+bool interlocked

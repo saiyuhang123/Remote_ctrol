@@ -73,6 +73,9 @@ public:
   void refreshRuns(const QString &mapId = QString(), const QString &routeId = QString());
   void runRoute(const QString &routeId, const QString &mapId,
                 quint64 routeRevision, quint64 mapRevision, quint32 loopCount);
+  void cancelRunRoute();
+  bool hasActiveOrPendingRun() const;
+  void setOperatorAuthorized(bool enabled);
   void controlRun(quint8 command, const QString &runId);
 
   QVector<PatrolMapInfo> maps() const;

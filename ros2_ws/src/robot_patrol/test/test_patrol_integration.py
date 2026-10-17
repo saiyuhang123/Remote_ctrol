@@ -6,6 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 import rclpy
+from diagnostic_msgs.msg import DiagnosticArray, DiagnosticStatus, KeyValue
 from rclpy.action import ActionServer
 from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node
@@ -15,15 +16,16 @@ from nav2_msgs.action import NavigateToPose
 from nav_msgs.msg import OccupancyGrid, Odometry
 from std_msgs.msg import Bool
 from tf2_ros import TransformBroadcaster
-from geometry_msgs.msg import TransformStamped
+from geometry_msgs.msg import TransformStamped, Twist
 
 from patrol_interfaces.action import RunRoute
-from patrol_interfaces.msg import PatrolStatus, RouteStep
+from patrol_interfaces.msg import ExecutorHeartbeat, OperatorHeartbeat, PatrolStatus, RouteStep
 from patrol_interfaces.srv import (
     ControlRun, GetRuns, ListMaps, RegisterMap, SaveCurrentPoint, SetActiveMap,
     UpsertPoint, UpsertRoute,
 )
 from robot_patrol.engine import STATE_CANCELED, STATE_DWELLING, STATE_PAUSED
+from robot_patrol.guard import PatrolGuard
 from robot_patrol.map_metadata import read_map_binding
 from robot_patrol.node import PatrolNode
 
@@ -36,17 +38,25 @@ pytestmark = pytest.mark.skipif(
 
 class FakeNav(Node):
     def __init__(self, delay_accept=0.0, cancel_accept=True,
-                 execute_duration=0.4, map_publish_limit=None):
+                 execute_duration=0.4, map_publish_limit=None,
+                 honor_cancel=True,
+                 mux_diagnostics_topic="/patrol/test/e2e_diagnostics"):
         super().__init__("fake_nav2")
         self.goals = []
         self.cancel_calls = 0
         self.delay_accept = delay_accept
         self.cancel_accept = cancel_accept
+        self.honor_cancel = honor_cancel
         self.execute_duration = float(execute_duration)
         self.map_publish_limit = map_publish_limit
         self.map_publish_count = 0
         self.map_data = None
         self.guard_ready = True
+        self.publish_guard_ready = True
+        self.publish_operator_heartbeat = False
+        self.operator_session_id = ""
+        self.publish_mux_diagnostics = False
+        self.mux_diagnostics_topic = mux_diagnostics_topic
         self.estop = False
         self.wrong_map = False
         self.tf_age_sec = 0.0
@@ -55,6 +65,10 @@ class FakeNav(Node):
             goal_callback=self.goal_callback, cancel_callback=self.cancel_callback)
         self.odom_pub = self.create_publisher(Odometry, "/odom", 10)
         self.guard_pub = self.create_publisher(Bool, "/patrol/guard_ready", 10)
+        self.operator_pub = self.create_publisher(
+            OperatorHeartbeat, "/patrol/operator_heartbeat", 10)
+        self.diagnostics_pub = self.create_publisher(
+            DiagnosticArray, self.mux_diagnostics_topic, 10)
         self.estop_pub = self.create_publisher(Bool, "/emergency_stop", 10)
         self.map_pub = self.create_publisher(
             OccupancyGrid, "/map",
@@ -70,7 +84,26 @@ class FakeNav(Node):
         odom.header.frame_id = "odom"
         odom.child_frame_id = "base_link"
         self.odom_pub.publish(odom)
-        guard = Bool(); guard.data = self.guard_ready; self.guard_pub.publish(guard)
+        if self.publish_guard_ready:
+            guard = Bool(); guard.data = self.guard_ready; self.guard_pub.publish(guard)
+        if self.publish_operator_heartbeat:
+            heartbeat = OperatorHeartbeat()
+            heartbeat.session_id = self.operator_session_id
+            heartbeat.client_id = "pytest_fake_operator"
+            heartbeat.enabled = True
+            heartbeat.stamp = stamp
+            self.operator_pub.publish(heartbeat)
+        if self.publish_mux_diagnostics:
+            diagnostics = DiagnosticArray()
+            diagnostics.header.stamp = stamp
+            status = DiagnosticStatus()
+            status.name = "twist_mux: Twist mux status"
+            status.message = "ok"
+            status.values.append(KeyValue(
+                key="lock locks.patrol_guard",
+                value="free (listening to /patrol/stop_lock @ 0.500000s with priority #255)"))
+            diagnostics.status.append(status)
+            self.diagnostics_pub.publish(diagnostics)
         estop = Bool(); estop.data = self.estop; self.estop_pub.publish(estop)
         if self.map_publish_limit is None or self.map_publish_count < self.map_publish_limit:
             grid = OccupancyGrid()
@@ -107,7 +140,7 @@ class FakeNav(Node):
         self.goals.append(goal_handle.request.pose)
         deadline = time.monotonic() + self.execute_duration
         while time.monotonic() < deadline:
-            if self.cancel_accept and goal_handle.is_cancel_requested:
+            if self.honor_cancel and goal_handle.is_cancel_requested:
                 goal_handle.canceled()
                 return NavigateToPose.Result()
             time.sleep(0.02)
@@ -588,7 +621,7 @@ def test_static_map_remains_valid_and_raster_content_is_checked(tmp_path):
         rclpy.try_shutdown()
 
 
-def test_resume_rechecks_estop_guard_and_map_before_clearing_pause(tmp_path):
+def test_estop_while_paused_interrupts_run_and_blocks_resume(tmp_path):
     rclpy.init()
     executor = None
     spin_thread = None
@@ -656,33 +689,21 @@ def test_resume_rechecks_estop_guard_and_map_before_clearing_pause(tmp_path):
         assert response.accepted, response.message
         assert wait_status(lambda m: m.state == STATE_PAUSED) is not None
 
-        # ESTOP held: RESUME must not clear the paused flags.
+        # ESTOP is now coordinated with the patrol state machine: it ends the
+        # active run instead of leaving a resumable PAUSED task behind.
         fake.estop = True
-        time.sleep(0.3)
+        result = wait_future(goal_handle.get_result_async(), timeout=8.0)
+        assert result.result.final_state == 12, result.result.message
+        assert result.result.error_code == "INTERRUPTED"
+        assert "急停" in result.result.message, result.result.message
+        assert wait_until(lambda: patrol._active_engine is None, timeout=3.0)
+
         request = ControlRun.Request()
         request.command = ControlRun.Request.RESUME
         request.run_id = run_id
         response = wait_future(control.call_async(request))
-        assert not response.accepted, "RESUME accepted while emergency stop was held"
-        assert "急停" in response.message, response.message
-        engine = patrol._active_engine
-        assert engine is not None and engine.flags.pause_requested
-
-        # Guard not ready: RESUME must still be denied after ESTOP clears.
-        fake.estop = False
-        fake.guard_ready = False
-        time.sleep(0.3)
-        response = wait_future(control.call_async(request))
-        assert not response.accepted, "RESUME accepted while guard was not ready"
-        assert "guard" in response.message.lower(), response.message
-        assert engine.flags.pause_requested
-
-        fake.guard_ready = True
-        time.sleep(0.3)
-        response = wait_future(control.call_async(request))
-        assert response.accepted, response.message
-        result = wait_future(goal_handle.get_result_async(), timeout=12.0)
-        assert result.result.success, result.result.message
+        assert not response.accepted, "RESUME accepted after ESTOP interrupted the run"
+        assert fake.goals, "the first point should have been dispatched"
     finally:
         if executor is not None:
             executor.shutdown()
@@ -762,6 +783,272 @@ def test_pause_during_unconfirmed_acceptance_is_not_resumable(tmp_path):
         request.run_id = run_id
         response = wait_future(control.call_async(request))
         assert not response.accepted, "finished unconfirmed run accepted RESUME"
+    finally:
+        if executor is not None:
+            executor.shutdown()
+        if spin_thread is not None:
+            spin_thread.join(timeout=3.0)
+        if patrol is not None:
+            patrol.destroy_node()
+        if fake is not None:
+            fake.destroy_node()
+        rclpy.try_shutdown()
+
+
+def test_manual_velocity_during_dwell_interrupts_patrol(tmp_path):
+    rclpy.init()
+    executor = None
+    spin_thread = None
+    patrol = None
+    fake = None
+    try:
+        patrol = PatrolNode(parameter_overrides=[
+            Parameter("database_path", value=str(tmp_path / "patrol.sqlite3")),
+            Parameter("settle_timeout_sec", value=1.0),
+            Parameter("settle_duration_sec", value=0.1),
+            Parameter("feedback_max_age_sec", value=2.0),
+            Parameter("tf_max_age_sec", value=2.0),
+            Parameter("point_timeout_sec", value=5.0),
+            Parameter("status_period_sec", value=0.1),
+            Parameter("min_dispatch_interval_sec", value=0.0),
+        ])
+        fake = FakeNav(execute_duration=0.1)
+        executor = MultiThreadedExecutor(num_threads=6)
+        executor.add_node(patrol)
+        executor.add_node(fake)
+        spin_thread = threading.Thread(target=executor.spin, daemon=True)
+        spin_thread.start()
+        time.sleep(0.8)
+
+        mapping, route = direct_route(patrol, tmp_path, dwell=3.0)
+        action_client = rclpy.action.ActionClient(patrol, RunRoute, "/patrol/run_route")
+        assert action_client.wait_for_server(timeout_sec=5.0)
+        goal_handle = wait_future(action_client.send_goal_async(
+            make_run_goal(route, mapping, "manual-takeover")))
+        assert goal_handle.accepted
+        assert wait_until(
+            lambda: patrol._active_engine is not None and
+            patrol._active_engine.status.get("state") == STATE_DWELLING,
+            timeout=5.0,
+        ), "run never reached DWELLING"
+
+        teleop = patrol.create_publisher(Twist, "/cmd_vel_teleop", 10)
+        message = Twist()
+        message.linear.x = 0.2
+        teleop.publish(message)
+
+        result = wait_future(goal_handle.get_result_async(), timeout=8.0)
+        assert result.result.final_state == 12, result.result.message
+        assert result.result.error_code == "INTERRUPTED"
+        assert "手动" in result.result.message, result.result.message
+        assert wait_until(lambda: patrol._active_engine is None, timeout=3.0)
+    finally:
+        if executor is not None:
+            executor.shutdown()
+        if spin_thread is not None:
+            spin_thread.join(timeout=3.0)
+        if patrol is not None:
+            patrol.destroy_node()
+        if fake is not None:
+            fake.destroy_node()
+        rclpy.try_shutdown()
+
+
+def test_guard_loss_during_dwell_interrupts_patrol(tmp_path):
+    rclpy.init()
+    executor = None
+    spin_thread = None
+    patrol = None
+    fake = None
+    try:
+        patrol = PatrolNode(parameter_overrides=[
+            Parameter("database_path", value=str(tmp_path / "patrol.sqlite3")),
+            Parameter("settle_timeout_sec", value=1.0),
+            Parameter("settle_duration_sec", value=0.1),
+            Parameter("feedback_max_age_sec", value=2.0),
+            Parameter("tf_max_age_sec", value=2.0),
+            Parameter("guard_timeout_sec", value=0.5),
+            Parameter("point_timeout_sec", value=5.0),
+            Parameter("status_period_sec", value=0.1),
+            Parameter("min_dispatch_interval_sec", value=0.0),
+        ])
+        fake = FakeNav(execute_duration=0.1)
+        executor = MultiThreadedExecutor(num_threads=6)
+        executor.add_node(patrol)
+        executor.add_node(fake)
+        spin_thread = threading.Thread(target=executor.spin, daemon=True)
+        spin_thread.start()
+        time.sleep(0.8)
+
+        mapping, route = direct_route(patrol, tmp_path, dwell=3.0)
+        action_client = rclpy.action.ActionClient(patrol, RunRoute, "/patrol/run_route")
+        assert action_client.wait_for_server(timeout_sec=5.0)
+        goal_handle = wait_future(action_client.send_goal_async(
+            make_run_goal(route, mapping, "guard-loss")))
+        assert goal_handle.accepted
+        assert wait_until(
+            lambda: patrol._active_engine is not None and
+            patrol._active_engine.status.get("state") == STATE_DWELLING,
+            timeout=5.0,
+        ), "run never reached DWELLING"
+
+        fake.guard_ready = False
+        result = wait_future(goal_handle.get_result_async(), timeout=8.0)
+        assert result.result.final_state == 12, result.result.message
+        assert result.result.error_code == "INTERRUPTED"
+        assert "guard" in result.result.message.lower(), result.result.message
+        assert wait_until(lambda: patrol._active_engine is None, timeout=3.0)
+    finally:
+        if executor is not None:
+            executor.shutdown()
+        if spin_thread is not None:
+            spin_thread.join(timeout=3.0)
+        if patrol is not None:
+            patrol.destroy_node()
+        if fake is not None:
+            fake.destroy_node()
+        rclpy.try_shutdown()
+
+
+def test_real_patrol_guard_and_executor_heartbeats_allow_completed_run(tmp_path):
+    rclpy.init()
+    executor = None
+    spin_thread = None
+    patrol = None
+    fake = None
+    guard = None
+    try:
+        patrol = PatrolNode(parameter_overrides=[
+            Parameter("database_path", value=str(tmp_path / "patrol.sqlite3")),
+            Parameter("settle_timeout_sec", value=1.0),
+            Parameter("settle_duration_sec", value=0.1),
+            Parameter("feedback_max_age_sec", value=2.0),
+            Parameter("tf_max_age_sec", value=2.0),
+            Parameter("guard_timeout_sec", value=1.0),
+            Parameter("point_timeout_sec", value=5.0),
+            Parameter("status_period_sec", value=0.1),
+            Parameter("executor_heartbeat_period_sec", value=0.1),
+            Parameter("min_dispatch_interval_sec", value=0.0),
+        ])
+        mux_diagnostics_topic = f"/patrol/test/p{os.getpid()}_e2e_diagnostics"
+        fake = FakeNav(execute_duration=0.1,
+                       mux_diagnostics_topic=mux_diagnostics_topic)
+        fake.publish_guard_ready = False
+        fake.publish_operator_heartbeat = True
+        fake.operator_session_id = "guard-e2e"
+        fake.publish_mux_diagnostics = True
+        guard = PatrolGuard(parameter_overrides=[
+            Parameter("publish_period_sec", value=0.05),
+            Parameter("executor_timeout_sec", value=1.0),
+            Parameter("operator_timeout_sec", value=1.0),
+            Parameter("startup_grace_sec", value=0.2),
+            Parameter("odom_timeout_sec", value=1.0),
+            Parameter("mux_diagnostics_topic", value=mux_diagnostics_topic),
+        ])
+        executor = MultiThreadedExecutor(num_threads=8)
+        executor.add_node(patrol)
+        executor.add_node(fake)
+        executor.add_node(guard)
+        spin_thread = threading.Thread(target=executor.spin, daemon=True)
+        spin_thread.start()
+
+        assert wait_until(
+            lambda: patrol._guard_ready is True and
+            guard._state.ready and not guard._state.locked,  # noqa: SLF001
+            timeout=5.0,
+        ), "guard never became ready from real executor heartbeats"
+
+        mapping, route = direct_route(patrol, tmp_path)
+        action_client = rclpy.action.ActionClient(patrol, RunRoute, "/patrol/run_route")
+        assert action_client.wait_for_server(timeout_sec=5.0)
+        goal = make_run_goal(route, mapping, "guard-e2e-run")
+        goal.owner_session_id = "guard-e2e"
+        goal_handle = wait_future(action_client.send_goal_async(goal))
+        assert goal_handle.accepted
+        result = wait_future(goal_handle.get_result_async(), timeout=10.0)
+        assert result.result.success, result.result.message
+        assert guard._state.ready and not guard._state.locked  # noqa: SLF001
+    finally:
+        if executor is not None:
+            executor.shutdown()
+        if spin_thread is not None:
+            spin_thread.join(timeout=3.0)
+        if patrol is not None:
+            patrol.destroy_node()
+        if fake is not None:
+            fake.destroy_node()
+        if guard is not None:
+            guard.destroy_node()
+        rclpy.try_shutdown()
+
+
+def test_cancel_confirmation_timeout_marks_stop_unconfirmed_quickly(tmp_path):
+    rclpy.init()
+    executor = None
+    spin_thread = None
+    patrol = None
+    fake = None
+    try:
+        patrol = PatrolNode(parameter_overrides=[
+            Parameter("database_path", value=str(tmp_path / "patrol.sqlite3")),
+            Parameter("settle_timeout_sec", value=1.0),
+            Parameter("settle_duration_sec", value=0.1),
+            Parameter("feedback_max_age_sec", value=2.0),
+            Parameter("tf_max_age_sec", value=2.0),
+            Parameter("point_timeout_sec", value=30.0),
+            Parameter("cancel_confirm_timeout_sec", value=0.5),
+            Parameter("status_period_sec", value=0.1),
+            Parameter("executor_heartbeat_period_sec", value=0.1),
+            Parameter("min_dispatch_interval_sec", value=0.0),
+        ])
+        # Cancel is acknowledged by the fake server, but the child goal never
+        # reaches a terminal state until its own long execution window ends.
+        fake = FakeNav(cancel_accept=True, honor_cancel=False, execute_duration=1.5)
+        executor = MultiThreadedExecutor(num_threads=6)
+        executor.add_node(patrol)
+        executor.add_node(fake)
+        spin_thread = threading.Thread(target=executor.spin, daemon=True)
+        spin_thread.start()
+        time.sleep(0.8)
+
+        mapping, route = direct_route(patrol, tmp_path)
+        action_client = rclpy.action.ActionClient(patrol, RunRoute, "/patrol/run_route")
+        assert action_client.wait_for_server(timeout_sec=5.0)
+        goal_handle = wait_future(action_client.send_goal_async(
+            make_run_goal(route, mapping, "cancel-timeout")))
+        assert goal_handle.accepted
+        assert wait_until(lambda: bool(fake.goals), timeout=3.0)
+
+        heartbeat_values = []
+        patrol.create_subscription(
+            ExecutorHeartbeat, "/patrol/executor_heartbeat",
+            lambda message: heartbeat_values.append(message), 10)
+
+        control = patrol.create_client(ControlRun, "/patrol/control")
+        assert control.wait_for_service(timeout_sec=5.0)
+        active = patrol._active_engine
+        assert active is not None
+        request = ControlRun.Request()
+        request.command = ControlRun.Request.CANCEL
+        request.run_id = active.run_id
+        started = time.monotonic()
+        response = wait_future(control.call_async(request))
+        assert response.accepted, response.message
+
+        result = wait_future(goal_handle.get_result_async(), timeout=8.0)
+        elapsed = time.monotonic() - started
+        assert elapsed < 3.0, f"cancel confirmation took too long: {elapsed:.2f}s"
+        assert result.result.final_state == 11, result.result.message
+        assert result.result.error_code == "CANCEL_UNCONFIRMED"
+        assert fake.cancel_calls >= 1
+        assert wait_until(
+            lambda: any(bool(message.stop_unconfirmed) for message in heartbeat_values),
+            timeout=2.0,
+        ), "executor heartbeat never exposed stop_unconfirmed"
+        assert patrol._run_reserved, "run slot released before old goal termination"
+
+        # Let the fake child eventually terminate so cleanup is deterministic.
+        assert wait_until(lambda: not patrol._run_reserved, timeout=4.0)
     finally:
         if executor is not None:
             executor.shutdown()

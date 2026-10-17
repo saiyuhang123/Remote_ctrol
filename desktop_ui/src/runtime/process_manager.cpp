@@ -53,13 +53,17 @@ void ProcessManager::stop() {
 }
 QStringList ProcessManager::launchArguments(const DesktopConfig &, const Profile &p, const QString &prefix,
                                           bool sensors, bool chassis, bool control, const QString &odom,
-                                          const QString &navigationYaml) {
+                                          const QString &navigationYaml, bool enablePatrol) {
   auto boolean = [](bool v) { return v ? "true" : "false"; };
   const QString navigationMap =
       navigationYaml.trimmed().isEmpty() ? prefix + ".yaml" : navigationYaml.trimmed();
   QStringList args{"ros2", "launch", "chassis_nav2", p.launchFile, "rviz:=false",
                    QString("start_sensors:=") + boolean(sensors), QString("start_chassis:=") + boolean(chassis),
                    QString("enable_control:=") + boolean(control)};
+  // The patrol interlock changes twist_mux behavior and starts two companion
+  // nodes. Only opt in explicitly; ordinary single-point/manual navigation
+  // must not silently depend on a separately launched patrol service.
+  if (enablePatrol && p.navigation && !p.mapping) args << "enable_patrol:=true";
   if (p.backend == "fastlio") {
     args << "pcd_map:=" + prefix + ".pcd";
     args << "odom_source:=" + (p.mapping ? QString("lio") : odom);

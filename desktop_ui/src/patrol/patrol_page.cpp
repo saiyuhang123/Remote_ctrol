@@ -69,6 +69,11 @@ PatrolPage::PatrolPage(PatrolClient *client, const QString &initialMapYaml,
   updateActionStates();
 }
 
+void PatrolPage::setResumePermission(std::function<bool(QString *)> permission) {
+  resumePermission_ = std::move(permission);
+  updateActionStates();
+}
+
 void PatrolPage::buildUi() {
   auto *root = new QVBoxLayout(this);
   root->setContentsMargins(8, 8, 8, 8);
@@ -658,9 +663,10 @@ void PatrolPage::pauseRun() {
 void PatrolPage::resumeRun() {
   const auto status = client_->status();
   if (status.runId.isEmpty()) { setMessage(QStringLiteral("当前没有可继续的巡航任务"), true); return; }
-  if (startPermission_) {
+  const auto &permission = resumePermission_ ? resumePermission_ : startPermission_;
+  if (permission) {
     QString reason;
-    if (!startPermission_(&reason)) {
+    if (!permission(&reason)) {
       setMessage(reason.isEmpty() ? QStringLiteral("当前不允许继续巡航") : reason, true);
       return;
     }
@@ -740,16 +746,23 @@ void PatrolPage::updateActionStates() {
   newRouteButton_->setEnabled(available && hasMap);
   saveRouteButton_->setEnabled(available && hasMap && !currentSteps_.isEmpty());
   deleteRouteButton_->setEnabled(available && !currentRouteId_.isEmpty());
-  QString permissionReason;
-  const bool executionPermitted = !startPermission_ || startPermission_(&permissionReason);
-  const QString permissionTip = !executionPermitted ? permissionReason : QString();
+  QString startPermissionReason;
+  const bool startPermitted = !startPermission_ ||
+                              startPermission_(&startPermissionReason);
+  const QString startPermissionTip = startPermitted ? QString() : startPermissionReason;
   startButton_->setEnabled(!offline_ && available && hasMap && !currentRouteId_.isEmpty() &&
-                           !routeDirty_ && !activeRun && executionPermitted);
-  startButton_->setToolTip(permissionTip);
+                           !routeDirty_ && !activeRun && startPermitted);
+  startButton_->setToolTip(startPermissionTip);
+
+  const auto &resumePermission = resumePermission_ ? resumePermission_ : startPermission_;
+  QString resumePermissionReason;
+  const bool resumePermitted = !resumePermission ||
+                               resumePermission(&resumePermissionReason);
+  const QString resumePermissionTip = resumePermitted ? QString() : resumePermissionReason;
   pauseButton_->setEnabled(!offline_ && available && activeRun && !paused);
   resumeButton_->setEnabled(!offline_ && available && activeRun && paused &&
-                            executionPermitted);
-  resumeButton_->setToolTip(permissionTip);
+                            resumePermitted);
+  resumeButton_->setToolTip(resumePermissionTip);
   cancelButton_->setEnabled(!offline_ && available && activeRun);
   pointCombo_->setEnabled(available && hasMap && pointCombo_->count() > 0);
   tabs_->setEnabled(available);

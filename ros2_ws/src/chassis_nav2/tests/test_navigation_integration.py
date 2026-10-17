@@ -536,6 +536,12 @@ class IntegrationTests(unittest.TestCase):
                 self.assertFalse(any(n['package'] == 'nav2_amcl' for n in nodes))
                 smoother = next(n for n in nodes if n.get('executable') == 'velocity_smoother')
                 self.assertIn(('cmd_vel_smoothed', '/cmd_vel_auto'), smoother['remappings'])
+                args['enable_patrol'] = 'true'
+                with patch.object(bringup, 'patrol_launch', return_value='PATROL_COMPANIONS') as companions:
+                    interlocked = bringup.configure(SimpleNamespace(launch_configurations=args))
+                    self.assertIn('PATROL_COMPANIONS', interlocked)
+                    companions.assert_called_once_with()
+                args['enable_patrol'] = 'false'
                 (p/'site.pcd').write_bytes(b'')
                 with self.assertRaisesRegex(ValueError, 'PCD 地图为空'):
                     bringup.configure(SimpleNamespace(launch_configurations=args))
@@ -571,6 +577,12 @@ class IntegrationTests(unittest.TestCase):
                 mapping = bringup_2d.assemble(args, mapping=True, backend='slam_toolbox')
                 self.assertEqual(sum(n.get('executable') == 'async_slam_toolbox_node' for n in mapping), 1)
                 self.assertFalse(any(n['package'] in ('nav2_amcl', 'nav2_map_server') for n in mapping))
+                args['enable_patrol'] = 'true'
+                with patch.object(bringup, 'patrol_launch', return_value='PATROL_COMPANIONS') as companions:
+                    interlocked = bringup_2d.assemble(args, mapping=False, backend='slam_toolbox')
+                    self.assertIn('PATROL_COMPANIONS', interlocked)
+                    companions.assert_called_once_with()
+                args['enable_patrol'] = 'false'
 
     def test_cartographer_localization_keeps_its_own_state_and_lifecycle(self):
         from chassis_nav2 import bringup_2d

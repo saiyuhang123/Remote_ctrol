@@ -2,6 +2,8 @@
 
 #include <QUuid>
 #include <algorithm>
+#include <atomic>
+#include <chrono>
 #include <mutex>
 #include <thread>
 #include <type_traits>
@@ -12,6 +14,7 @@
 #include <action_msgs/msg/goal_status.hpp>
 #include <patrol_interfaces/action/run_route.hpp>
 #include <patrol_interfaces/msg/map_binding.hpp>
+#include <patrol_interfaces/msg/operator_heartbeat.hpp>
 #include <patrol_interfaces/msg/patrol_point.hpp>
 #include <patrol_interfaces/msg/patrol_route.hpp>
 #include <patrol_interfaces/msg/patrol_status.hpp>
@@ -137,7 +140,12 @@ struct PatrolClient::Impl {
   rclcpp::Client<patrol_interfaces::srv::ControlRun>::SharedPtr controlRun;
   rclcpp_action::Client<patrol_interfaces::action::RunRoute>::SharedPtr runRoute;
   rclcpp::Subscription<patrol_interfaces::msg::PatrolStatus>::SharedPtr statusSubscription;
+  rclcpp::Publisher<patrol_interfaces::msg::OperatorHeartbeat>::SharedPtr operatorHeartbeat;
+  rclcpp::TimerBase::SharedPtr operatorHeartbeatTimer;
   rclcpp_action::Client<patrol_interfaces::action::RunRoute>::GoalHandle::SharedPtr currentGoal;
+  std::atomic_bool operatorAuthorized{false};
+  bool goalPending = false;
+  bool cancelRequestedWhilePending = false;
   mutable std::mutex mutex;
   QVector<PatrolMapInfo> mapsData;
   QString activeMapId;
@@ -167,6 +175,18 @@ struct PatrolClient::Impl {
           PatrolStatusInfo info;
           { std::lock_guard<std::mutex> lock(mutex); statusData = statusInfo(*message); info = statusData; }
           emit owner->statusChanged();
+        });
+    operatorHeartbeat =
+        node->create_publisher<patrol_interfaces::msg::OperatorHeartbeat>(
+            "/patrol/operator_heartbeat", 10);
+    operatorHeartbeatTimer = node->create_wall_timer(
+        std::chrono::milliseconds(200), [this] {
+          patrol_interfaces::msg::OperatorHeartbeat message;
+          message.session_id = ownerSessionId.toStdString();
+          message.client_id = "desktop_ui";
+          message.enabled = operatorAuthorized.load();
+          message.stamp = node->now();
+          operatorHeartbeat->publish(message);
         });
     executor.add_node(node);
     thread = std::thread([this] {
@@ -559,11 +579,30 @@ void PatrolClient::runRoute(const QString &routeId, const QString &mapId,
   goal.route_id = routeId.toStdString(); goal.map_id = mapId.toStdString();
   goal.route_revision = routeRevision; goal.map_revision = mapRevision;
   goal.loop_count = loopCount;
+  {
+    std::lock_guard<std::mutex> lock(impl_->mutex);
+    impl_->goalPending = true;
+    impl_->cancelRequestedWhilePending = false;
+  }
   rclcpp_action::Client<patrol_interfaces::action::RunRoute>::SendGoalOptions options;
   options.goal_response_callback = [this](rclcpp_action::ClientGoalHandle<patrol_interfaces::action::RunRoute>::SharedPtr handle) {
+    bool cancelRequested = false;
+    {
+      std::lock_guard<std::mutex> lock(impl_->mutex);
+      impl_->goalPending = false;
+      if (handle) impl_->currentGoal = handle;
+      cancelRequested = impl_->cancelRequestedWhilePending;
+      impl_->cancelRequestedWhilePending = false;
+    }
     if (!handle) { emit errorOccurred(QStringLiteral("巡航目标被拒绝")); return; }
-    { std::lock_guard<std::mutex> lock(impl_->mutex); impl_->currentGoal = handle; }
-    emit operationFinished(QStringLiteral("启动巡航"), true, QStringLiteral("巡航目标已接受"));
+    if (cancelRequested) {
+      impl_->runRoute->async_cancel_goal(handle);
+      emit operationFinished(QStringLiteral("取消巡航"), true,
+                             QStringLiteral("目标接受后已按待处理取消意图立即取消"));
+    } else {
+      emit operationFinished(QStringLiteral("启动巡航"), true,
+                             QStringLiteral("巡航目标已接受"));
+    }
   };
   options.feedback_callback = [this](rclcpp_action::ClientGoalHandle<patrol_interfaces::action::RunRoute>::SharedPtr,
                                      const std::shared_ptr<const patrol_interfaces::action::RunRoute::Feedback> feedback) {
@@ -580,6 +619,50 @@ void PatrolClient::runRoute(const QString &routeId, const QString &mapId,
 #else
   Q_UNUSED(routeId); Q_UNUSED(mapId); Q_UNUSED(routeRevision); Q_UNUSED(mapRevision); Q_UNUSED(loopCount);
   PATROL_UNAVAILABLE(QStringLiteral("启动巡航"));
+#endif
+}
+
+void PatrolClient::cancelRunRoute() {
+#ifdef DESKTOP_HAS_PATROL_INTERFACES
+  rclcpp_action::Client<patrol_interfaces::action::RunRoute>::GoalHandle::SharedPtr goal;
+  bool pending = false;
+  {
+    std::lock_guard<std::mutex> lock(impl_->mutex);
+    goal = impl_->currentGoal;
+    if (!goal && impl_->goalPending) {
+      impl_->cancelRequestedWhilePending = true;
+      pending = true;
+    }
+  }
+  if (goal) {
+    impl_->runRoute->async_cancel_goal(goal);
+    emit operationFinished(QStringLiteral("取消巡航"), true,
+                           QStringLiteral("已请求取消巡航任务"));
+  } else if (pending) {
+    emit operationFinished(QStringLiteral("取消巡航"), true,
+                           QStringLiteral("已记录取消意图；目标接受后将立即取消"));
+  } else {
+    emit errorOccurred(QStringLiteral("当前没有可取消的本地巡航 Action"));
+  }
+#else
+  PATROL_UNAVAILABLE(QStringLiteral("取消巡航"));
+#endif
+}
+
+bool PatrolClient::hasActiveOrPendingRun() const {
+#ifdef DESKTOP_HAS_PATROL_INTERFACES
+  std::lock_guard<std::mutex> lock(impl_->mutex);
+  return impl_->statusData.active || impl_->goalPending || static_cast<bool>(impl_->currentGoal);
+#else
+  return false;
+#endif
+}
+
+void PatrolClient::setOperatorAuthorized(bool enabled) {
+#ifdef DESKTOP_HAS_PATROL_INTERFACES
+  impl_->operatorAuthorized.store(enabled);
+#else
+  Q_UNUSED(enabled);
 #endif
 }
 

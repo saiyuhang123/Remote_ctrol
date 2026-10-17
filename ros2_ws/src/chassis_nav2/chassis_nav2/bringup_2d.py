@@ -71,9 +71,15 @@ def assemble(args, mapping, backend):
     # 轮速 + IMU 经 EKF 发 odom->base_link 与 /odom，定位节点与 Nav2 共用
     nodes.append(bringup.wheel_node(hw, '/odom_raw', 'wheel_odom', False, '/odom_wheel'))
     nodes.append(bringup.ekf_node(hw))
+    enable_patrol = args.get('enable_patrol', 'false').lower() == 'true'
+    mux_config = 'twist_mux_patrol.yaml' if enable_patrol else 'twist_mux.yaml'
     nodes.append(Node(package='twist_mux', executable='twist_mux',
-                      parameters=[str(nav_share/'config/twist_mux.yaml')],
+                      parameters=[str(nav_share/'config'/mux_config)],
                       remappings=[('cmd_vel_out', '/cmd_vel')], output='screen'))
+    if enable_patrol:
+        # The guard owns the positive-timeout mux lock. Never select the
+        # patrol mux configuration without starting its executor and guard.
+        nodes.append(bringup.patrol_launch())
     description = (bringup.share('chassis_description')/'urdf/chassis.urdf').read_text()
     nodes.append(Node(package='robot_state_publisher', executable='robot_state_publisher',
                       parameters=[{'robot_description': description, 'use_sim_time': False}], output='screen'))

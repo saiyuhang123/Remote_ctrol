@@ -33,6 +33,7 @@ class ControlFlags:
         self._lock = threading.RLock()
         self._pause = False
         self._cancel = False
+        self._cancel_reason = ""
         self._wake = threading.Event()
 
     @property
@@ -45,6 +46,11 @@ class ControlFlags:
         with self._lock:
             return self._cancel
 
+    @property
+    def cancel_reason(self) -> str:
+        with self._lock:
+            return self._cancel_reason
+
     def request_pause(self) -> None:
         with self._lock:
             self._pause = True
@@ -55,10 +61,12 @@ class ControlFlags:
             self._pause = False
         self._wake.set()
 
-    def request_cancel(self) -> None:
+    def request_cancel(self, reason: str = "") -> None:
         with self._lock:
             self._cancel = True
             self._pause = False
+            if reason:
+                self._cancel_reason = str(reason)
         self._wake.set()
 
     def wake(self) -> None:
@@ -143,10 +151,20 @@ class PatrolEngine:
         self.flags.request_cancel()
         self.driver.cancel_current()
 
+    def request_interrupt(self, reason: str) -> None:
+        """Safety/orchestration stop: cancel dispatch and report INTERRUPTED."""
+        self.flags.request_cancel(reason=reason)
+        self.driver.cancel_current()
+
     def mark_canceled_before_start(self, message: str = "任务在启动前被取消") -> None:
         """Publish a terminal status for a run canceled before dispatch."""
         self._set_status(state=STATE_CANCELED, active=False,
                          error_code="CANCELED", message=message)
+
+    def mark_interrupted_before_start(self, message: str) -> None:
+        """Publish a terminal status for a safety stop before dispatch."""
+        self._set_status(state=STATE_INTERRUPTED, active=False,
+                         error_code="INTERRUPTED", message=message)
 
     def _driver_stop_safe(self) -> bool:
         checker = getattr(self.driver, "stop_safe", None)
@@ -329,6 +347,12 @@ class PatrolEngine:
             return self._failed(completed_loops, completed_steps, "INTERRUPTED", str(error))
 
     def _canceled(self, loops: int, steps: int) -> EngineResult:
+        reason = self.flags.cancel_reason
+        if reason:
+            self._set_status(state=STATE_INTERRUPTED, active=False,
+                             error_code="INTERRUPTED", message=reason)
+            return EngineResult(False, STATE_INTERRUPTED, self.run_id, loops, steps,
+                                "INTERRUPTED", reason)
         self._set_status(state=STATE_CANCELED, active=False, message="任务已取消")
         return EngineResult(False, STATE_CANCELED, self.run_id, loops, steps,
                             "CANCELED", "任务已取消")

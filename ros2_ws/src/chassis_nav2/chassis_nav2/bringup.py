@@ -6,12 +6,20 @@ from pathlib import Path
 import numpy as np
 import yaml
 from ament_index_python.packages import get_package_share_directory
+from launch.actions import IncludeLaunchDescription
+from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch_ros.actions import Node
 from chassis_nav2.geometry import transform, inverse, quaternion
 
 
 def share(package):
     return Path(get_package_share_directory(package))
+
+
+def patrol_launch():
+    """Start the executor and independent guard together with the mux."""
+    return IncludeLaunchDescription(PythonLaunchDescriptionSource(
+        str(share('robot_patrol') / 'launch' / 'patrol.launch.py')))
 
 
 def vector(value, size, label):
@@ -248,10 +256,17 @@ def configure(context):
     elif compare_wheel:
         nodes.append(wheel_node(hw))
     # Arbitration is also available during manual mapping; the gateway publishes /cmd_vel_teleop.
+    enable_patrol = args.get('enable_patrol', 'false').lower() == 'true'
     if active or control:
+        mux_config = 'twist_mux_patrol.yaml' if enable_patrol else 'twist_mux.yaml'
         nodes.append(Node(package='twist_mux', executable='twist_mux',
-                          parameters=[str(share('chassis_nav2')/'config/twist_mux.yaml')],
+                          parameters=[str(share('chassis_nav2')/'config'/mux_config)],
                           remappings=[('cmd_vel_out', '/cmd_vel')], output='screen'))
+        if enable_patrol:
+            # A positive-timeout mux lock without a live guard would block
+            # every velocity source. Starting the companion pair here makes
+            # enable_patrol one complete, self-contained option.
+            nodes.append(patrol_launch())
     if not active:
         return nodes
     description = (share('chassis_description')/'urdf/chassis.urdf').read_text()

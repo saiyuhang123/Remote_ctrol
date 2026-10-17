@@ -21,7 +21,8 @@ public:
   static QStringList launchArguments(const DesktopConfig &config, const Profile &profile,
                                     const QString &mapPrefix, bool sensors, bool chassis,
                                     bool control, const QString &odomSource,
-                                    const QString &navigationYaml = QString());
+                                    const QString &navigationYaml = QString(),
+                                    bool enablePatrol = false);
   static QStringList environmentArguments(const DesktopConfig &config, const QStringList &arguments);
 signals:
   void output(const QString &text);

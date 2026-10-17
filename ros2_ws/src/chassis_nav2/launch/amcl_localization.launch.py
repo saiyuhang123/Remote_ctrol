@@ -23,6 +23,8 @@ def generate_launch_description():
         DeclareLaunchArgument('start_sensors', default_value='true', choices=['true', 'false']),
         DeclareLaunchArgument('start_chassis', default_value='false', choices=['true', 'false']),
         DeclareLaunchArgument('enable_control', default_value='false', choices=['true', 'false']),
+        DeclareLaunchArgument('enable_patrol', default_value='false', choices=['true', 'false'],
+                             description='启用 patrol twist_mux 失联锁，并同时启动 patrol_node 与 patrol_guard'),
         DeclareLaunchArgument('rviz', default_value='false', choices=['true', 'false']),
         OpaqueFunction(function=configure_localization),
     ])

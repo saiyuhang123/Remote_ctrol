@@ -4,6 +4,7 @@ from __future__ import annotations
 from pathlib import Path
 from types import SimpleNamespace
 import hashlib
+import json
 import math
 import os
 import threading
@@ -19,12 +20,15 @@ from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy, qos_profi
 from rclpy.time import Time
 
 from builtin_interfaces.msg import Time as TimeMsg
+from geometry_msgs.msg import Twist
 from nav_msgs.msg import OccupancyGrid, Odometry
-from std_msgs.msg import Bool
+from std_msgs.msg import Bool, String
 from tf2_ros import Buffer, TransformListener
 
 from patrol_interfaces.action import RunRoute
-from patrol_interfaces.msg import MapBinding, PatrolPoint, PatrolRoute, PatrolStatus, RouteStep, RunRecord
+from patrol_interfaces.msg import (
+    ExecutorHeartbeat, MapBinding, PatrolPoint, PatrolRoute, PatrolStatus, RouteStep, RunRecord,
+)
 from patrol_interfaces.srv import (
     ControlRun,
     DeletePoint,
@@ -71,6 +75,7 @@ class PatrolNode(Node):
         self.declare_parameter("map_frame", "map")
         self.declare_parameter("base_frame", "base_link")
         self.declare_parameter("point_timeout_sec", 300.0)
+        self.declare_parameter("cancel_confirm_timeout_sec", 2.0)
         self.declare_parameter("settle_timeout_sec", 10.0)
         self.declare_parameter("settle_linear_threshold", 0.03)
         self.declare_parameter("settle_angular_threshold", 0.05)
@@ -84,6 +89,8 @@ class PatrolNode(Node):
         self.declare_parameter("dwell_resume_yaw_tolerance_rad", 0.35)
         self.declare_parameter("min_dispatch_interval_sec", 0.5)
         self.declare_parameter("status_period_sec", 1.0)
+        self.declare_parameter("executor_heartbeat_period_sec", 0.2)
+        self.declare_parameter("teleop_topic", "/cmd_vel_teleop")
 
         self._callback_group = ReentrantCallbackGroup()
         self._instance_id = "patrol_" + uuid.uuid4().hex
@@ -95,8 +102,12 @@ class PatrolNode(Node):
         self._active_driver: Nav2Driver | None = None
         self._active_goal_handle = None
         self._active_request_id = ""
+        self._active_owner_session_id = ""
         self._run_reserved = False
         self._pending_cancel = False
+        self._safety_interrupt_reason = ""
+        self._safety_interrupt_delivered = False
+        self._guard_status_message = ""
         self._hazard_driver: Nav2Driver | None = None
         self._last_status: dict = {
             "state": STATE_IDLE, "sequence": 0, "run_id": "", "route_id": "",
@@ -135,6 +146,14 @@ class PatrolNode(Node):
                             durability=DurabilityPolicy.TRANSIENT_LOCAL)
         self.create_subscription(OccupancyGrid, "/map", self._on_map, map_qos,
                                  callback_group=self._callback_group)
+        self.create_subscription(
+            Twist, str(self.get_parameter("teleop_topic").value), self._on_manual_velocity, 10,
+            callback_group=self._callback_group)
+        self.create_subscription(
+            String, "/patrol/guard_status", self._on_guard_status, 10,
+            callback_group=self._callback_group)
+        self._executor_heartbeat_pub = self.create_publisher(
+            ExecutorHeartbeat, "/patrol/executor_heartbeat", 10)
 
         self._run_server = ActionServer(
             self, RunRoute, "/patrol/run_route", self._execute_run,
@@ -162,8 +181,14 @@ class PatrolNode(Node):
         period = float(self.get_parameter("status_period_sec").value)
         self._status_timer = self.create_timer(max(0.2, period), self._publish_last_status,
                                                callback_group=self._callback_group)
+        heartbeat_period = max(0.05, float(
+            self.get_parameter("executor_heartbeat_period_sec").value))
+        self._executor_heartbeat_timer = self.create_timer(
+            heartbeat_period, self._publish_executor_heartbeat,
+            callback_group=self._callback_group)
         self.get_logger().info(f"robot_patrol started, instance={self._instance_id}")
         self._publish_last_status()
+        self._publish_executor_heartbeat()
 
     # ------------------------------------------------------------- conversions
     def _to_ros_map(self, entry) -> MapBinding:
@@ -261,11 +286,33 @@ class PatrolNode(Node):
         with self._safety_lock:
             self._last_estop = bool(message.data)
             self._estop_time = time.monotonic()
+        if bool(message.data):
+            self._request_safety_interrupt("急停保持中，巡航任务已中断")
 
     def _on_guard_ready(self, message: Bool) -> None:
         with self._safety_lock:
             self._guard_ready = bool(message.data)
             self._guard_time = time.monotonic()
+        if not bool(message.data):
+            self._request_safety_interrupt("patrol guard 联锁未就绪，巡航任务已中断")
+
+    def _on_guard_status(self, message: String) -> None:
+        with self._safety_lock:
+            self._guard_status_message = str(message.data)
+
+    def _on_manual_velocity(self, message: Twist) -> None:
+        # A manual controller is a higher-priority takeover source. The
+        # velocity lock stops the physical command immediately; the patrol
+        # state machine must also stop dispatching and terminate the task.
+        twist = message.twist if hasattr(message, "twist") else message
+        moving = (abs(float(twist.linear.x)) > 1e-6 or
+                  abs(float(twist.linear.y)) > 1e-6 or
+                  abs(float(twist.linear.z)) > 1e-6 or
+                  abs(float(twist.angular.x)) > 1e-6 or
+                  abs(float(twist.angular.y)) > 1e-6 or
+                  abs(float(twist.angular.z)) > 1e-6)
+        if moving:
+            self._request_safety_interrupt("检测到手动速度输入，巡航任务已被接管")
 
     def _on_map(self, message: OccupancyGrid) -> None:
         with self._map_lock:
@@ -277,6 +324,54 @@ class PatrolNode(Node):
             self._last_status = dict(data)
             message = self._to_ros_status(data)
         self._status_pub.publish(message)
+
+    def _request_safety_interrupt(self, reason: str) -> None:
+        """Unify ESTOP, guard loss and manual takeover into one stop path."""
+        reason = str(reason or "安全联锁触发，巡航任务已中断")
+        with self._run_lock:
+            engine = self._active_engine
+            driver = self._active_driver
+            if engine is None:
+                if self._run_reserved:
+                    self._pending_cancel = True
+                    self._safety_interrupt_reason = reason
+                return
+            if self._safety_interrupt_delivered:
+                return
+            self._safety_interrupt_delivered = True
+            self._safety_interrupt_reason = reason
+        self.get_logger().warn(reason)
+        engine.request_interrupt(reason)
+        if driver is not None:
+            driver.cancel_current()
+
+    def _monitor_active_safety(self) -> None:
+        with self._run_lock:
+            if self._active_engine is None:
+                return
+        now = time.monotonic()
+        feedback_timeout = float(self.get_parameter("feedback_max_age_sec").value)
+        reason = ""
+        with self._safety_lock:
+            estop = self._last_estop
+            estop_time = self._estop_time
+            guard_ready = self._guard_ready
+            guard_time = self._guard_time
+            guard_detail = self._guard_status_message
+        if estop is None or (now - estop_time) > feedback_timeout:
+            reason = "急停状态未知或已过期，巡航任务已中断"
+        elif estop:
+            reason = "急停保持中，巡航任务已中断"
+        if bool(self.get_parameter("require_guard").value):
+            if guard_ready is not True or (now - guard_time) > float(
+                    self.get_parameter("guard_timeout_sec").value):
+                try:
+                    detail = json.loads(guard_detail).get("reason", "")
+                except Exception:  # noqa: BLE001 - status is advisory only
+                    detail = ""
+                reason = detail or "patrol guard 心跳丢失或联锁未就绪，巡航任务已中断"
+        if reason:
+            self._request_safety_interrupt(reason)
 
     def _monitor_hazard(self) -> None:
         # A timed-out/failed child goal can remain alive at Nav2 even after the
@@ -291,9 +386,42 @@ class PatrolNode(Node):
 
     def _publish_last_status(self) -> None:
         self._monitor_hazard()
+        self._monitor_active_safety()
         with self._status_lock:
             data = dict(self._last_status)
         self._status_pub.publish(self._to_ros_status(data))
+
+    def _publish_executor_heartbeat(self) -> None:
+        with self._run_lock:
+            engine = self._active_engine
+            active = engine is not None or self._run_reserved
+            owner_session_id = self._active_owner_session_id
+            run_id = engine.run_id if engine is not None else ""
+            if engine is not None:
+                status = engine.status
+                state = int(status.get("state", STATE_VALIDATING))
+                dispatch_allowed = (not engine.flags.cancel_requested and
+                                    not engine.flags.pause_requested)
+            elif active:
+                state = int(STATE_VALIDATING)
+                dispatch_allowed = False
+            else:
+                state = int(STATE_IDLE)
+                dispatch_allowed = True
+            hazard = self._hazard_driver
+            stop_unconfirmed = hazard is not None and not hazard.stop_safe()
+        heartbeat = ExecutorHeartbeat()
+        heartbeat.instance_id = self._instance_id
+        heartbeat.owner_session_id = owner_session_id
+        heartbeat.run_id = run_id
+        heartbeat.state = state
+        heartbeat.active = bool(active)
+        heartbeat.dispatch_allowed = bool(dispatch_allowed)
+        heartbeat.stop_unconfirmed = bool(stop_unconfirmed)
+        driver = self._active_driver if self._active_driver is not None else self._hazard_driver
+        heartbeat.nav_goal_id = driver.current_nav_goal_id if driver is not None else ""
+        heartbeat.stamp = self.get_clock().now().to_msg()
+        self._executor_heartbeat_pub.publish(heartbeat)
 
     def _notify_status(self, data: dict) -> None:
         self._publish_status_dict(data)
@@ -609,14 +737,21 @@ class PatrolNode(Node):
     def _finish_canceled_goal(self, goal_handle, result, message: str,
                               run_id: str = "") -> RunRoute.Result:
         result.success = False
-        result.final_state = STATE_CANCELED
         result.run_id = run_id
-        result.error_code = "CANCELED"
-        result.message = message
-        try:
-            goal_handle.canceled()
-        except Exception:  # noqa: BLE001 - server may already be canceling
+        safety_reason = self._safety_interrupt_reason
+        if safety_reason:
+            result.final_state = STATE_INTERRUPTED
+            result.error_code = "INTERRUPTED"
+            result.message = safety_reason
             goal_handle.abort()
+        else:
+            result.final_state = STATE_CANCELED
+            result.error_code = "CANCELED"
+            result.message = message
+            try:
+                goal_handle.canceled()
+            except Exception:  # noqa: BLE001 - server may already be canceling
+                goal_handle.abort()
         return result
 
     def _goal_callback(self, goal_request):
@@ -673,6 +808,10 @@ class PatrolNode(Node):
             # is not released until either no Nav2 child goal exists or the
             # old child has reached a known terminal state.
             self._run_reserved = True
+            self._active_owner_session_id = str(
+                goal_handle.request.owner_session_id or "").strip()
+            self._safety_interrupt_reason = ""
+            self._safety_interrupt_delivered = False
         engine = None
         driver = None
         run_id = ""
@@ -689,6 +828,8 @@ class PatrolNode(Node):
 
             if not goal_handle.request.request_id:
                 raise PatrolError("INVALID_DATA", "request_id 不能为空")
+            if not goal_handle.request.owner_session_id:
+                raise PatrolError("INVALID_DATA", "owner_session_id 不能为空")
             route = self._store.get_route(goal_handle.request.route_id)
             map_entry = self._store.get_map(goal_handle.request.map_id)
             if route.map_id != map_entry.map_id:
@@ -735,32 +876,57 @@ class PatrolNode(Node):
                     self.get_parameter("dwell_resume_position_tolerance_m").value),
                 resume_yaw_tolerance=float(
                     self.get_parameter("dwell_resume_yaw_tolerance_rad").value),
+                cancel_confirm_timeout=float(
+                    self.get_parameter("cancel_confirm_timeout_sec").value),
                 callback_group=self._callback_group,
+                goal_update_callback=self._publish_executor_heartbeat,
             )
             engine = PatrolEngine(
-                self._store, snapshot, run_id, loops, goal_handle.request.owner_session_id,
+                self._store, snapshot, run_id, loops,
+                goal_handle.request.owner_session_id,
                 driver, self._notify_status,
                 settle_timeout=float(self.get_parameter("settle_timeout_sec").value),
                 point_timeout=float(self.get_parameter("point_timeout_sec").value),
                 min_dispatch_interval=float(self.get_parameter("min_dispatch_interval_sec").value),
             )
             with self._run_lock:
-                canceled_before_start = self._pending_cancel or bool(
+                safety_reason = self._safety_interrupt_reason
+                canceled_before_start = bool(safety_reason) or self._pending_cancel or bool(
                     getattr(goal_handle, "is_cancel_requested", False))
                 if canceled_before_start:
-                    engine.request_cancel()
+                    if safety_reason:
+                        engine.request_interrupt(safety_reason)
+                        self._safety_interrupt_delivered = True
+                    else:
+                        engine.request_cancel()
                 else:
                     self._active_engine = engine
                     self._active_driver = driver
                     self._active_goal_handle = goal_handle
                     self._active_request_id = goal_handle.request.request_id
             if canceled_before_start:
+                if safety_reason:
+                    self._store.finish_run(
+                        run_id, STATE_INTERRUPTED, False, 0, 0,
+                        "INTERRUPTED", safety_reason, now_ns())
+                    engine.mark_interrupted_before_start(safety_reason)
+                    return self._finish_canceled_goal(
+                        goal_handle, result, safety_reason, run_id)
                 self._store.finish_run(run_id, STATE_CANCELED, False, 0, 0,
                                        "CANCELED", "任务在校验阶段被取消", now_ns())
                 engine.mark_canceled_before_start("任务在校验阶段被取消")
                 return self._finish_canceled_goal(
                     goal_handle, result, "任务在校验阶段被取消", run_id)
 
+            if bool(self.get_parameter("require_guard").value):
+                # Publish ownership before the first NavigateToPose goal. The
+                # guard uses this active heartbeat to distinguish a legitimate
+                # patrol child from a late goal owned by a previous restarted
+                # executor.
+                self._publish_executor_heartbeat()
+                heartbeat_period = max(0.05, float(
+                    self.get_parameter("executor_heartbeat_period_sec").value))
+                time.sleep(max(0.15, heartbeat_period * 2.0))
             engine_result = engine.run()
             loops = engine_result.completed_loops
             steps = engine_result.completed_steps
@@ -815,6 +981,9 @@ class PatrolNode(Node):
                 self._active_driver = None
                 self._active_goal_handle = None
                 self._active_request_id = ""
+                self._active_owner_session_id = ""
+                self._safety_interrupt_reason = ""
+                self._safety_interrupt_delivered = False
                 if driver is not None and not driver.stop_safe():
                     # The top-level action may finish, but the old child goal
                     # is still alive at Nav2. Keep the slot reserved until a
