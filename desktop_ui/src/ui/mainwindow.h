@@ -63,6 +63,7 @@ private:
   QAction *mapEditorAction_ = nullptr;
   QString mapEditorProfileId_;
   QString mapEditorSourcePrefix_;
+  QString mapEditorInitialSourceYaml_;
   int lastProfileIndex_ = -1;
   QVector<QPushButton *> directionButtons_, writeButtons_;
 };

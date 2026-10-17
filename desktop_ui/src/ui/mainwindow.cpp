@@ -50,6 +50,12 @@ QDoubleSpinBox *number(QWidget *parent, double min, double max, double value, in
   auto *s = new QDoubleSpinBox(parent); s->setRange(min, max); s->setDecimals(decimals); s->setValue(value); s->setKeyboardTracking(false); return s;
 }
 QPushButton *button(const QString &text, QLayout *layout) { auto *b = new QPushButton(text); layout->addWidget(b); return b; }
+QString pathIdentity(const QString &path) {
+  if (path.trimmed().isEmpty()) return {};
+  const QFileInfo info(path);
+  const QString canonical = info.canonicalFilePath();
+  return canonical.isEmpty() ? info.absoluteFilePath() : canonical;
+}
 QLabel *imageLabel(const QString &text) { auto *l = new QLabel(text); l->setAlignment(Qt::AlignCenter); l->setMinimumSize(220, 140); l->setWordWrap(true); l->setStyleSheet("background:#252b33;color:#dce1e8;border-radius:4px;"); return l; }
 }
 
@@ -306,8 +312,13 @@ void MainWindow::openMapEditor() {
   mapEditor_ = editor;
   mapEditorProfileId_ = profile().id;
   mapEditorSourcePrefix_ = mapPrefix_->text().trimmed();
+  mapEditorInitialSourceYaml_ = initial;
   connect(editor, &MapEditorDialog::mapSaved, this, [this](const QString &yamlPath, const QString &sourceYamlPath) {
-    const bool sameSource = !mapEditorProfileId_.isEmpty() &&
+    const bool sameDocumentSource = !mapEditorInitialSourceYaml_.trimmed().isEmpty() &&
+                                     !sourceYamlPath.trimmed().isEmpty() &&
+                                     pathIdentity(sourceYamlPath) == pathIdentity(mapEditorInitialSourceYaml_);
+    const bool sameSource = sameDocumentSource &&
+                            !mapEditorProfileId_.isEmpty() &&
                             profile().id == mapEditorProfileId_ &&
                             mapPrefix_->text().trimmed() == mapEditorSourcePrefix_;
     if (!sameSource) {
@@ -323,6 +334,7 @@ void MainWindow::openMapEditor() {
     mapEditor_ = nullptr;
     mapEditorProfileId_.clear();
     mapEditorSourcePrefix_.clear();
+    mapEditorInitialSourceYaml_.clear();
   });
   editor->show();
   editor->raise();

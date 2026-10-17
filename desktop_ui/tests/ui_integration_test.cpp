@@ -153,6 +153,8 @@ private slots:
     QVERIFY(editorMapDirectory.isValid());
     const QString editorImage = editorMapDirectory.filePath(QStringLiteral("map.pgm"));
     const QString editorYaml = editorMapDirectory.filePath(QStringLiteral("map.yaml"));
+    const QString editorImageB = editorMapDirectory.filePath(QStringLiteral("other.pgm"));
+    const QString editorYamlB = editorMapDirectory.filePath(QStringLiteral("other.yaml"));
     {
       QFile image(editorImage);
       QVERIFY(image.open(QIODevice::WriteOnly));
@@ -162,6 +164,14 @@ private slots:
       QVERIFY(yaml.write("image: map.pgm\nmode: trinary\nresolution: 0.05\n"
                          "origin: [-1.25, 3.5, 0.0]\n"
                          "negate: 0\nfree_thresh: 0.25\noccupied_thresh: 0.65\n") > 0);
+      QFile imageB(editorImageB);
+      QVERIFY(imageB.open(QIODevice::WriteOnly));
+      QVERIFY(imageB.write(QByteArray("P5\n4 3\n255\n") + QByteArray(12, char(254))) == 23);
+      QFile yamlB(editorYamlB);
+      QVERIFY(yamlB.open(QIODevice::WriteOnly));
+      QVERIFY(yamlB.write("image: other.pgm\nmode: trinary\nresolution: 0.1\n"
+                          "origin: [5.0, 6.0, 0.0]\n"
+                          "negate: 0\nfree_thresh: 0.25\noccupied_thresh: 0.65\n") > 0);
     }
     mapPrefix->setText(editorMapDirectory.filePath(QStringLiteral("map")));
     editorAction->trigger();
@@ -170,16 +180,33 @@ private slots:
     QVERIFY(editorDialog && editorDialog->document());
     QCOMPARE(editorDialog->document()->width(), 4);
     QCOMPARE(editorDialog->document()->height(), 3);
+
+    // Same source, same backend/prefix: auto-fill is allowed.
+    const QString acceptedTarget = editorMapDirectory.filePath(QStringLiteral("accepted_edited.yaml"));
+    QString saveError;
+    QVERIFY2(editorDialog->saveToPath(acceptedTarget, &saveError), qPrintable(saveError));
+    QCOMPARE(navigationYaml->text(), acceptedTarget);
+
+    // User opens another map B from inside the editor: its final source no
+    // longer matches the source recorded when the editor was opened.
+    QVERIFY2(editorDialog->loadMap(editorYamlB, &saveError), qPrintable(saveError));
+    navigationYaml->clear();
+    const QString sourceMismatchTarget =
+        editorMapDirectory.filePath(QStringLiteral("source_mismatch_edited.yaml"));
+    QVERIFY2(editorDialog->saveToPath(sourceMismatchTarget, &saveError), qPrintable(saveError));
+    QVERIFY(navigationYaml->text().isEmpty());
+
+    // Switching the main-window backend must also block auto-fill.
+    QVERIFY2(editorDialog->loadMap(editorYaml, &saveError), qPrintable(saveError));
     auto *profileSelector = window.findChild<QComboBox *>(QStringLiteral("profileSelector"));
     QVERIFY(profileSelector != nullptr);
     const int originalProfile = profileSelector->currentIndex();
     window.setProfileIndex(4); // Cartographer navigation: different localization source
     QCOMPARE(profileSelector->currentIndex(), 4);
+    const QString profileMismatchTarget =
+        editorMapDirectory.filePath(QStringLiteral("profile_mismatch_edited.yaml"));
+    QVERIFY2(editorDialog->saveToPath(profileMismatchTarget, &saveError), qPrintable(saveError));
     QVERIFY(navigationYaml->text().isEmpty());
-    const QString mismatchTarget = editorMapDirectory.filePath(QStringLiteral("mismatch_edited.yaml"));
-    QString saveError;
-    QVERIFY2(editorDialog->saveToPath(mismatchTarget, &saveError), qPrintable(saveError));
-    QVERIFY(navigationYaml->text().isEmpty()); // never fill a map from another backend
     window.setProfileIndex(originalProfile);
     QTRY_COMPARE(profileSelector->currentIndex(), originalProfile);
     editorDialog->close();
