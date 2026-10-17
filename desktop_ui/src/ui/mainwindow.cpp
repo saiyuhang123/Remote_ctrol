@@ -92,7 +92,27 @@ MainWindow::MainWindow(const DesktopConfig &config, bool offline, QWidget *paren
   applyProfile();
   updateControls();
 }
-MainWindow::~MainWindow() { controller_->stopManual(); if (process_->running()) controller_->emergencyStop(); delete cameraPanel_; cameraPanel_ = nullptr; delete controller_; controller_ = nullptr; delete rviz_; rviz_ = nullptr; delete ros_; ros_ = nullptr; delete ui_; }
+MainWindow::~MainWindow() {
+  // Children are destroyed by QObject after MainWindow's own members have
+  // already been destroyed. Tear the editor down while `this` is still a
+  // complete object, and disconnect its destroyed callback first.
+  if (mapEditor_) {
+    QObject::disconnect(mapEditor_, nullptr, this, nullptr);
+    delete mapEditor_;
+    mapEditor_ = nullptr;
+  }
+  controller_->stopManual();
+  if (process_->running()) controller_->emergencyStop();
+  delete cameraPanel_;
+  cameraPanel_ = nullptr;
+  delete controller_;
+  controller_ = nullptr;
+  delete rviz_;
+  rviz_ = nullptr;
+  delete ros_;
+  ros_ = nullptr;
+  delete ui_;
+}
 const Profile &MainWindow::profile() const { return desktopProfiles().at(profiles_->currentIndex()); }
 bool MainWindow::allowed() const { return !offline_ && enableControl_->isChecked(); }
 void MainWindow::setupUi() {
