@@ -186,15 +186,29 @@ private slots:
     QString saveError;
     QVERIFY2(editorDialog->saveToPath(acceptedTarget, &saveError), qPrintable(saveError));
     QCOMPARE(navigationYaml->text(), acceptedTarget);
+    auto *navigationSelection =
+        editorDialog->findChild<QLabel *>(QStringLiteral("mapEditorNavigationSelection"));
+    QVERIFY(navigationSelection != nullptr);
+    QVERIFY(navigationSelection->text().contains(QStringLiteral("已选为下次导航地图")));
+
+    // Changing the map prefix invalidates the association even though the
+    // navigation YAML field itself has not changed.
+    const QString acceptedPrefix = mapPrefix->text();
+    mapPrefix->setText(acceptedPrefix + QStringLiteral("_other"));
+    QVERIFY(navigationSelection->text().contains(QStringLiteral("待确认")));
+    QCOMPARE(navigationYaml->text(), acceptedTarget);
+    mapPrefix->setText(acceptedPrefix);
+    QVERIFY(navigationSelection->text().contains(QStringLiteral("已选为下次导航地图")));
 
     // User opens another map B from inside the editor: its final source no
-    // longer matches the source recorded when the editor was opened.
+    // longer matches the source recorded when the editor was opened. The
+    // previous accepted selection must be preserved.
     QVERIFY2(editorDialog->loadMap(editorYamlB, &saveError), qPrintable(saveError));
-    navigationYaml->clear();
     const QString sourceMismatchTarget =
         editorMapDirectory.filePath(QStringLiteral("source_mismatch_edited.yaml"));
     QVERIFY2(editorDialog->saveToPath(sourceMismatchTarget, &saveError), qPrintable(saveError));
-    QVERIFY(navigationYaml->text().isEmpty());
+    QCOMPARE(navigationYaml->text(), acceptedTarget);
+    QVERIFY(navigationSelection->text().contains(QStringLiteral("其他 YAML")));
 
     // Switching the main-window backend must also block auto-fill.
     QVERIFY2(editorDialog->loadMap(editorYaml, &saveError), qPrintable(saveError));

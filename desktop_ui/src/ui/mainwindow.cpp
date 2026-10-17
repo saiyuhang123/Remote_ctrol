@@ -185,6 +185,8 @@ void MainWindow::setupUi() {
   manage_ = new QCheckBox("由界面启动与管理所选流程"); run->addWidget(manage_);
   mapPrefix_ = new QLineEdit; mapPrefix_->setObjectName("mapPrefix"); mapPrefix_->setPlaceholderText("地图绝对路径，不带扩展名"); run->addWidget(mapPrefix_);
   navigationYaml_ = new QLineEdit; navigationYaml_->setObjectName("navigationYaml"); navigationYaml_->setPlaceholderText("可选：编辑后的导航栅格 YAML 绝对路径；留空使用上方前缀 .yaml"); run->addWidget(navigationYaml_);
+  connect(navigationYaml_, &QLineEdit::textChanged, this, [this] { refreshEditorNavigationFeedback(); });
+  connect(mapPrefix_, &QLineEdit::textChanged, this, [this] { refreshEditorNavigationFeedback(); });
   sensors_ = new QCheckBox("启动雷达 / IMU"); sensors_->setChecked(true); chassis_ = new QCheckBox("启动底盘驱动"); bridge_ = new QCheckBox("启用底盘控制桥"); run->addWidget(sensors_); run->addWidget(chassis_); run->addWidget(bridge_);
   odom_ = new QComboBox; odom_->addItems({"lio", "wheel", "wheel_imu"}); run->addWidget(odom_);
   start_ = button("启动所选流程（不另起 RViz）", run); connect(start_, &QPushButton::clicked, this, &MainWindow::startSession);
@@ -251,6 +253,7 @@ void MainWindow::applyProfile() {
   mapPrefix_->setText(config_.projectRoot + "/maps/" + profile().backend + "/map");
   if (profileChanged) navigationYaml_->clear();
   lastProfileIndex_ = profileIndex;
+  if (mapEditor_) refreshEditorNavigationFeedback();
   state_.poseValid = false;
   log("已加载显示：" + profile().name + "；此操作不切换后台算法"); updateControls();
 }
@@ -319,6 +322,18 @@ void MainWindow::startSession() {
   if (profile().id == "slam_navigation") log("AMCL 已启动：请启用操作并点选车辆实际位置与朝向；收到激光后建立 map TF，Nav2 随后继续激活");
   log("车辆操作使用本地 ROS2；首次行驶前需明确点击解除急停");
 }
+bool MainWindow::mapEditorSourceMatchesCurrent() const {
+  return !mapEditorProfileId_.isEmpty() &&
+         profile().id == mapEditorProfileId_ &&
+         mapPrefix_->text().trimmed() == mapEditorSourcePrefix_;
+}
+
+void MainWindow::refreshEditorNavigationFeedback() {
+  if (!mapEditor_ || !navigationYaml_ || !mapPrefix_) return;
+  mapEditor_->updateNavigationSelection(navigationYaml_->text().trimmed(),
+                                        mapEditorSourceMatchesCurrent());
+}
+
 void MainWindow::openMapEditor() {
   if (mapEditor_) {
     mapEditor_->raise();
@@ -333,6 +348,7 @@ void MainWindow::openMapEditor() {
   mapEditorProfileId_ = profile().id;
   mapEditorSourcePrefix_ = mapPrefix_->text().trimmed();
   mapEditorInitialSourceYaml_ = initial;
+  refreshEditorNavigationFeedback();
   connect(editor, &MapEditorDialog::mapSaved, this, [this](const QString &yamlPath, const QString &sourceYamlPath) {
     const bool sameDocumentSource = !mapEditorInitialSourceYaml_.trimmed().isEmpty() &&
                                      !sourceYamlPath.trimmed().isEmpty() &&
@@ -342,12 +358,14 @@ void MainWindow::openMapEditor() {
                             profile().id == mapEditorProfileId_ &&
                             mapPrefix_->text().trimmed() == mapEditorSourcePrefix_;
     if (!sameSource) {
+      refreshEditorNavigationFeedback();
       log(QStringLiteral("地图编辑来源模式或原地图前缀已变化，未自动填入导航栅格 YAML；"
                          "请重新确认编辑图与当前定位文件对应后再手动选择：%1（来源：%2）")
               .arg(yamlPath, sourceYamlPath));
       return;
     }
     navigationYaml_->setText(yamlPath);
+    refreshEditorNavigationFeedback();
     log("地图编辑已保存：" + yamlPath + "（来源：" + sourceYamlPath + "）；已填入导航栅格 YAML，下次启动导航使用");
   });
   connect(editor, &QObject::destroyed, this, [this] {

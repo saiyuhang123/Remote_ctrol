@@ -31,6 +31,8 @@ public:
   bool cancelLinePreview();
   QPointF cellToScreen(int u, int v) const;
   bool screenToCell(const QPointF &point, int *u, int *v) const;
+  double viewScale() const { return scale_; }
+  bool autoFitEnabled() const { return autoFit_; }
 
 public slots:
   void fitToView();
@@ -57,6 +59,9 @@ private:
   void resetPendingCommand();
   void emitCursor(const QPointF &screenPoint);
   void zoomBy(double factor, const QPointF &anchor);
+  void updateHoverPreview(const QPointF &screenPoint);
+  void clearHoverPreview();
+  void setManualView();
 
   MapDocument *document_ = nullptr;
   QImage image_;
@@ -64,6 +69,10 @@ private:
   int brushRadius_ = 2;
   double scale_ = 1.0;
   QPointF offset_{0.0, 0.0};
+  bool autoFit_ = true;
+  bool hoverPreviewVisible_ = false;
+  int hoverU_ = -1;
+  int hoverV_ = -1;
 
   bool panning_ = false;
   QPoint lastPanPosition_;

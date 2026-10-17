@@ -32,6 +32,8 @@ private:
   void sendInitialPose(double x, double y, double yaw);
   void startSession();
   void openMapEditor();
+  bool mapEditorSourceMatchesCurrent() const;
+  void refreshEditorNavigationFeedback();
   void showPoints(const QJsonArray &points);
   bool allowed() const;
   DesktopConfig config_;

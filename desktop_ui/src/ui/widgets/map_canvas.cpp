@@ -33,6 +33,8 @@ void MapCanvas::setDocument(MapDocument *document) {
   document_ = document;
   resetPendingCommand();
   linePreviewVisible_ = false;
+  hoverPreviewVisible_ = false;
+  autoFit_ = true;
   image_ = QImage();
   if (document_ && document_->valid()) {
     refreshImage();
@@ -47,12 +49,14 @@ void MapCanvas::setDocument(MapDocument *document) {
 void MapCanvas::setTool(Tool tool) {
   tool_ = tool;
   linePreviewVisible_ = false;
+  clearHoverPreview();
   resetPendingCommand();
   update();
 }
 
 void MapCanvas::setBrushRadius(int cells) {
   brushRadius_ = std::clamp(cells, 0, 200);
+  if (hoverPreviewVisible_) update();
 }
 
 void MapCanvas::setPendingCommandHandler(
@@ -147,26 +151,67 @@ void MapCanvas::paintEvent(QPaintEvent *event) {
     }
   }
 
+  if (hoverPreviewVisible_ && hoverU_ >= 0 && hoverV_ >= 0 && !linePreviewVisible_) {
+    QColor fill(31, 111, 235, 55);
+    if (tool_ == Tool::Free || tool_ == Tool::FreeLine) fill = QColor(255, 255, 255, 165);
+    else if (tool_ == Tool::Unknown || tool_ == Tool::UnknownLine) fill = QColor(156, 156, 156, 120);
+    else fill = QColor(15, 18, 22, 62);
+    painter.setBrush(fill);
+    QPen outline(QColor(31, 111, 235, 230));
+    outline.setWidthF(std::max(1.0, 1.5));
+    painter.setPen(outline);
+    if (brushRadius_ <= 0) {
+      painter.drawRect(QRectF(cellToScreen(hoverU_, hoverV_), QSizeF(scale_, scale_)));
+    } else {
+      const QPointF center =
+          cellToScreen(hoverU_, hoverV_) + QPointF(scale_ / 2.0, scale_ / 2.0);
+      const double radius = (brushRadius_ + 0.5) * scale_;
+      painter.drawEllipse(center, radius, radius);
+    }
+  }
+
   if (linePreviewVisible_ && isLineTool(tool_)) {
     const QPointF start =
         cellToScreen(lineStartU_, lineStartV_) + QPointF(scale_ / 2.0, scale_ / 2.0);
     const QPointF end =
         cellToScreen(lineEndU_, lineEndV_) + QPointF(scale_ / 2.0, scale_ / 2.0);
-    QPen pen(QColor(214, 69, 65, 210));
-    pen.setWidthF(std::max(1.0, (brushRadius_ * 2.0 + 1.0) * scale_));
-    pen.setCapStyle(Qt::RoundCap);
-    painter.setPen(pen);
+    const double width = std::max(1.0, (brushRadius_ * 2.0 + 1.0) * scale_);
+    QColor stateColor(31, 111, 235, 170);
+    if (tool_ == Tool::FreeLine) stateColor = QColor(245, 245, 245, 190);
+    else if (tool_ == Tool::UnknownLine) stateColor = QColor(156, 156, 156, 190);
+    else stateColor = QColor(36, 40, 44, 190);
+    QPen outline(QColor(31, 111, 235, 235));
+    outline.setWidthF(width + 2.0);
+    outline.setCapStyle(Qt::RoundCap);
+    painter.setPen(outline);
+    painter.drawLine(start, end);
+    QPen fillPen(stateColor);
+    fillPen.setWidthF(width);
+    fillPen.setCapStyle(Qt::RoundCap);
+    painter.setPen(fillPen);
     painter.drawLine(start, end);
   }
 }
 
 void MapCanvas::resizeEvent(QResizeEvent *event) {
   QWidget::resizeEvent(event);
+  if (autoFit_) {
+    fitToView();
+    return;
+  }
+  const QSize oldSize = event->oldSize();
+  if (oldSize.isValid()) {
+    offset_ += QPointF((width() - oldSize.width()) / 2.0,
+                       (height() - oldSize.height()) / 2.0);
+  }
+  update();
 }
 
 void MapCanvas::mousePressEvent(QMouseEvent *event) {
   if (event->button() == Qt::MiddleButton || event->button() == Qt::RightButton) {
     panning_ = true;
+    setManualView();
+    clearHoverPreview();
     lastPanPosition_ = event->pos();
     setCursor(Qt::ClosedHandCursor);
     event->accept();
@@ -185,6 +230,7 @@ void MapCanvas::mousePressEvent(QMouseEvent *event) {
     return;
   }
 
+  clearHoverPreview();
   if (isLineTool(tool_)) {
     linePreviewVisible_ = true;
     lineStartU_ = lineEndU_ = u;
@@ -212,6 +258,8 @@ void MapCanvas::mouseMoveEvent(QMouseEvent *event) {
   if (panning_) {
     offset_ += QPointF(event->pos() - lastPanPosition_);
     lastPanPosition_ = event->pos();
+    setManualView();
+    clearHoverPreview();
     update();
     event->accept();
     return;
@@ -223,6 +271,7 @@ void MapCanvas::mouseMoveEvent(QMouseEvent *event) {
   if (linePreviewVisible_ && inside) {
     lineEndU_ = u;
     lineEndV_ = v;
+    clearHoverPreview();
     update();
   } else if (painting_ && (event->buttons() & Qt::LeftButton) && inside && pendingCommand_) {
     if (u != lastPaintU_ || v != lastPaintV_) {
@@ -233,8 +282,11 @@ void MapCanvas::mouseMoveEvent(QMouseEvent *event) {
       lastPaintU_ = u;
       lastPaintV_ = v;
       refreshImage();
+      clearHoverPreview();
       update();
     }
+  } else if (!painting_ && !linePreviewVisible_) {
+    updateHoverPreview(event->localPos());
   }
   emitCursor(event->localPos());
   event->accept();
@@ -277,6 +329,7 @@ void MapCanvas::mouseReleaseEvent(QMouseEvent *event) {
   }
   linePreviewVisible_ = false;
   refreshImage();
+  updateHoverPreview(event->localPos());
   update();
   event->accept();
 }
@@ -296,12 +349,14 @@ void MapCanvas::wheelEvent(QWheelEvent *event) {
 }
 
 void MapCanvas::leaveEvent(QEvent *event) {
+  clearHoverPreview();
   emit cursorMoved(0.0, 0.0, false);
   QWidget::leaveEvent(event);
 }
 
 void MapCanvas::zoomBy(double factor, const QPointF &anchor) {
   if (!document_) return;
+  setManualView();
   const double newScale = std::clamp(scale_ * factor, 0.02, 200.0);
   if (std::abs(newScale - scale_) < 1e-9) return;
   const QPointF imagePoint((anchor.x() - offset_.x()) / scale_,
@@ -314,6 +369,7 @@ void MapCanvas::zoomBy(double factor, const QPointF &anchor) {
 
 void MapCanvas::fitToView() {
   if (!document_ || document_->width() <= 0 || document_->height() <= 0) return;
+  autoFit_ = true;
   const double availableWidth = std::max(1, width() - 24);
   const double availableHeight = std::max(1, height() - 24);
   scale_ = std::clamp(std::min(availableWidth / document_->width(),
@@ -331,6 +387,36 @@ void MapCanvas::zoomIn() {
 
 void MapCanvas::zoomOut() {
   zoomBy(0.8, rect().center());
+}
+
+void MapCanvas::setManualView() {
+  autoFit_ = false;
+}
+
+void MapCanvas::clearHoverPreview() {
+  if (!hoverPreviewVisible_ && hoverU_ < 0 && hoverV_ < 0) return;
+  hoverPreviewVisible_ = false;
+  hoverU_ = hoverV_ = -1;
+  update();
+}
+
+void MapCanvas::updateHoverPreview(const QPointF &screenPoint) {
+  if (!document_ || panning_ || painting_ || linePreviewVisible_) {
+    clearHoverPreview();
+    return;
+  }
+  int u = 0;
+  int v = 0;
+  if (!screenToCell(screenPoint, &u, &v)) {
+    clearHoverPreview();
+    return;
+  }
+  if (!hoverPreviewVisible_ || hoverU_ != u || hoverV_ != v) {
+    hoverPreviewVisible_ = true;
+    hoverU_ = u;
+    hoverV_ = v;
+    update();
+  }
 }
 
 void MapCanvas::emitCursor(const QPointF &screenPoint) {
