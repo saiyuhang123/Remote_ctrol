@@ -24,6 +24,7 @@ setup(
         "console_scripts": [
             "patrol_node = robot_patrol.node:main",
             "patrol_guard = robot_patrol.guard:main",
+            "inspection_recorder = robot_patrol.inspection_recorder:main",
             "patrol_cli = robot_patrol.cli:main",
         ],
     },

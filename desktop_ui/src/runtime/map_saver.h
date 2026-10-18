@@ -17,8 +17,10 @@ private:
   void finish(bool success, const QString &detail);
   RosAdapter *ros_;
   ProcessManager export_;
-  QString resourceDir_;
-  QString backend_, prefix_;
+  ProcessManager webExport_;
+  QString resourceDir_, projectRoot_;
+  QString backend_, prefix_, localDetail_;
+  bool webExportPending_ = false;
   QDateTime started_;
   quint64 generation_ = 0;
   bool busy_ = false;

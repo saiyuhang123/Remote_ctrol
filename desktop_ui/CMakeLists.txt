@@ -40,7 +40,7 @@ add_library(desktop_app STATIC
   src/ui/mainwindow.cpp src/ui/mainwindow_layout.cpp src/ui/console_theme.cpp
   src/ui/mainwindow.ui src/ui/camera_panel.cpp
   src/ui/widgets/dashboard.cpp src/rviz/rviz_host.cpp
-  src/adapters/ros_adapter.cpp src/adapters/local_controller.cpp src/adapters/business_client.cpp
+  src/adapters/ros_adapter.cpp src/adapters/local_controller.cpp
   src/runtime/process_manager.cpp src/runtime/map_saver.cpp
   src/patrol/patrol_client.cpp src/patrol/patrol_page.cpp
   src/vision/vision_client.cpp src/vision/vision_panel.cpp

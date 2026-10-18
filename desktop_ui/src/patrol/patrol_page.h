@@ -33,6 +33,7 @@ private slots:
   void onPointsChanged();
   void onRoutesChanged();
   void onRunsChanged();
+  void onHomePointChanged();
   void onStatusChanged();
   void registerCurrentMap();
   void setActiveMap();
@@ -52,6 +53,10 @@ private slots:
   void pauseRun();
   void resumeRun();
   void cancelRun();
+  void refreshHomePoint();
+  void saveHomePoint();
+  void clearHomePoint();
+  void returnHome();
   void showOperation(const QString &operation, bool success, const QString &message);
   void showError(const QString &message);
 
@@ -94,6 +99,10 @@ private:
   QPushButton *setActiveButton_ = nullptr;
   QPushButton *refreshAllButton_ = nullptr;
   QLabel *activeMapLabel_ = nullptr;
+  QLabel *homePointLabel_ = nullptr;
+  QPushButton *saveHomeButton_ = nullptr;
+  QPushButton *clearHomeButton_ = nullptr;
+  QPushButton *returnHomeButton_ = nullptr;
   QLabel *messageLabel_ = nullptr;
   QTabWidget *tabs_ = nullptr;
 

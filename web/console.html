@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>巡检机器人控制台</title>
+<link rel="stylesheet" href="theme.css">
+<script src="ui.js" defer></script>
+</head>
+<body class="console-body">
+<header class="console-header">
+  <div class="brand">
+    <span class="brand-mark"><span class="icon" data-icon="robot"></span></span>
+    <div><strong>巡检机器人</strong><small>ROBOT CONTROL</small></div>
+  </div>
+  <nav class="console-nav" aria-label="工作区">
+    <a href="#monitor" data-page="monitor"><span class="icon" data-icon="monitor"></span>监控台</a>
+    <a href="#tasks" data-page="tasks"><span class="icon" data-icon="route"></span>巡检任务</a>
+    <a href="#records" data-page="records"><span class="icon" data-icon="records"></span>巡检记录</a>
+  </nav>
+  <div class="console-state" role="status">
+    <span id="connection">连接中</span><span id="owner">未取得控制权</span><span id="task"></span>
+  </div>
+  <div class="console-actions">
+    <button class="btn gray" id="release" disabled>释放控制权</button>
+    <button class="btn" id="stop"><span class="icon" data-icon="stop"></span>急停</button>
+  </div>
+</header>
+<iframe id="view" title="机器人工作区" allow="autoplay; fullscreen" allowfullscreen></iframe>
+<script src="console.js"></script>
+</body>
+</html>

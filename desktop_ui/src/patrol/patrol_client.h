@@ -31,6 +31,13 @@ struct PatrolRouteInfo {
   quint64 revision = 0;
 };
 
+struct PatrolHomeInfo {
+  QString mapId;
+  quint64 mapRevision = 0;
+  bool exists = false;
+  double x = 0.0, y = 0.0, yaw = 0.0;
+};
+
 struct PatrolRunInfo {
   QString runId, routeId, mapId, errorCode, message;
   int state = 0;
@@ -71,6 +78,12 @@ public:
                    const QVector<PatrolRouteStepInfo> &steps, quint64 expectedRevision);
   void deleteRoute(const QString &routeId, quint64 expectedRevision);
   void refreshRuns(const QString &mapId = QString(), const QString &routeId = QString());
+  void refreshHomePoint(const QString &mapId = QString());
+  void saveCurrentPoseAsHome(const QString &mapId, quint64 expectedMapRevision);
+  void clearHomePoint(const QString &mapId, quint64 expectedMapRevision);
+  void returnHome(const QString &mapId, quint64 mapRevision);
+  void cancelReturnHome();
+  void cancelActiveTask();
   void runRoute(const QString &routeId, const QString &mapId,
                 quint64 routeRevision, quint64 mapRevision, quint32 loopCount);
   void cancelRunRoute();
@@ -83,6 +96,7 @@ public:
   QVector<PatrolPointInfo> points() const;
   QVector<PatrolRouteInfo> routes() const;
   QVector<PatrolRunInfo> runs() const;
+  PatrolHomeInfo homePoint() const;
   PatrolStatusInfo status() const;
 
   static QString stateName(int state);
@@ -92,6 +106,7 @@ signals:
   void pointsChanged();
   void routesChanged();
   void runsChanged();
+  void homePointChanged();
   void statusChanged();
   void operationFinished(const QString &operation, bool success, const QString &message);
   void errorOccurred(const QString &message);

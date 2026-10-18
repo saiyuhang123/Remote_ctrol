@@ -1,0 +1,374 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>巡检任务 · 巡检机器人</title>
+<script src="page-bridge.js"></script>
+<link rel="stylesheet" href="theme.css">
+<script src="ui.js" defer></script>
+</head>
+<body class="tasks-page">
+<header class="page-header">
+  <div class="page-title"><h1>巡检任务</h1><p>选择已有路线，执行巡航或返回待命点</p></div>
+  <nav><a href="/monitor.html">监控台</a><a href="/records.html">巡检记录</a></nav>
+  <div class="header-status">
+    <span id="status" class="bad">未连接</span><span id="controlTag">未取得控制权</span>
+    <button class="btn" id="btnClaim">取得控制权</button><button class="btn gray" id="btnRelease" disabled>释放</button>
+  </div>
+</header>
+<main class="tasks-layout">
+  <section>
+    <div class="card">
+      <h2><span class="section-title"><span class="icon" data-icon="route"></span>选择巡检路线</span><span class="tag">本地路线</span></h2>
+      <p class="card-description">路线由本地桌面设置，选中后即可执行。</p>
+      <div class="table-wrap">
+        <table><thead><tr><th style="width:36px"><span class="muted">选</span></th><th>路线名称</th><th>版本</th><th>巡检点</th><th>状态</th></tr></thead><tbody id="routeBody"></tbody></table>
+      </div>
+      <div id="routeEmpty" class="empty-state"><span class="icon" data-icon="route"></span><span>暂无可选路线</span><p>请先在本地桌面创建路线并关联当前地图</p></div>
+      <div class="route-controls">
+        <label class="loop-label" for="loopCount">巡航圈数<input id="loopCount" type="number" min="0" max="100000" value="1" title="0 表示持续循环"></label>
+        <button class="btn success" id="btnStart" disabled><span class="icon" data-icon="play"></span>立即执行</button>
+        <button class="btn gray" id="btnPause" disabled>暂停</button><button class="btn gray" id="btnResume" disabled>继续</button><button class="btn danger" id="btnCancel" disabled>取消任务</button>
+      </div>
+      <p class="form-hint">圈数设为 0 时持续循环，任务状态以本地执行器反馈为准。</p>
+    </div>
+    <div class="card">
+      <h2><span class="section-title"><span class="icon" data-icon="monitor"></span>执行状态</span><span class="tag">实时反馈</span></h2>
+      <div class="task-heading"><span class="icon" data-icon="compass"></span><div><small>当前任务</small><div class="taskState" id="taskState">空闲</div></div></div>
+      <div class="task-details">
+        <div class="row"><span>路线 / 地图</span><b id="taskRoute">—</b></div>
+        <div class="row"><span>巡航圈数</span><b id="taskLoop">—</b></div>
+        <div class="row"><span>当前巡检点</span><b id="taskStep">—</b></div>
+        <div class="row"><span>Nav2 目标</span><b id="taskNav">—</b></div>
+      </div>
+      <div class="taskMessage" id="taskMessage" role="status"></div>
+      <div class="buttonRow"><button class="btn warning" id="btnReturn" disabled><span class="icon" data-icon="home"></span>返回待命点</button><button class="btn gray" id="btnReturnCancel" disabled>取消返航</button></div>
+    </div>
+  </section>
+  <aside>
+    <div class="card">
+      <h2><span class="section-title"><span class="icon" data-icon="compass"></span>当前地图</span><span id="mapSyncTag" class="tag">加载中</span></h2>
+      <div id="mapWarning" class="warningBox hidden"></div>
+      <div class="row"><span>地图名称</span><b id="mapName">—</b></div>
+      <div class="row"><span>ID / 版本</span><b id="mapRevision">—</b></div>
+      <div class="row"><span>待命返航点</span><b id="homeText">—</b></div>
+      <div class="row"><span>路线数量</span><b id="routeCount">0</b></div>
+    </div>
+    <div class="card">
+      <h2><span class="section-title"><span class="icon" data-icon="shield"></span>控制状态</span></h2>
+      <div class="row"><span>当前控制者</span><b id="ownerText">无</b></div>
+      <div class="row"><span>车辆模式</span><b id="modeText">空闲</b></div>
+      <div class="row"><span>控制心跳</span><b id="leaseText">未知</b></div>
+      <div class="row"><span>急停</span><b id="estopText">未知</b></div>
+    </div>
+    <div class="card">
+      <h2><span class="section-title"><span class="icon" data-icon="records"></span>最近巡检</span><a href="/records.html" style="font-size:11px">查看全部 →</a></h2>
+      <div class="records" id="records"><div class="muted">暂无记录</div></div>
+    </div>
+  </aside>
+</main>
+
+<script>
+const host = location.hostname;
+const $ = id => document.getElementById(id);
+const app = {
+  ws: null, session: null, telemetry: null, state: null, selectedRouteId: '',
+  routes: [], taskActive: false, pendingStart: null, lastPatrol: null, messageIsError: false,
+};
+const TASK_NAMES = {idle:'空闲', validating:'校验任务', dispatching:'派发目标', navigating:'导航中',
+  settling:'确认停稳', dwelling:'点位停留', pausing:'暂停中', paused:'已暂停',
+  canceling:'取消中', canceled:'已取消', succeeded:'已完成', failed:'失败',
+  interrupted:'已中断', stopping:'停车中'};
+const CONTROL_NAMES = {idle:'无控制者', manual:'网页手动', route:'网页路线', 'return':'网页返航'};
+function requestId(prefix) { return `${prefix}_${Date.now()}_${Math.random().toString(16).slice(2, 9)}`; }
+function sendRaw(value) {
+  if (!app.ws || app.ws.readyState !== 1) return false;
+  app.ws.send(JSON.stringify(value)); return true;
+}
+function sendControl(type, extra = {}) {
+  if (!app.session) { setMessage('请先取得控制权', true); return false; }
+  const sent = sendRaw({type, request_id:requestId(type), session_id:app.session, ...extra});
+  if (!sent) setMessage('连接已断开，请等待重连', true);
+  return sent;
+}
+function setMessage(text, bad = false, fromStatus = false) {
+  if (fromStatus && app.messageIsError) return;
+  app.messageIsError = bad;
+  $('taskMessage').textContent = text || '';
+  $('taskMessage').style.color = bad ? 'var(--danger)' : 'var(--warning)';
+}
+function setConnection(ok, text) { $('status').textContent = text; $('status').className = ok ? 'ok' : 'bad'; }
+function connect() {
+  app.ws = new RobotConnection();
+  app.ws.onopen = () => setConnection(true, '已连接机器人');
+  app.ws.onclose = () => {
+    setConnection(false, '连接断开，3s 后重连…');
+    app.session = null; app.telemetry = null; app.lastPatrol = null;
+    app.pendingStart = null; app.taskActive = false; updateUi();
+  };
+  app.ws.onmessage = event => {
+    let data; try { data = JSON.parse(event.data); } catch (_) { return; }
+    if (data.type === 'session_state') {
+      app.session = data.session_id || null;
+      if (!app.session) app.pendingStart = null;
+      updateUi();
+    } else if (data.type === 'telemetry') {
+      app.telemetry = data;
+      app.taskActive = Boolean(data.task && data.task.running);
+      if (data.task && data.task.request_id === app.pendingStart) app.pendingStart = null;
+      if (data.patrol) app.lastPatrol = data.patrol;
+      updateUi();
+    } else if (data.type === 'control_state') {
+      if (app.telemetry) { app.telemetry.control = data.control; app.telemetry.task = data.task; }
+      app.taskActive = Boolean(data.task && data.task.running);
+      if (data.control && !data.control.owner_present) { app.session = null; app.pendingStart = null; }
+      updateUi();
+    } else if (data.type === 'command_result') handleResult(data);
+    else if (data.type === 'task_status') {
+      app.lastPatrol = data.status;
+      setMessage(`${TASK_NAMES[data.status.state_name] || data.status.state_name || '任务'}：${data.status.message || ''}`, false, true);
+      updateTask(data.status);
+    } else if (data.type === 'task_accepted') {
+      setMessage('本地执行器已接受任务');
+      if (data.request_id === app.pendingStart) app.pendingStart = null;
+      app.taskActive = true; updateUi();
+    } else if (data.type === 'task_finished') {
+      if (data.request_id === app.pendingStart) app.pendingStart = null;
+      if (data.continuation === 'return') {
+        setMessage('当前路线已结束，正在转入一键返航');
+        app.taskActive = true;
+      } else {
+        setMessage(`任务结束：${data.success ? '成功' : (data.code || '失败')} ${data.message || ''}`, !data.success);
+        app.taskActive = false;
+      }
+      updateUi(); loadState(); loadRecords();
+    }
+  };
+}
+connect();
+
+function handleResult(data) {
+  if (data.command === 'control_claim') {
+    if (data.ok) app.session = data.session_id || app.session;
+    else app.session = null;
+    setMessage(data.message || (data.ok ? '已取得控制权' : '无法取得控制权'), !data.ok);
+    updateUi();
+  } else if (data.command === 'control_release') {
+    app.session = null; setMessage(data.message || '已释放控制权', !data.ok); updateUi();
+  } else if (data.command === 'return_home' && data.ok && data.code === 'PENDING') {
+    setMessage(data.message || '正在取消当前路线，随后返航');
+  } else if (data.command === 'return_home') {
+    if (!data.ok) app.taskActive = Boolean(task().running);
+    setMessage(data.message || (data.ok ? '返航已提交' : '返航失败'), !data.ok);
+    updateUi();
+  } else if (['route_start','route_pause','route_resume','route_cancel','return_cancel'].includes(data.command)) {
+    if (data.command === 'route_start' && (!data.request_id || data.request_id === app.pendingStart)) {
+      if (!data.ok || data.code === 'ACCEPTED') app.pendingStart = null;
+      if (!data.ok) app.taskActive = Boolean(task().running);
+    }
+    setMessage(data.message || (data.ok ? '命令已受理' : '命令失败'), !data.ok);
+    updateUi();
+  }
+}
+
+function isOwner() {
+  return Boolean(app.session && app.telemetry && app.telemetry.control &&
+                 app.telemetry.control.owner_present);
+}
+function task() { return (app.telemetry && app.telemetry.task) || {kind:'', running:false}; }
+function taskRunning() { return Boolean(task().running) || app.taskActive || Boolean(app.pendingStart); }
+
+async function loadState() {
+  try {
+    const response = await fetch('/api/local/state', {cache:'no-store'});
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.detail || '状态接口失败');
+    app.state = data;
+    app.routes = Array.isArray(data.routes) ? data.routes : [];
+    if (!app.routes.some(route => route.route_id === app.selectedRouteId && route.valid))
+      app.selectedRouteId = '';
+    renderState();
+  } catch (error) {
+    app.state = null; app.routes = []; app.selectedRouteId = '';
+    $('mapSyncTag').textContent = '不可用'; $('mapSyncTag').className = 'tag invalid';
+    showMapWarning(error.message || '无法读取本地巡检数据');
+    renderRoutes(); updateUi();
+  }
+}
+
+function renderState() {
+  const state = app.state;
+  if (!state) return;
+  const map = state.active_map;
+  const sync = Boolean(state.map_sync_ok && map);
+  $('mapSyncTag').textContent = sync ? '版本一致' : '版本异常';
+  $('mapSyncTag').className = `tag ${sync ? 'valid' : 'invalid'}`;
+  if (!sync) showMapWarning(state.active_error || '网页地图与本地地图版本不一致，禁止执行路线');
+  else $('mapWarning').classList.add('hidden');
+  $('mapName').textContent = map ? map.name : '-';
+  $('mapRevision').textContent = map ? `${map.map_id} / r${map.revision}` : '-';
+  if (state.home) {
+    $('homeText').textContent = `(${Number(state.home.x).toFixed(2)}, ${Number(state.home.y).toFixed(2)}) · ${(Number(state.home.yaw) * 180 / Math.PI).toFixed(1)}°`;
+    $('homeText').className = 'good';
+  } else {
+    $('homeText').textContent = '未设置或已因地图版本失效';
+    $('homeText').className = 'warning';
+  }
+  $('routeCount').textContent = String(app.routes.length);
+  renderRoutes();
+  updateUi();
+}
+function showMapWarning(text) {
+  const box = $('mapWarning'); box.textContent = text || ''; box.classList.remove('hidden');
+}
+
+function renderRoutes() {
+  const body = $('routeBody'); body.innerHTML = '';
+  $('routeEmpty').classList.toggle('hidden', app.routes.length > 0);
+  for (const route of app.routes) {
+    const tr = document.createElement('tr');
+    if (route.route_id === app.selectedRouteId) tr.className = 'selected';
+    tr.innerHTML = `<td><input type="radio" name="route" ${route.valid ? '' : 'disabled'}
+        ${route.route_id === app.selectedRouteId ? 'checked' : ''}></td>
+      <td><div class="routeName">${escapeHtml(route.name)}</div>
+          <div class="routeMeta">${escapeHtml(route.route_id)}${route.invalid_reason ? ' · ' + escapeHtml(route.invalid_reason) : ''}</div></td>
+      <td>${route.revision}</td><td>${route.steps.length}</td>
+      <td><span class="tag ${route.valid ? 'valid' : 'invalid'}">${route.valid ? '可执行' : '禁止'}</span></td>`;
+    const radio = tr.querySelector('input');
+    radio.onchange = () => { app.selectedRouteId = route.route_id; renderRoutes(); updateUi(); };
+    tr.onclick = event => { if (event.target !== radio && route.valid) { radio.checked = true; radio.onchange(); } };
+    body.appendChild(tr);
+  }
+}
+function escapeHtml(value) {
+  return String(value ?? '').replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
+}
+
+function updateUi() {
+  const control = (app.telemetry && app.telemetry.control) || {};
+  const t = task();
+  const running = taskRunning();
+  const owner = isOwner();
+  const manual = owner && control.mode === 'manual';
+  const selected = app.routes.find(route => route.route_id === app.selectedRouteId && route.valid);
+  const sync = Boolean(app.state && app.state.map_sync_ok && app.state.active_map);
+  const home = Boolean(app.state && app.state.home);
+  $('btnClaim').disabled = Boolean(app.session) || Boolean(control.owner_present) ||
+    Boolean(control.local_control) || control.estop_known !== true ||
+    control.estopped === true;
+  $('btnClaim').title = control.estop_known !== true
+    ? '等待本地急停状态反馈' : (control.estopped === true
+      ? '急停保持中，请先在本地解除' : '取得本网页的单一控制权');
+  $('btnRelease').disabled = !owner;
+  $('controlTag').textContent = owner ? '本网页控制中' :
+    (control.local_control ? '本地控制优先' : (control.owner_present ? '其他网页控制中' : '未取得控制权'));
+  $('controlTag').dataset.tone = owner ? 'good' : ((control.owner_present || control.local_control) ? 'warn' : 'muted');
+  $('ownerText').textContent = control.local_control ? '本地桌面' : (control.owner_present ? '网页' : '无');
+  $('modeText').textContent = CONTROL_NAMES[control.mode] || control.mode || '空闲';
+  $('leaseText').textContent = owner ? '正常' : '无控制权';
+  $('leaseText').className = owner ? 'good' : 'muted';
+  $('estopText').textContent = control.estop_known !== true ? '状态未知' :
+    (control.estopped ? '急停保持' : '已释放');
+  $('estopText').className = control.estop_known !== true ? 'warning' :
+    (control.estopped ? 'dangerText' : 'good');
+  $('btnStart').disabled = !owner || !sync || !selected || running;
+  $('btnPause').disabled = !owner || !running || t.kind !== 'route';
+  $('btnResume').disabled = !owner || !running || t.kind !== 'route';
+  $('btnCancel').disabled = !owner || !running || t.kind !== 'route';
+  $('btnReturn').disabled = !owner || !sync || !home || t.kind === 'return' ||
+    Boolean(t.pending_return);
+  $('btnReturnCancel').disabled = !owner ||
+    !(t.kind === 'return' || t.pending_return);
+  // Route pause/resume are valid only in their matching state; keep the
+  // buttons available for the service to return an explicit reason.
+  if (manual || !running) updateTask(app.lastPatrol);
+}
+
+function updateTask(status) {
+  if (status && status.state !== undefined) {
+    app.lastPatrol = status;
+    $('taskState').textContent = TASK_NAMES[status.state_name] || status.state_name || status.state;
+    $('taskState').style.color = status.active ? 'var(--blue)' :
+      ['succeeded'].includes(status.state_name) ? 'var(--accent)' :
+      ['failed','interrupted','canceled'].includes(status.state_name) ? 'var(--danger)' : 'var(--text)';
+    $('taskRoute').textContent = status.route_id || status.map_id || '-';
+    $('taskLoop').textContent = status.total_loops
+      ? `${status.loop_index}/${status.total_loops}` : `${status.loop_index}/∞`;
+    $('taskStep').textContent = status.step_count
+      ? `${status.step_index}/${status.step_count} ${status.current_point_name || ''}` : '-';
+    const nav = app.telemetry && app.telemetry.nav;
+    $('taskNav').textContent = nav && nav.active_goal_count ? `${nav.active_goal_count} 个目标` : '无活动目标';
+    if (status.message || status.error_code)
+      setMessage(`${status.message || ''}${status.error_code ? ' [' + status.error_code + ']' : ''}`,
+                 ['failed','interrupted'].includes(status.state_name), true);
+  } else if (!taskRunning()) {
+    $('taskState').textContent = '空闲';
+    $('taskState').style.color = 'var(--text)';
+    $('taskRoute').textContent = '-'; $('taskLoop').textContent = '-';
+    $('taskStep').textContent = '-';
+  }
+}
+
+async function loadRecords() {
+  try {
+    const response = await fetch('/api/inspection/records?limit=5', {cache:'no-store'});
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.detail || '记录读取失败');
+    const host = $('records');
+    if (!data.items.length) { host.innerHTML = '<div class="muted">暂无记录</div>'; return; }
+    host.innerHTML = data.items.map(record => `
+      <div class="record"><div class="date">${escapeHtml(record.inspection_date)}</div>
+      <div class="muted">路线 ${escapeHtml(record.route_id)} · 人脸 ${record.face_capture_count} · 行人 ${record.person_count}</div>
+      <div class="plates">${record.plates.length ? record.plates.map(p =>
+        `${escapeHtml(p.plate)} ×${p.count}`).join('、') : '未识别到车牌'}</div></div>`).join('');
+  } catch (error) {
+    $('records').innerHTML = `<div class="muted">${escapeHtml(error.message)}</div>`;
+  }
+}
+
+$('btnClaim').onclick = () => sendRaw({type:'control_claim', request_id:requestId('claim')});
+$('btnRelease').onclick = () => { if (app.session) sendControl('control_release'); };
+$('btnStart').onclick = () => {
+  if (taskRunning()) return;
+  if (!app.state || !app.state.active_map) { setMessage('没有有效活跃地图', true); return; }
+  const route = app.routes.find(item => item.route_id === app.selectedRouteId && item.valid);
+  if (!route) { setMessage('请选择有效路线', true); return; }
+  const loopsText = $('loopCount').value.trim();
+  const loops = Number(loopsText);
+  if (!loopsText || !Number.isInteger(loops) || loops < 0 || loops > 100000) {
+    setMessage('圈数请输入 0～100000 的整数；0 表示持续循环', true); return;
+  }
+  const id = requestId('route_start');
+  if (!sendControl('route_start', {
+    request_id: id,
+    map_id: app.state.active_map.map_id,
+    map_revision: Number(app.state.active_map.revision),
+    route_id: route.route_id,
+    route_revision: Number(route.revision),
+    loop_count: loops,
+  })) return;
+  app.pendingStart = id; setMessage('正在提交路线任务…'); updateUi();
+  setTimeout(() => {
+    if (app.pendingStart !== id) return;
+    app.pendingStart = null; updateUi();
+    setMessage('未收到任务提交确认，请核对执行器状态后重试', true);
+  }, 10000);
+};
+$('btnPause').onclick = () => sendControl('route_pause');
+$('btnResume').onclick = () => sendControl('route_resume');
+$('btnCancel').onclick = () => sendControl('route_cancel');
+$('btnReturn').onclick = () => {
+  if (!app.state || !app.state.active_map) { setMessage('没有有效活跃地图', true); return; }
+  sendControl('return_home', {
+    map_id: app.state.active_map.map_id,
+    map_revision: Number(app.state.active_map.revision),
+  });
+};
+$('btnReturnCancel').onclick = () => sendControl('return_cancel');
+
+setInterval(loadState, 5000);
+loadState(); loadRecords();
+</script>
+</body>
+</html>

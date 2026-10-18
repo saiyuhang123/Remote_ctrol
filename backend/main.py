@@ -1,42 +1,20 @@
-"""FastAPI 业务后端主程序。
+"""FastAPI static server and read-only local business API.
 
-职责：托管 web/ 静态页面 + /api/* 业务接口 + SQLite 数据层。
-运行：python3 -m uvicorn backend.main:app --host 0.0.0.0 --port 8888
-（start_robot_monitor.sh 已集成）
+Run:
+  python3 -m uvicorn backend.main:app --host 0.0.0.0 --port 8888
 """
 from pathlib import Path
 
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 
-from . import db
-from .api_records import router as records_router
-from .api_points import router as points_router
-from .api_routes import router as routes_router
-from .api_plans import router as plans_router
-from .api_audio import router as audio_router
-from .api_vision import router as vision_router
+from .api_local import router as local_router
 
-WEB_DIR = Path(__file__).resolve().parents[1] / 'web'
+WEB_DIR = Path(__file__).resolve().parents[1] / "web"
 
-app = FastAPI(title='巡检机器人业务后端', version='0.1.0')
-app.include_router(records_router)
-app.include_router(points_router)
-app.include_router(routes_router)
-app.include_router(plans_router)
-app.include_router(audio_router)
-app.include_router(vision_router)
+app = FastAPI(title="巡检机器人网页端", version="0.2.0")
+app.include_router(local_router)
+# The web MVP is read-only. Motion, map, route, plan, audio/vision upload and
+# event-record writes are not mounted by this server.
 
-
-@app.on_event('startup')
-def _startup():
-    db.init_db()
-
-
-@app.get('/api/health')
-def health():
-    return {'ok': True, 'ts': __import__('time').time()}
-
-
-# 静态页面挂载在最后（兜底捕获）
-app.mount('/', StaticFiles(directory=str(WEB_DIR), html=True), name='web')
+app.mount("/", StaticFiles(directory=str(WEB_DIR), html=True), name="web")

@@ -18,11 +18,11 @@ from std_msgs.msg import Bool
 from tf2_ros import TransformBroadcaster
 from geometry_msgs.msg import TransformStamped, Twist
 
-from patrol_interfaces.action import RunRoute
+from patrol_interfaces.action import ReturnHome, RunRoute
 from patrol_interfaces.msg import ExecutorHeartbeat, OperatorHeartbeat, PatrolStatus, RouteStep
 from patrol_interfaces.srv import (
-    ControlRun, GetRuns, ListMaps, RegisterMap, SaveCurrentPoint, SetActiveMap,
-    UpsertPoint, UpsertRoute,
+    ControlRun, GetHomePoint, GetRuns, ListMaps, RegisterMap, SaveCurrentPoint,
+    SetActiveMap, SetHomePoint, UpsertPoint, UpsertRoute,
 )
 from robot_patrol.engine import STATE_CANCELED, STATE_DWELLING, STATE_PAUSED
 from robot_patrol.guard import PatrolGuard
@@ -175,6 +175,7 @@ def test_real_services_and_nav2_action(tmp_path):
     try:
         patrol = PatrolNode(parameter_overrides=[
             Parameter("database_path", value=str(tmp_path / "patrol.sqlite3")),
+            Parameter("web_map_dir", value=str(tmp_path / "web_maps")),
             Parameter("settle_timeout_sec", value=2.0),
             Parameter("settle_duration_sec", value=0.2),
             Parameter("feedback_max_age_sec", value=2.0),
@@ -297,6 +298,7 @@ def test_cancel_while_goal_acceptance_is_pending(tmp_path):
     try:
         patrol = PatrolNode(parameter_overrides=[
             Parameter("database_path", value=str(tmp_path / "patrol.sqlite3")),
+            Parameter("web_map_dir", value=str(tmp_path / "web_maps")),
             Parameter("settle_timeout_sec", value=1.0),
             Parameter("settle_duration_sec", value=0.1),
             Parameter("feedback_max_age_sec", value=2.0),
@@ -444,6 +446,7 @@ def test_cancel_before_execute_callback_dispatches_nothing(tmp_path):
     try:
         patrol = SlowExecutePatrolNode(parameter_overrides=[
             Parameter("database_path", value=str(tmp_path / "patrol.sqlite3")),
+            Parameter("web_map_dir", value=str(tmp_path / "web_maps")),
             Parameter("settle_timeout_sec", value=1.0),
             Parameter("settle_duration_sec", value=0.1),
             Parameter("feedback_max_age_sec", value=2.0),
@@ -498,6 +501,7 @@ def test_unconfirmed_timeout_keeps_run_slot_until_child_terminates(tmp_path):
     try:
         patrol = PatrolNode(parameter_overrides=[
             Parameter("database_path", value=str(tmp_path / "patrol.sqlite3")),
+            Parameter("web_map_dir", value=str(tmp_path / "web_maps")),
             Parameter("settle_timeout_sec", value=1.0),
             Parameter("settle_duration_sec", value=0.1),
             Parameter("feedback_max_age_sec", value=2.0),
@@ -565,6 +569,7 @@ def test_static_map_remains_valid_and_raster_content_is_checked(tmp_path):
     try:
         patrol = PatrolNode(parameter_overrides=[
             Parameter("database_path", value=str(tmp_path / "patrol.sqlite3")),
+            Parameter("web_map_dir", value=str(tmp_path / "web_maps")),
             Parameter("settle_timeout_sec", value=1.0),
             Parameter("settle_duration_sec", value=0.1),
             Parameter("feedback_max_age_sec", value=2.0),
@@ -630,6 +635,7 @@ def test_estop_while_paused_interrupts_run_and_blocks_resume(tmp_path):
     try:
         patrol = PatrolNode(parameter_overrides=[
             Parameter("database_path", value=str(tmp_path / "patrol.sqlite3")),
+            Parameter("web_map_dir", value=str(tmp_path / "web_maps")),
             Parameter("settle_timeout_sec", value=1.0),
             Parameter("settle_duration_sec", value=0.1),
             Parameter("feedback_max_age_sec", value=2.0),
@@ -725,6 +731,7 @@ def test_pause_during_unconfirmed_acceptance_is_not_resumable(tmp_path):
     try:
         patrol = PatrolNode(parameter_overrides=[
             Parameter("database_path", value=str(tmp_path / "patrol.sqlite3")),
+            Parameter("web_map_dir", value=str(tmp_path / "web_maps")),
             Parameter("settle_timeout_sec", value=1.0),
             Parameter("settle_duration_sec", value=0.1),
             Parameter("feedback_max_age_sec", value=2.0),
@@ -804,6 +811,7 @@ def test_manual_velocity_during_dwell_interrupts_patrol(tmp_path):
     try:
         patrol = PatrolNode(parameter_overrides=[
             Parameter("database_path", value=str(tmp_path / "patrol.sqlite3")),
+            Parameter("web_map_dir", value=str(tmp_path / "web_maps")),
             Parameter("settle_timeout_sec", value=1.0),
             Parameter("settle_duration_sec", value=0.1),
             Parameter("feedback_max_age_sec", value=2.0),
@@ -863,6 +871,7 @@ def test_guard_loss_during_dwell_interrupts_patrol(tmp_path):
     try:
         patrol = PatrolNode(parameter_overrides=[
             Parameter("database_path", value=str(tmp_path / "patrol.sqlite3")),
+            Parameter("web_map_dir", value=str(tmp_path / "web_maps")),
             Parameter("settle_timeout_sec", value=1.0),
             Parameter("settle_duration_sec", value=0.1),
             Parameter("feedback_max_age_sec", value=2.0),
@@ -920,6 +929,7 @@ def test_real_patrol_guard_and_executor_heartbeats_allow_completed_run(tmp_path)
     try:
         patrol = PatrolNode(parameter_overrides=[
             Parameter("database_path", value=str(tmp_path / "patrol.sqlite3")),
+            Parameter("web_map_dir", value=str(tmp_path / "web_maps")),
             Parameter("settle_timeout_sec", value=1.0),
             Parameter("settle_duration_sec", value=0.1),
             Parameter("feedback_max_age_sec", value=2.0),
@@ -991,6 +1001,7 @@ def test_cancel_confirmation_timeout_marks_stop_unconfirmed_quickly(tmp_path):
     try:
         patrol = PatrolNode(parameter_overrides=[
             Parameter("database_path", value=str(tmp_path / "patrol.sqlite3")),
+            Parameter("web_map_dir", value=str(tmp_path / "web_maps")),
             Parameter("settle_timeout_sec", value=1.0),
             Parameter("settle_duration_sec", value=0.1),
             Parameter("feedback_max_age_sec", value=2.0),
@@ -1049,6 +1060,130 @@ def test_cancel_confirmation_timeout_marks_stop_unconfirmed_quickly(tmp_path):
 
         # Let the fake child eventually terminate so cleanup is deterministic.
         assert wait_until(lambda: not patrol._run_reserved, timeout=4.0)
+    finally:
+        if executor is not None:
+            executor.shutdown()
+        if spin_thread is not None:
+            spin_thread.join(timeout=3.0)
+        if patrol is not None:
+            patrol.destroy_node()
+        if fake is not None:
+            fake.destroy_node()
+        rclpy.try_shutdown()
+
+
+def test_return_home_preempts_active_route_and_arrives(tmp_path):
+    rclpy.init()
+    executor = None
+    spin_thread = None
+    patrol = None
+    fake = None
+    try:
+        patrol = PatrolNode(parameter_overrides=[
+            Parameter("database_path", value=str(tmp_path / "patrol.sqlite3")),
+            Parameter("web_map_dir", value=str(tmp_path / "web_maps")),
+            Parameter("settle_timeout_sec", value=2.0),
+            Parameter("settle_duration_sec", value=0.1),
+            Parameter("feedback_max_age_sec", value=2.0),
+            Parameter("tf_max_age_sec", value=2.0),
+            Parameter("point_timeout_sec", value=10.0),
+            Parameter("min_dispatch_interval_sec", value=0.0),
+            Parameter("return_cancel_timeout_sec", value=8.0),
+        ])
+        fake = FakeNav(execute_duration=2.0)
+        executor = MultiThreadedExecutor(num_threads=8)
+        executor.add_node(patrol)
+        executor.add_node(fake)
+        spin_thread = threading.Thread(target=executor.spin, daemon=True)
+        spin_thread.start()
+        time.sleep(0.8)
+
+        map_yaml = make_map(tmp_path)
+        register = patrol.create_client(RegisterMap, "/patrol/register_map")
+        assert register.wait_for_service(timeout_sec=5.0)
+        request = RegisterMap.Request()
+        request.navigation_yaml = str(map_yaml)
+        request.name = "return map"
+        request.backend = "amcl"
+        response = wait_future(register.call_async(request))
+        assert response.success, response.message
+        map_id = response.map.map_id
+        map_revision = response.map.revision
+
+        active = patrol.create_client(SetActiveMap, "/patrol/set_active_map")
+        request = SetActiveMap.Request()
+        request.map_id = map_id
+        request.expected_revision = map_revision
+        response = wait_future(active.call_async(request))
+        assert response.success, response.message
+
+        # Wait for fresh static odom/TF before saving the standby pose.
+        time.sleep(0.5)
+        set_home = patrol.create_client(SetHomePoint, "/patrol/set_home_point")
+        assert set_home.wait_for_service(timeout_sec=5.0)
+        request = SetHomePoint.Request()
+        request.map_id = map_id
+        request.expected_map_revision = map_revision
+        request.clear = False
+        response = wait_future(set_home.call_async(request))
+        assert response.success, response.message
+        assert response.exists
+
+        point = patrol._store.upsert_point(
+            "", map_id, "A", 1.0, 0.0, 0.0, "manual", 1)
+        route = patrol._store.upsert_route("", map_id, "route", [
+            type("S", (), {"point_id": point.point_id, "dwell_seconds": 0.0})(),
+        ])
+
+        statuses = []
+        status_event = threading.Event()
+        qos = QoSProfile(depth=1, reliability=ReliabilityPolicy.RELIABLE,
+                         durability=DurabilityPolicy.TRANSIENT_LOCAL)
+        patrol.create_subscription(
+            PatrolStatus, "/patrol/status",
+            lambda message: (statuses.append(message), status_event.set()), qos)
+
+        route_client = rclpy.action.ActionClient(patrol, RunRoute, "/patrol/run_route")
+        assert route_client.wait_for_server(timeout_sec=5.0)
+        route_goal = RunRoute.Goal()
+        route_goal.request_id = "return-preempt-route"
+        route_goal.owner_session_id = "pytest"
+        route_goal.route_id = route.route_id
+        route_goal.map_id = map_id
+        route_goal.route_revision = route.revision
+        route_goal.map_revision = map_revision
+        route_goal.loop_count = 1
+        route_handle = wait_future(route_client.send_goal_async(route_goal))
+        assert route_handle.accepted
+
+        deadline = time.monotonic() + 5.0
+        while time.monotonic() < deadline and not fake.goals:
+            time.sleep(0.05)
+        assert fake.goals, "route did not dispatch a Nav2 goal"
+
+        return_client = rclpy.action.ActionClient(
+            patrol, ReturnHome, "/patrol/return_home")
+        assert return_client.wait_for_server(timeout_sec=5.0)
+        return_goal = ReturnHome.Goal()
+        return_goal.request_id = "return-preempt-home"
+        return_goal.owner_session_id = "pytest"
+        return_goal.map_id = map_id
+        return_goal.map_revision = map_revision
+        return_handle = wait_future(return_client.send_goal_async(return_goal))
+        assert return_handle.accepted
+
+        return_result = wait_future(return_handle.get_result_async(), timeout=20.0)
+        assert return_result.result.success, return_result.result.message
+        assert return_result.result.final_state == 10
+        route_result = wait_future(route_handle.get_result_async(), timeout=10.0)
+        assert route_result.result.final_state in (9, 12), route_result.result.message
+        # One canceled route child plus one return-home child.
+        assert len(fake.goals) >= 2
+        home = patrol._store.get_home_point(map_id)
+        assert home is not None
+        last_goal = fake.goals[-1]
+        assert abs(last_goal.pose.position.x - home.x) < 1e-6
+        assert abs(last_goal.pose.position.y - home.y) < 1e-6
     finally:
         if executor is not None:
             executor.shutdown()

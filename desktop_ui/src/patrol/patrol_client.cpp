@@ -12,6 +12,7 @@
 #include <rclcpp/rclcpp.hpp>
 #include <rclcpp_action/rclcpp_action.hpp>
 #include <action_msgs/msg/goal_status.hpp>
+#include <patrol_interfaces/action/return_home.hpp>
 #include <patrol_interfaces/action/run_route.hpp>
 #include <patrol_interfaces/msg/map_binding.hpp>
 #include <patrol_interfaces/msg/operator_heartbeat.hpp>
@@ -23,6 +24,7 @@
 #include <patrol_interfaces/srv/control_run.hpp>
 #include <patrol_interfaces/srv/delete_point.hpp>
 #include <patrol_interfaces/srv/delete_route.hpp>
+#include <patrol_interfaces/srv/get_home_point.hpp>
 #include <patrol_interfaces/srv/get_runs.hpp>
 #include <patrol_interfaces/srv/list_maps.hpp>
 #include <patrol_interfaces/srv/list_points.hpp>
@@ -30,6 +32,7 @@
 #include <patrol_interfaces/srv/register_map.hpp>
 #include <patrol_interfaces/srv/save_current_point.hpp>
 #include <patrol_interfaces/srv/set_active_map.hpp>
+#include <patrol_interfaces/srv/set_home_point.hpp>
 #include <patrol_interfaces/srv/upsert_point.hpp>
 #include <patrol_interfaces/srv/upsert_route.hpp>
 
@@ -137,21 +140,28 @@ struct PatrolClient::Impl {
   rclcpp::Client<patrol_interfaces::srv::UpsertRoute>::SharedPtr upsertRoute;
   rclcpp::Client<patrol_interfaces::srv::DeleteRoute>::SharedPtr deleteRoute;
   rclcpp::Client<patrol_interfaces::srv::GetRuns>::SharedPtr getRuns;
+  rclcpp::Client<patrol_interfaces::srv::GetHomePoint>::SharedPtr getHomePoint;
+  rclcpp::Client<patrol_interfaces::srv::SetHomePoint>::SharedPtr setHomePoint;
   rclcpp::Client<patrol_interfaces::srv::ControlRun>::SharedPtr controlRun;
   rclcpp_action::Client<patrol_interfaces::action::RunRoute>::SharedPtr runRoute;
+  rclcpp_action::Client<patrol_interfaces::action::ReturnHome>::SharedPtr returnHome;
   rclcpp::Subscription<patrol_interfaces::msg::PatrolStatus>::SharedPtr statusSubscription;
   rclcpp::Publisher<patrol_interfaces::msg::OperatorHeartbeat>::SharedPtr operatorHeartbeat;
   rclcpp::TimerBase::SharedPtr operatorHeartbeatTimer;
   rclcpp_action::Client<patrol_interfaces::action::RunRoute>::GoalHandle::SharedPtr currentGoal;
+  rclcpp_action::Client<patrol_interfaces::action::ReturnHome>::GoalHandle::SharedPtr currentReturnGoal;
   std::atomic_bool operatorAuthorized{false};
   bool goalPending = false;
   bool cancelRequestedWhilePending = false;
+  bool returnPending = false;
+  bool cancelReturnWhilePending = false;
   mutable std::mutex mutex;
   QVector<PatrolMapInfo> mapsData;
   QString activeMapId;
   QVector<PatrolPointInfo> pointsData;
   QVector<PatrolRouteInfo> routesData;
   QVector<PatrolRunInfo> runsData;
+  PatrolHomeInfo homeData;
   PatrolStatusInfo statusData;
 
   Impl(PatrolClient *owner_, const QString &sessionId) : owner(owner_), ownerSessionId(sessionId) {
@@ -167,8 +177,11 @@ struct PatrolClient::Impl {
     upsertRoute = node->create_client<patrol_interfaces::srv::UpsertRoute>("/patrol/upsert_route");
     deleteRoute = node->create_client<patrol_interfaces::srv::DeleteRoute>("/patrol/delete_route");
     getRuns = node->create_client<patrol_interfaces::srv::GetRuns>("/patrol/get_runs");
+    getHomePoint = node->create_client<patrol_interfaces::srv::GetHomePoint>("/patrol/get_home_point");
+    setHomePoint = node->create_client<patrol_interfaces::srv::SetHomePoint>("/patrol/set_home_point");
     controlRun = node->create_client<patrol_interfaces::srv::ControlRun>("/patrol/control");
     runRoute = rclcpp_action::create_client<patrol_interfaces::action::RunRoute>(node, "/patrol/run_route");
+    returnHome = rclcpp_action::create_client<patrol_interfaces::action::ReturnHome>(node, "/patrol/return_home");
     auto qos = rclcpp::QoS(1).reliable().transient_local();
     statusSubscription = node->create_subscription<patrol_interfaces::msg::PatrolStatus>(
         "/patrol/status", qos, [this](patrol_interfaces::msg::PatrolStatus::ConstSharedPtr message) {
@@ -229,6 +242,8 @@ struct PatrolClient::Impl {
     else if constexpr (std::is_same_v<Service, patrol_interfaces::srv::UpsertRoute>) client = upsertRoute;
     else if constexpr (std::is_same_v<Service, patrol_interfaces::srv::DeleteRoute>) client = deleteRoute;
     else if constexpr (std::is_same_v<Service, patrol_interfaces::srv::GetRuns>) client = getRuns;
+    else if constexpr (std::is_same_v<Service, patrol_interfaces::srv::GetHomePoint>) client = getHomePoint;
+    else if constexpr (std::is_same_v<Service, patrol_interfaces::srv::SetHomePoint>) client = setHomePoint;
     else if constexpr (std::is_same_v<Service, patrol_interfaces::srv::ControlRun>) client = controlRun;
     if (!ready(client, QString::fromStdString(name))) return;
     client->async_send_request(request, [this, operation, callback](
@@ -305,6 +320,15 @@ QVector<PatrolRunInfo> PatrolClient::runs() const {
 #ifdef DESKTOP_HAS_PATROL_INTERFACES
   std::lock_guard<std::mutex> lock(impl_->mutex);
   return impl_->runsData;
+#else
+  return {};
+#endif
+}
+
+PatrolHomeInfo PatrolClient::homePoint() const {
+#ifdef DESKTOP_HAS_PATROL_INTERFACES
+  std::lock_guard<std::mutex> lock(impl_->mutex);
+  return impl_->homeData;
 #else
   return {};
 #endif
@@ -566,6 +590,176 @@ void PatrolClient::refreshRuns(const QString &mapId, const QString &routeId) {
 #endif
 }
 
+void PatrolClient::refreshHomePoint(const QString &mapId) {
+#ifdef DESKTOP_HAS_PATROL_INTERFACES
+  auto request = std::make_shared<patrol_interfaces::srv::GetHomePoint::Request>();
+  request->map_id = mapId.toStdString();
+  impl_->call<patrol_interfaces::srv::GetHomePoint>(
+      "/patrol/get_home_point", QStringLiteral("刷新返航点"), request,
+      [this, mapId](const patrol_interfaces::srv::GetHomePoint::Response &response) {
+        if (!response.success) {
+          emit errorOccurred(QString::fromStdString(response.message));
+          return;
+        }
+        PatrolHomeInfo info;
+        info.mapId = mapId;
+        info.mapRevision = response.map_revision;
+        info.exists = response.exists;
+        info.x = response.x; info.y = response.y; info.yaw = response.yaw;
+        { std::lock_guard<std::mutex> lock(impl_->mutex); impl_->homeData = info; }
+        emit homePointChanged();
+      });
+#else
+  Q_UNUSED(mapId);
+  PATROL_UNAVAILABLE(QStringLiteral("刷新返航点"));
+#endif
+}
+
+void PatrolClient::saveCurrentPoseAsHome(const QString &mapId, quint64 expectedMapRevision) {
+#ifdef DESKTOP_HAS_PATROL_INTERFACES
+  auto request = std::make_shared<patrol_interfaces::srv::SetHomePoint::Request>();
+  request->map_id = mapId.toStdString();
+  request->expected_map_revision = expectedMapRevision;
+  request->clear = false;
+  impl_->call<patrol_interfaces::srv::SetHomePoint>(
+      "/patrol/set_home_point", QStringLiteral("保存返航点"), request,
+      [this, mapId](const patrol_interfaces::srv::SetHomePoint::Response &response) {
+        if (!response.success) { emit errorOccurred(QString::fromStdString(response.message)); return; }
+        PatrolHomeInfo info;
+        info.mapId = mapId; info.mapRevision = response.map_revision;
+        info.exists = response.exists; info.x = response.x; info.y = response.y; info.yaw = response.yaw;
+        { std::lock_guard<std::mutex> lock(impl_->mutex); impl_->homeData = info; }
+        emit homePointChanged();
+        emit operationFinished(QStringLiteral("保存返航点"), true,
+                               QString::fromStdString(response.message));
+      });
+#else
+  Q_UNUSED(mapId); Q_UNUSED(expectedMapRevision);
+  PATROL_UNAVAILABLE(QStringLiteral("保存返航点"));
+#endif
+}
+
+void PatrolClient::clearHomePoint(const QString &mapId, quint64 expectedMapRevision) {
+#ifdef DESKTOP_HAS_PATROL_INTERFACES
+  auto request = std::make_shared<patrol_interfaces::srv::SetHomePoint::Request>();
+  request->map_id = mapId.toStdString();
+  request->expected_map_revision = expectedMapRevision;
+  request->clear = true;
+  impl_->call<patrol_interfaces::srv::SetHomePoint>(
+      "/patrol/set_home_point", QStringLiteral("清除返航点"), request,
+      [this, mapId](const patrol_interfaces::srv::SetHomePoint::Response &response) {
+        if (!response.success) { emit errorOccurred(QString::fromStdString(response.message)); return; }
+        { std::lock_guard<std::mutex> lock(impl_->mutex); impl_->homeData = PatrolHomeInfo(); impl_->homeData.mapId = mapId; impl_->homeData.mapRevision = response.map_revision; }
+        emit homePointChanged();
+        emit operationFinished(QStringLiteral("清除返航点"), true,
+                               QString::fromStdString(response.message));
+      });
+#else
+  Q_UNUSED(mapId); Q_UNUSED(expectedMapRevision);
+  PATROL_UNAVAILABLE(QStringLiteral("清除返航点"));
+#endif
+}
+
+void PatrolClient::returnHome(const QString &mapId, quint64 mapRevision) {
+#ifdef DESKTOP_HAS_PATROL_INTERFACES
+  if (!impl_->returnHome->action_server_is_ready()) {
+    emit errorOccurred(QStringLiteral("返航 Action 未就绪；请先启动 robot_patrol"));
+    return;
+  }
+  patrol_interfaces::action::ReturnHome::Goal goal;
+  goal.request_id = QUuid::createUuid().toString(QUuid::WithoutBraces).toStdString();
+  goal.owner_session_id = impl_->ownerSessionId.toStdString();
+  goal.map_id = mapId.toStdString();
+  goal.map_revision = mapRevision;
+  {
+    std::lock_guard<std::mutex> lock(impl_->mutex);
+    impl_->returnPending = true;
+    impl_->cancelReturnWhilePending = false;
+  }
+  rclcpp_action::Client<patrol_interfaces::action::ReturnHome>::SendGoalOptions options;
+  options.goal_response_callback =
+      [this](rclcpp_action::ClientGoalHandle<patrol_interfaces::action::ReturnHome>::SharedPtr handle) {
+    bool cancelRequested = false;
+    {
+      std::lock_guard<std::mutex> lock(impl_->mutex);
+      impl_->returnPending = false;
+      if (handle) impl_->currentReturnGoal = handle;
+      cancelRequested = impl_->cancelReturnWhilePending;
+      impl_->cancelReturnWhilePending = false;
+    }
+    if (!handle) { emit errorOccurred(QStringLiteral("返航目标被拒绝")); return; }
+    if (cancelRequested) {
+      impl_->returnHome->async_cancel_goal(handle);
+      emit operationFinished(QStringLiteral("取消返航"), true,
+                             QStringLiteral("返航目标接受后已立即取消"));
+    } else {
+      emit operationFinished(QStringLiteral("一键返回"), true,
+                             QStringLiteral("返航目标已接受"));
+    }
+  };
+  options.feedback_callback =
+      [this](rclcpp_action::ClientGoalHandle<patrol_interfaces::action::ReturnHome>::SharedPtr,
+             const std::shared_ptr<const patrol_interfaces::action::ReturnHome::Feedback> feedback) {
+    { std::lock_guard<std::mutex> lock(impl_->mutex); impl_->statusData = statusInfo(feedback->status); }
+    emit statusChanged();
+  };
+  options.result_callback =
+      [this](const rclcpp_action::ClientGoalHandle<patrol_interfaces::action::ReturnHome>::WrappedResult &result) {
+    { std::lock_guard<std::mutex> lock(impl_->mutex); impl_->currentReturnGoal.reset(); }
+    QString message = QStringLiteral("返航 Action 结束");
+    if (result.result) message = QString::fromStdString(result.result->message);
+    emit statusChanged();
+    emit operationFinished(QStringLiteral("返航任务"),
+                           result.code == rclcpp_action::ResultCode::SUCCEEDED, message);
+  };
+  impl_->returnHome->async_send_goal(goal, options);
+#else
+  Q_UNUSED(mapId); Q_UNUSED(mapRevision);
+  PATROL_UNAVAILABLE(QStringLiteral("一键返回"));
+#endif
+}
+
+void PatrolClient::cancelReturnHome() {
+#ifdef DESKTOP_HAS_PATROL_INTERFACES
+  rclcpp_action::Client<patrol_interfaces::action::ReturnHome>::GoalHandle::SharedPtr goal;
+  bool pending = false;
+  {
+    std::lock_guard<std::mutex> lock(impl_->mutex);
+    goal = impl_->currentReturnGoal;
+    if (!goal && impl_->returnPending) {
+      impl_->cancelReturnWhilePending = true;
+      pending = true;
+    }
+  }
+  if (goal) {
+    impl_->returnHome->async_cancel_goal(goal);
+    emit operationFinished(QStringLiteral("取消返航"), true,
+                           QStringLiteral("已请求取消返航任务"));
+  } else if (pending) {
+    emit operationFinished(QStringLiteral("取消返航"), true,
+                           QStringLiteral("目标接受后将立即取消返航"));
+  } else {
+    emit errorOccurred(QStringLiteral("当前没有可取消的返航任务"));
+  }
+#else
+  PATROL_UNAVAILABLE(QStringLiteral("取消返航"));
+#endif
+}
+
+void PatrolClient::cancelActiveTask() {
+#ifdef DESKTOP_HAS_PATROL_INTERFACES
+  bool route = false, returning = false;
+  {
+    std::lock_guard<std::mutex> lock(impl_->mutex);
+    route = impl_->goalPending || static_cast<bool>(impl_->currentGoal);
+    returning = impl_->returnPending || static_cast<bool>(impl_->currentReturnGoal);
+  }
+  if (route) cancelRunRoute();
+  else if (returning) cancelReturnHome();
+  else emit errorOccurred(QStringLiteral("当前没有可取消的本地任务"));
+#endif
+}
+
 void PatrolClient::runRoute(const QString &routeId, const QString &mapId,
                             quint64 routeRevision, quint64 mapRevision, quint32 loopCount) {
 #ifdef DESKTOP_HAS_PATROL_INTERFACES
@@ -652,7 +846,9 @@ void PatrolClient::cancelRunRoute() {
 bool PatrolClient::hasActiveOrPendingRun() const {
 #ifdef DESKTOP_HAS_PATROL_INTERFACES
   std::lock_guard<std::mutex> lock(impl_->mutex);
-  return impl_->statusData.active || impl_->goalPending || static_cast<bool>(impl_->currentGoal);
+  return impl_->statusData.active || impl_->goalPending ||
+         static_cast<bool>(impl_->currentGoal) || impl_->returnPending ||
+         static_cast<bool>(impl_->currentReturnGoal);
 #else
   return false;
 #endif

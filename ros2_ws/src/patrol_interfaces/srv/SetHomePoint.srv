@@ -1,0 +1,13 @@
+# clear=false 时读取当前车辆 map 位姿并保存为该地图的待命返航点。
+# clear=true 时删除返航点。
+string map_id
+uint64 expected_map_revision
+bool clear
+---
+bool success
+string message
+bool exists
+uint64 map_revision
+float64 x
+float64 y
+float64 yaw

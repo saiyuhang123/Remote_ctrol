@@ -19,6 +19,13 @@ def generate_launch_description():
         parameters=[parameters],
         output="screen",
     )
+    recorder = Node(
+        package="robot_patrol",
+        executable="inspection_recorder",
+        name="inspection_recorder",
+        parameters=[parameters],
+        output="screen",
+    )
     guard = Node(
         package="robot_patrol",
         executable="patrol_guard",
@@ -32,5 +39,6 @@ def generate_launch_description():
             "enable_guard", default_value="true", choices=["true", "false"],
             description="启动独立 patrol_guard；实车巡航必须保持 true"),
         patrol,
+        recorder,
         guard,
     ])

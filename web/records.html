@@ -3,105 +3,103 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>识别与抓拍记录 — 巡检机器人</title>
-<style>
-  * { box-sizing: border-box; }
-  body { font-family: "Microsoft YaHei", sans-serif; margin: 0; background: #14171c; color: #dde3ea; }
-  header { display: flex; align-items: center; gap: 14px; padding: 10px 18px;
-           background: #1c2129; border-bottom: 1px solid #2a313c; }
-  header h1 { font-size: 17px; margin: 0; font-weight: 600; }
-  header a { color: #4fc3f7; text-decoration: none; font-size: 13px; }
-  main { padding: 16px 18px; max-width: 1200px; margin: 0 auto; }
-  .stats { display: flex; gap: 14px; margin-bottom: 16px; }
-  .stat { background: #1c2129; border: 1px solid #2a313c; border-radius: 8px; padding: 12px 20px; }
-  .stat .n { font-size: 24px; font-weight: 700; color: #4fc3f7; }
-  .stat .t { font-size: 12px; color: #7d8a99; margin-top: 4px; }
-  .filters { display: flex; gap: 8px; margin-bottom: 12px; }
-  .filters button { padding: 6px 14px; font-size: 13px; border: 1px solid #2a313c; border-radius: 5px;
-                    background: #1c2129; color: #dde3ea; cursor: pointer; }
-  .filters button.active { background: #2d6da3; border-color: #2d6da3; }
-  table { width: 100%; border-collapse: collapse; background: #1c2129; border-radius: 8px; overflow: hidden; }
-  th, td { padding: 8px 12px; font-size: 13px; text-align: left; border-bottom: 1px solid #262d38; }
-  th { color: #8fa1b5; font-weight: 600; background: #212730; }
-  td img { width: 72px; height: 54px; object-fit: cover; border-radius: 4px; background: #000; cursor: pointer; }
-  .tag { padding: 2px 8px; border-radius: 10px; font-size: 12px; }
-  .tag.person { background: #1b5e20; } .tag.person_face { background: #4a3b8c; }
-  .tag.vehicle_plate { background: #7a5b00; } .tag.capture { background: #0d47a1; }
-  #empty { color: #6b7787; text-align: center; padding: 40px 0; }
-</style>
+<title>巡检记录 · 巡检机器人</title>
+<script src="page-bridge.js"></script>
+<link rel="stylesheet" href="theme.css">
+<script src="ui.js" defer></script>
 </head>
-<body>
-<header>
-  <h1>识别与抓拍记录</h1>
-  <a href="/monitor.html">监控台</a> <a href="/points.html" style="margin-left:10px">巡检点</a> <a href="/plans.html" style="margin-left:10px">路线计划</a>
+<body class="records-page">
+<header class="page-header">
+  <div class="page-title"><h1>巡检记录</h1><p>按巡检日期汇总路线、人脸抓拍、行人和车牌记录</p></div>
+  <nav><a href="/monitor.html">监控台</a><a href="/tasks.html">巡检任务</a></nav>
+  <span class="tag">每 15 秒自动更新</span>
 </header>
-<main>
-  <div class="stats">
-    <div class="stat"><div class="n" id="sDetTotal">-</div><div class="t">识别记录总数</div></div>
-    <div class="stat"><div class="n" id="sDetToday">-</div><div class="t">今日识别</div></div>
-    <div class="stat"><div class="n" id="sCapTotal">-</div><div class="t">抓拍总数</div></div>
+<main class="records-layout">
+  <div class="summary" aria-label="巡检记录统计">
+    <div class="stat"><span class="icon" data-icon="route"></span><div class="t">巡检次数</div><div class="n" id="sessions">—</div></div>
+    <div class="stat"><span class="icon" data-icon="face"></span><div class="t">人脸抓拍次数</div><div class="n" id="faces">—</div></div>
+    <div class="stat"><span class="icon" data-icon="person"></span><div class="t">行人检测次数</div><div class="n" id="persons">—</div></div>
+    <div class="stat"><span class="icon" data-icon="plate"></span><div class="t">车牌种类</div><div class="n" id="plates">—</div></div>
   </div>
-  <div class="filters">
-    <button data-f="" class="active">全部</button>
-    <button data-f="person_face">人脸</button>
-    <button data-f="person">行人</button>
-    <button data-f="vehicle_plate">车牌</button>
-    <button data-f="capture">手动抓拍</button>
-  </div>
-  <table>
-    <thead><tr><th>时间</th><th>类型</th><th>内容</th><th>置信度</th><th>图片</th></tr></thead>
-    <tbody id="tb"></tbody>
-  </table>
-  <div id="empty" style="display:none">暂无记录</div>
+  <section class="card">
+    <div class="toolbar"><h2><span class="section-title"><span class="icon" data-icon="records"></span>巡检明细</span></h2><button class="btn gray" id="refresh"><span class="icon" data-icon="refresh"></span>刷新记录</button></div>
+    <div id="error" role="alert"></div>
+    <div class="table-wrap">
+      <table class="records-table"><thead><tr><th>巡检日期</th><th>关联路线 / 运行</th><th>人脸抓拍</th><th>行人检测</th><th>识别车牌</th></tr></thead><tbody id="rows"></tbody></table>
+    </div>
+    <div id="empty" class="empty-state" style="display:none"><span class="icon" data-icon="records"></span><span>暂无巡检记录</span><p>开始巡检后，这里会自动汇总路线与识别记录</p></div>
+  </section>
 </main>
+
 <script>
-const NAME = { person: '行人', person_face: '人脸', vehicle_plate: '车牌', capture: '抓拍' };
-let filter = '';
+const $ = id => document.getElementById(id);
+let routeNames = new Map();
+let records = [];
 
-async function loadStats() {
-  const s = await (await fetch('/api/records/summary')).json();
-  document.getElementById('sDetTotal').textContent = s.detections_total;
-  document.getElementById('sDetToday').textContent = s.detections_today;
-  document.getElementById('sCapTotal').textContent = s.captures_total;
+function escapeHtml(value) {
+  return String(value ?? '').replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
 }
-
-async function load() {
-  let rows = [];
-  if (filter === 'capture') {
-    const r = await (await fetch('/api/records/captures?limit=100')).json();
-    rows = r.items.map(i => ({ ...i, event: 'capture', label: '手动抓拍', score: 1 }));
-  } else {
-    const url = '/api/records/detections?limit=100' + (filter ? `&event=${filter}` : '');
-    rows = (await (await fetch(url)).json()).items;
+async function loadRouteNames() {
+  try {
+    const state = await (await fetch('/api/local/state', {cache:'no-store'})).json();
+    if (Array.isArray(state.routes))
+      state.routes.forEach(route => routeNames.set(route.route_id, route.name));
+  } catch (_) { /* route names are advisory; ids remain visible */ }
+}
+function platesOf(record) {
+  const values = Array.isArray(record.plates) ? record.plates : [];
+  return values.map(item => {
+    if (typeof item === 'string') return {plate:item, count:1};
+    return {plate:String(item.plate || ''), count:Number(item.count || 1)};
+  }).filter(item => item.plate);
+}
+function renderSummary() {
+  const uniquePlates = new Set();
+  let faces = 0, persons = 0;
+  for (const record of records) {
+    faces += Number(record.face_capture_count || 0);
+    persons += Number(record.person_count || 0);
+    platesOf(record).forEach(item => uniquePlates.add(item.plate));
   }
-  const tb = document.getElementById('tb');
-  tb.innerHTML = '';
-  document.getElementById('empty').style.display = rows.length ? 'none' : '';
-  for (const r of rows) {
+  $('sessions').textContent = records.length;
+  $('faces').textContent = faces;
+  $('persons').textContent = persons;
+  $('plates').textContent = uniquePlates.size;
+}
+function render() {
+  const body = $('rows'); body.innerHTML = '';
+  $('empty').style.display = records.length ? 'none' : '';
+  for (const record of records) {
+    const plateHtml = platesOf(record).map(item =>
+      `<span class="plate">${escapeHtml(item.plate)} ×${item.count}</span>`).join('') ||
+      '<span class="muted">未识别到车牌</span>';
+    const route = routeNames.get(record.route_id) || record.route_id;
     const tr = document.createElement('tr');
-    const time = new Date(r.ts * 1000).toLocaleString('zh-CN', { hour12: false });
-    const img = r.image
-      ? `<img src="/${r.image}" onclick="window.open('/${r.image}')" onerror="this.style.display='none'">`
-      : '';
-    tr.innerHTML = `<td>${time}</td>
-      <td><span class="tag ${r.event}">${NAME[r.event] || r.event}</span></td>
-      <td>${r.label}</td><td>${(r.score ?? 0).toFixed(2)}</td><td>${img}</td>`;
-    tb.appendChild(tr);
+    tr.innerHTML = `<td>${escapeHtml(record.inspection_date)}</td>
+      <td><div>${escapeHtml(route)}</div>
+          <div class="muted" style="font-size:11px">${escapeHtml(record.run_id)} · 地图 ${escapeHtml(record.map_id)}</div></td>
+      <td><span class="count">${Number(record.face_capture_count || 0)}</span> 次</td>
+      <td><span class="count">${Number(record.person_count || 0)}</span> 次</td>
+      <td>${plateHtml}</td>`;
+    body.appendChild(tr);
   }
 }
-
-document.querySelectorAll('.filters button').forEach(b => {
-  b.onclick = () => {
-    document.querySelectorAll('.filters button').forEach(x => x.classList.remove('active'));
-    b.classList.add('active');
-    filter = b.dataset.f;
-    load();
-  };
-});
-
-loadStats();
-load();
-setInterval(() => { loadStats(); load(); }, 10000);   // 10s 自动刷新
+async function load() {
+  $('error').textContent = '';
+  try {
+    const response = await fetch('/api/inspection/records?limit=200', {cache:'no-store'});
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.detail || '巡检记录读取失败');
+    records = Array.isArray(data.items) ? data.items : [];
+    renderSummary(); render();
+  } catch (error) {
+    records = []; renderSummary(); render();
+    $('error').textContent = error.message || '巡检记录读取失败';
+  }
+}
+$('refresh').onclick = load;
+loadRouteNames().then(load);
+setInterval(load, 15000);
 </script>
 </body>
 </html>

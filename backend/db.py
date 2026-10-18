@@ -1,97 +1,88 @@
-"""SQLite 数据层：建表 + 轻量查询助手（无 ORM，保持简单）"""
+"""Read-only access to the authoritative robot_patrol SQLite database.
+
+The web backend never creates tables and never writes business data. The
+patrol node and inspection_recorder are the only business-table writers.
+"""
+from __future__ import annotations
+
+import os
+from pathlib import Path
 import sqlite3
 import threading
-from pathlib import Path
+from typing import Any, Iterable
 
-DB_PATH = Path(__file__).resolve().parents[1] / 'data' / 'robot.db'
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+DEFAULT_DB = (Path(os.environ.get("XDG_DATA_HOME", Path.home() / ".local/share"))
+              / "robot_patrol" / "patrol.sqlite3")
+DB_PATH = Path(os.environ.get("ROBOT_PATROL_DB", str(DEFAULT_DB))).expanduser()
+WEB_MAP_DIR = Path(os.environ.get("ROBOT_WEB_MAP_DIR",
+                                  str(PROJECT_ROOT / "web" / "maps"))).expanduser()
+SUPPORTED_SCHEMA_VERSION = 2
 
 _local = threading.local()
 
-SCHEMA = """
-CREATE TABLE IF NOT EXISTS detection_record (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    ts REAL NOT NULL,               -- 事件时间戳
-    event TEXT NOT NULL,            -- person / person_face / vehicle_plate
-    label TEXT NOT NULL,            -- 姓名 / 未登记人员 / 车牌号
-    score REAL DEFAULT 0,
-    image TEXT DEFAULT '',          -- 抓拍图相对路径 web/ 下
-    task_id INTEGER DEFAULT NULL,   -- 关联巡逻任务（可空）
-    created_at REAL DEFAULT (strftime('%s','now'))
-);
-CREATE TABLE IF NOT EXISTS capture_record (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    ts REAL NOT NULL,
-    label TEXT DEFAULT 'manual',    -- manual / detection / patrol
-    image TEXT NOT NULL,
-    task_id INTEGER DEFAULT NULL,
-    created_at REAL DEFAULT (strftime('%s','now'))
-);
-CREATE TABLE IF NOT EXISTS patrol_point (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    name TEXT NOT NULL,
-    x REAL NOT NULL,
-    y REAL NOT NULL,
-    yaw REAL DEFAULT 0,
-    actions TEXT DEFAULT '[]',      -- JSON: [{"type":"dwell","sec":10},{"type":"capture"},{"type":"tts","text":"..."}]
-    created_at REAL DEFAULT (strftime('%s','now'))
-);
-CREATE TABLE IF NOT EXISTS route (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    name TEXT NOT NULL,
-    point_ids TEXT DEFAULT '[]',    -- JSON 数组，有序
-    created_at REAL DEFAULT (strftime('%s','now'))
-);
-CREATE TABLE IF NOT EXISTS plan (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    name TEXT NOT NULL,
-    route_id INTEGER NOT NULL,
-    schedule_type TEXT NOT NULL,    -- once / daily / interval
-    schedule_value TEXT NOT NULL,   -- once: "2026-09-05 09:00"; daily: "09:00"; interval: 秒数
-    enabled INTEGER DEFAULT 1,
-    last_run REAL DEFAULT NULL,
-    next_run REAL DEFAULT NULL,
-    created_at REAL DEFAULT (strftime('%s','now'))
-);
-CREATE TABLE IF NOT EXISTS task_record (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    plan_id INTEGER DEFAULT NULL,
-    route_id INTEGER DEFAULT NULL,
-    start_time REAL,
-    end_time REAL,
-    status TEXT DEFAULT 'running',  -- running / success / failed / canceled
-    detail TEXT DEFAULT '{}',       -- JSON：各点位执行结果
-    report_path TEXT DEFAULT '',
-    created_at REAL DEFAULT (strftime('%s','now'))
-);
-"""
+
+class DatabaseUnavailable(RuntimeError):
+    pass
 
 
-def conn():
-    if not hasattr(_local, 'c') or _local.c is None:
-        DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-        _local.c = sqlite3.connect(DB_PATH)
-        _local.c.row_factory = sqlite3.Row
-    return _local.c
+def _connect() -> sqlite3.Connection:
+    if not DB_PATH.is_file():
+        raise DatabaseUnavailable(
+            f"本地巡检数据库不存在：{DB_PATH}；请先启动 robot_patrol")
+    uri = DB_PATH.resolve().as_uri() + "?mode=ro"
+    try:
+        connection = sqlite3.connect(uri, uri=True, timeout=5.0,
+                                     check_same_thread=False)
+        connection.row_factory = sqlite3.Row
+        connection.execute("PRAGMA query_only = ON")
+        connection.execute("PRAGMA busy_timeout = 5000")
+        return connection
+    except sqlite3.Error as error:
+        raise DatabaseUnavailable(f"无法只读打开巡检数据库：{error}") from error
 
 
-def init_db():
-    c = conn()
-    c.executescript(SCHEMA)
-    columns = {row[1] for row in c.execute('PRAGMA table_info(detection_record)')}
-    if 'event_id' not in columns:
-        c.execute('ALTER TABLE detection_record ADD COLUMN event_id TEXT DEFAULT NULL')
-    if 'metadata' not in columns:
-        c.execute("ALTER TABLE detection_record ADD COLUMN metadata TEXT DEFAULT '{}'")
-    c.execute('CREATE UNIQUE INDEX IF NOT EXISTS detection_event_id ON detection_record(event_id) WHERE event_id IS NOT NULL')
-    c.commit()
+def conn() -> sqlite3.Connection:
+    connection = getattr(_local, "connection", None)
+    if connection is None:
+        connection = _connect()
+        _local.connection = connection
+    return connection
 
 
-def query(sql, args=()):
-    return [dict(r) for r in conn().execute(sql, args).fetchall()]
+def schema_version() -> int:
+    try:
+        row = conn().execute(
+            "SELECT version FROM schema_version ORDER BY rowid DESC LIMIT 1").fetchone()
+    except sqlite3.Error as error:
+        raise DatabaseUnavailable(f"数据库缺少 schema_version：{error}") from error
+    if row is None:
+        raise DatabaseUnavailable("数据库缺少 schema_version 记录")
+    version = int(row["version"])
+    if version != SUPPORTED_SCHEMA_VERSION:
+        raise DatabaseUnavailable(
+            f"数据库 schema={version}，网页只支持 {SUPPORTED_SCHEMA_VERSION}；请重建本地数据库")
+    return version
 
 
-def execute(sql, args=()):
-    c = conn()
-    cur = c.execute(sql, args)
-    c.commit()
-    return cur.lastrowid
+def query(sql: str, args: Iterable[Any] = ()) -> list[dict[str, Any]]:
+    try:
+        return [dict(row) for row in conn().execute(sql, tuple(args)).fetchall()]
+    except sqlite3.Error as error:
+        raise DatabaseUnavailable(f"数据库查询失败：{error}") from error
+
+
+def query_one(sql: str, args: Iterable[Any] = ()) -> dict[str, Any] | None:
+    try:
+        row = conn().execute(sql, tuple(args)).fetchone()
+        return dict(row) if row is not None else None
+    except sqlite3.Error as error:
+        raise DatabaseUnavailable(f"数据库查询失败：{error}") from error
+
+
+def table_columns(table: str) -> set[str]:
+    try:
+        return {str(row["name"]) for row in conn().execute(
+            f"PRAGMA table_info({table})").fetchall()}
+    except sqlite3.Error as error:
+        raise DatabaseUnavailable(f"无法读取数据表结构：{error}") from error

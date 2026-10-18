@@ -2,14 +2,13 @@
 #include "adapters/ros_adapter.h"
 #include "runtime/config.h"
 #include <QElapsedTimer>
-#include <QJsonArray>
 #include <QMainWindow>
 #include <QVector>
-class CameraPanel; class LocalController; class BusinessClient; class ProcessManager; class MapSaver; class RvizHost; class MapEditorDialog; class PatrolClient; class PatrolPage;
+class CameraPanel; class LocalController; class ProcessManager; class MapSaver; class RvizHost; class MapEditorDialog; class PatrolClient; class PatrolPage;
 class VisionPanel;
 class DeviceClient; class DevicePanel;
 class QAction; class QCheckBox; class QComboBox; class QDoubleSpinBox; class QLabel; class QLineEdit; class QTimer;
-class QPlainTextEdit; class QProgressBar; class QPushButton; class QTableWidget; class QTabWidget; class QToolButton;
+class QPlainTextEdit; class QProgressBar; class QPushButton; class QTabWidget; class QToolButton;
 class QBoxLayout;
 namespace ads { class CDockManager; class CDockWidget; }
 namespace Ui { class MainWindow; }
@@ -42,6 +41,7 @@ private:
   void updateControls();
   void syncPatrolState();
   bool cancelPatrolRun(const QString &reason);
+  void returnHome();
   bool patrolRunActive() const;
   bool vehicleStopConfirmed() const;
   void pollCloseAfterSafetyStop();
@@ -54,14 +54,12 @@ private:
   void openDeviceWindow();
   bool mapEditorSourceMatchesCurrent() const;
   void refreshEditorNavigationFeedback();
-  void showPoints(const QJsonArray &points);
   bool allowed() const;
   DesktopConfig config_;
   bool offline_;
   Ui::MainWindow *ui_ = nullptr;
   ads::CDockManager *docks_ = nullptr;
   LocalController *controller_ = nullptr;
-  BusinessClient *business_ = nullptr;
   RosAdapter *ros_ = nullptr;
   ProcessManager *process_ = nullptr;
   MapSaver *saver_ = nullptr;
@@ -72,7 +70,7 @@ private:
   QLabel *odomHint_ = nullptr;
   QString fastlioNavigationOdomSource_ = "lio";
   QCheckBox *enableControl_ = nullptr, *manage_ = nullptr, *sensors_ = nullptr, *chassis_ = nullptr, *bridge_ = nullptr, *patrolInterlock_ = nullptr;
-  QLineEdit *backendUrl_ = nullptr, *mapPrefix_ = nullptr, *navigationYaml_ = nullptr;
+  QLineEdit *mapPrefix_ = nullptr, *navigationYaml_ = nullptr;
   QDoubleSpinBox *goalX_ = nullptr, *goalY_ = nullptr, *goalYaw_ = nullptr, *speed_ = nullptr, *turn_ = nullptr;
   CameraPanel *cameraPanel_ = nullptr;
   VisionPanel *visionPanel_ = nullptr;
@@ -85,10 +83,10 @@ private:
   QLabel *power_ = nullptr, *picture_ = nullptr, *ocr_ = nullptr;
   QProgressBar *battery_ = nullptr;
   QPlainTextEdit *logs_ = nullptr;
-  QTableWidget *points_ = nullptr;
   QPushButton *start_ = nullptr, *stop_ = nullptr, *save_ = nullptr, *take_ = nullptr, *unlock_ = nullptr;
   QPushButton *sendGoalButton_ = nullptr;
   QPushButton *cancelButton_ = nullptr;
+  QPushButton *returnHomeButton_ = nullptr;
   QTabWidget *controlTabs_ = nullptr, *rightTabs_ = nullptr;
   QWidget *manualPage_ = nullptr, *statusDetails_ = nullptr;
   QToolButton *logToggle_ = nullptr;

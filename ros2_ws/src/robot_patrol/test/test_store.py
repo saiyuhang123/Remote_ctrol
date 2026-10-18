@@ -102,3 +102,69 @@ def test_cross_map_point_reference_rejected(store):
         store.upsert_route("", second.map_id, "bad",
                            [type("S", (), {"point_id": point.point_id, "dwell_seconds": 0})()])
     assert error.value.code == "MAP_MISMATCH"
+
+
+def test_schema_v2_home_point_round_trip_and_revision_invalidation(store):
+    mapping = store.upsert_map(map_data())
+    assert store.get_home_point(mapping.map_id) is None
+    home = store.set_home_point(mapping.map_id, 1, 1.25, -2.5, 0.75)
+    assert home.map_revision == 1
+    loaded = store.get_home_point(mapping.map_id)
+    assert loaded is not None
+    assert (loaded.x, loaded.y, loaded.yaw) == (1.25, -2.5, 0.75)
+    with store._conn:
+        version = store._conn.execute("SELECT version FROM schema_version").fetchone()[0]
+    assert version == 2
+    # Any map revision change invalidates coordinates from the old map.
+    store.upsert_map(map_data())
+    assert store.get_home_point(mapping.map_id) is None
+    store.set_home_point(mapping.map_id, 2, 0.0, 0.0, 0.0)
+    store.clear_home_point(mapping.map_id)
+    assert store.get_home_point(mapping.map_id) is None
+    store.set_active_map(mapping.map_id)
+    assert store.get_active_map_id() == mapping.map_id
+    store.upsert_map(map_data())
+    assert store.get_active_map_id() == ""
+
+
+def test_inspection_summary_deduplicates_and_counts_plates(store):
+    summary = store.upsert_inspection_summary(
+        "run_1", "2026-10-18", "map_1", "route_1", 3, 5,
+        ["京A12345", {"plate": "京B67890", "count": 2}, "京A12345"])
+    assert summary.face_capture_count == 3
+    assert summary.person_count == 5
+    assert summary.plates == [
+        {"plate": "京A12345", "count": 2},
+        {"plate": "京B67890", "count": 2},
+    ]
+    store.upsert_inspection_summary(
+        "run_1", "2026-10-18", "map_1", "route_1", 4, 6,
+        [{"plate": "京A12345", "count": 3}])
+    items = store.list_inspection_summaries()
+    assert len(items) == 1
+    assert items[0].face_capture_count == 4
+    assert items[0].plates == [{"plate": "京A12345", "count": 3}]
+
+
+def test_v1_database_is_migrated_without_losing_maps(tmp_path):
+    path = tmp_path / "old.sqlite3"
+    old = PatrolStore(path)
+    mapping = old.upsert_map(map_data())
+    with old._conn:
+        old._conn.execute("DROP TABLE inspection_summary")
+        old._conn.execute("DROP TABLE home_points")
+        old._conn.execute("DROP TABLE active_map_state")
+        old._conn.execute("UPDATE schema_version SET version = 1")
+    old.close()
+
+    migrated = PatrolStore(path)
+    try:
+        assert migrated.get_map(mapping.map_id).name == "map"
+        with migrated._conn:
+            assert migrated._conn.execute(
+                "SELECT version FROM schema_version").fetchone()[0] == 2
+            names = {row[0] for row in migrated._conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'")}
+        assert {"home_points", "inspection_summary", "active_map_state"} <= names
+    finally:
+        migrated.close()

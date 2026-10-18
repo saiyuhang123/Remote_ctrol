@@ -8,7 +8,6 @@
 #include "patrol/patrol_client.h"
 #include "patrol/patrol_page.h"
 #include "ui_mainwindow.h"
-#include "adapters/business_client.h"
 #include "adapters/local_controller.h"
 #include "runtime/map_saver.h"
 #include "runtime/process_manager.h"
@@ -33,8 +32,6 @@
 #include <QGroupBox>
 #include <QHeaderView>
 #include <QInputDialog>
-#include <QJsonDocument>
-#include <QJsonObject>
 #include <QLabel>
 #include <QLineEdit>
 #include <QPlainTextEdit>
@@ -45,7 +42,6 @@
 #include <QScrollArea>
 #include <QStackedWidget>
 #include <QStatusBar>
-#include <QTableWidget>
 #include <QTimer>
 #include <QToolBar>
 #include <QVBoxLayout>
@@ -65,18 +61,23 @@ QString pathIdentity(const QString &path) {
 MainWindow::MainWindow(const DesktopConfig &config, bool offline, QWidget *parent)
   : QMainWindow(parent), config_(config), offline_(offline) {
   Q_INIT_RESOURCE(images); Q_INIT_RESOURCE(media);
-  business_ = new BusinessClient(this);
   ros_ = new RosAdapter(config, this);
   controller_ = new LocalController(ros_, config.maxLinear, config.maxAngular, config.feedbackTimeoutMs, this);
   process_ = new ProcessManager(config, this);
   saver_ = new MapSaver(config, ros_, this);
   patrolClient_ = new PatrolClient(this);
+  connect(patrolClient_, &PatrolClient::mapsChanged, this, [this] {
+    const QString mapId = patrolClient_->activeMapId();
+    if (!mapId.isEmpty()) patrolClient_->refreshHomePoint(mapId);
+    updateControls();
+  });
+  connect(patrolClient_, &PatrolClient::homePointChanged, this, &MainWindow::updateControls);
   closeSafetyTimer_ = new QTimer(this);
   closeSafetyTimer_->setInterval(200);
   connect(closeSafetyTimer_, &QTimer::timeout, this, &MainWindow::pollCloseAfterSafetyStop);
   setupUi();
+  patrolClient_->refreshMaps();
   connect(controller_, &LocalController::message, this, &MainWindow::log);
-  connect(business_, &BusinessClient::message, this, &MainWindow::log);
   connect(ros_, &RosAdapter::message, this, &MainWindow::log);
   connect(saver_, &MapSaver::message, this, &MainWindow::log);
   connect(saver_, &MapSaver::saved, this, [this](bool ok, const QString &text) {
@@ -112,7 +113,6 @@ MainWindow::MainWindow(const DesktopConfig &config, bool offline, QWidget *paren
       showOperationResult(op, ok, detail);
     }
   });
-  connect(business_, &BusinessClient::points, this, &MainWindow::showPoints);
   connect(qApp, &QGuiApplication::applicationStateChanged, this, [this](Qt::ApplicationState s) { if (s != Qt::ApplicationActive && controller_) controller_->stopManual(); });
   log(offline_ ? "离线验证模式：控制、业务写入和进程启动均禁用" : "观察模式。操作前请启用操作；网页与桌面端请勿同时操控");
   applyProfile();
@@ -187,6 +187,18 @@ void MainWindow::updateControls() {
   sendGoalButton_->setEnabled(motion && profile().navigation && state_.poseValid && state_.frame == "map" &&
                               state_.navigationAvailable && state_.estopValid && !state_.estopped &&
                               !patrolRunning && !sessionPatrolInterlock_ && !state_.patrolInterlockValid);
+  if (returnHomeButton_) {
+    const auto home = patrolClient_ ? patrolClient_->homePoint() : PatrolHomeInfo();
+    const QString activeMap = patrolClient_ ? patrolClient_->activeMapId() : QString();
+    const auto patrol = patrolClient_ ? patrolClient_->status() : PatrolStatusInfo();
+    const bool returnRunning = patrol.active && patrol.runId.startsWith(QStringLiteral("return_"));
+    returnHomeButton_->setEnabled(
+        !offline_ && allowed() && profile().navigation && !home.mapId.isEmpty() &&
+        home.exists && home.mapId == activeMap && !returnRunning &&
+        state_.poseValid && state_.frame == QStringLiteral("map") &&
+        state_.navigationAvailable && state_.estopValid && !state_.estopped &&
+        state_.guardValid && state_.guardReady && !(controller_ && controller_->manualReady()));
+  }
   manage_->setEnabled(!offline_ && !running && !busy);
   start_->setEnabled(!offline_ && manage_->isChecked() && !running && !busy);
   stop_->setEnabled(!offline_ && running && !busy);
@@ -210,10 +222,45 @@ bool MainWindow::cancelPatrolRun(const QString &reason) {
   if (!patrolClient_ || !patrolClient_->available()) return false;
   if (!patrolClient_->hasActiveOrPendingRun()) return false;
   const auto status = patrolClient_->status();
-  patrolClient_->cancelRunRoute();
-  if (!status.runId.isEmpty()) patrolClient_->controlRun(3, status.runId);
-  log(reason + "：已向本地巡航任务发送取消请求，等待停车确认");
+  if (status.runId.startsWith(QStringLiteral("return_"))) {
+    patrolClient_->cancelReturnHome();
+  } else {
+    patrolClient_->cancelRunRoute();
+    if (!status.runId.isEmpty()) patrolClient_->controlRun(3, status.runId);
+  }
+  log(reason + "：已向本地任务发送取消请求，等待停车确认");
   return true;
+}
+
+void MainWindow::returnHome() {
+  if (!patrolClient_ || !patrolClient_->available()) {
+    log(QStringLiteral("一键返回不可用：本地巡航接口未构建")); return;
+  }
+  if (offline_ || !allowed()) { log(QStringLiteral("一键返回：请先启用操作")); return; }
+  if (!profile().navigation) { log(QStringLiteral("一键返回：请先切换到定位导航模式")); return; }
+  if (controller_ && controller_->manualReady()) {
+    log(QStringLiteral("一键返回：请先结束手动接管并确认车辆停稳")); return;
+  }
+  if (!state_.poseValid || state_.frame != QStringLiteral("map") ||
+      !state_.navigationAvailable || !state_.estopValid || state_.estopped ||
+      !state_.guardValid || !state_.guardReady) {
+    log(QStringLiteral("一键返回：定位、Nav2、急停或巡航联锁未就绪")); return;
+  }
+  const QString mapId = patrolClient_->activeMapId();
+  const auto home = patrolClient_->homePoint();
+  if (mapId.isEmpty() || !home.exists || home.mapId != mapId) {
+    log(QStringLiteral("一键返回：当前活跃地图没有有效的待命返航点")); return;
+  }
+  quint64 mapRevision = 0;
+  for (const auto &item : patrolClient_->maps())
+    if (item.mapId == mapId) mapRevision = item.revision;
+  if (!mapRevision) { log(QStringLiteral("一键返回：活跃地图版本未知，请刷新地图")); return; }
+  const auto status = patrolClient_->status();
+  if (status.active && status.runId.startsWith(QStringLiteral("return_"))) {
+    log(QStringLiteral("一键返回：返航任务已在执行")); return;
+  }
+  patrolClient_->returnHome(mapId, mapRevision);
+  log(QStringLiteral("一键返回：已请求返回当前地图待命点"));
 }
 
 void MainWindow::updateSnapshot(const RobotSnapshot &s) {
@@ -404,15 +451,6 @@ void MainWindow::openPatrolPage() {
   dialog->activateWindow();
 }
 
-void MainWindow::showPoints(const QJsonArray &items) {
-  points_->setRowCount(0);
-  for (const auto &value : items) {
-    const auto o = value.toObject(); int row = points_->rowCount(); points_->insertRow(row);
-    const QStringList values{QString::number(o.value("id").toInt()), o.value("name").toString(), QString::number(o.value("x").toDouble(), 'f', 3), QString::number(o.value("y").toDouble(), 'f', 3), QString::number(o.value("yaw").toDouble()*180./pi, 'f', 1)};
-    for (int col = 0; col < values.size(); ++col) points_->setItem(row, col, new QTableWidgetItem(values[col]));
-    points_->item(row, 0)->setData(Qt::UserRole, o);
-  }
-}
 void MainWindow::log(const QString &text) {
   if (logs_) logs_->appendPlainText(QDateTime::currentDateTime().toString("HH:mm:ss ") + text.trimmed());
   if (messageSummary_ && operationErrorKey_.isEmpty()) {

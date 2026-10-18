@@ -22,6 +22,14 @@ robot_patrol:
     status_period_sec: 1.0
     executor_heartbeat_period_sec: 0.2
     teleop_topic: "/cmd_vel_teleop"
+    return_cancel_timeout_sec: 15.0
+    # Empty means derive from ROBOT_PROJECT_ROOT (or ~/Remote_ctrol).
+    web_map_dir: ""
+
+inspection_recorder:
+  ros__parameters:
+    # Overridden by ROBOT_PATROL_DB when set.
+    database_path: "~/.local/share/robot_patrol/patrol.sqlite3"
 
 patrol_guard:
   ros__parameters:

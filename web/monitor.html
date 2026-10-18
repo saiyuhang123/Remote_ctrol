@@ -3,579 +3,725 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>巡检机器人远程监控台</title>
-<style>
-  * { box-sizing: border-box; }
-  html, body { height: 100%; }
-  body {
-    font-family: "Microsoft YaHei", "PingFang SC", sans-serif;
-    margin: 0; background: #14171c; color: #dde3ea;
-    display: flex; flex-direction: column; overflow: hidden;
-  }
-
-  /* ---------- 顶栏 ---------- */
-  header {
-    flex: 0 0 52px; display: flex; align-items: center; gap: 14px; padding: 0 18px;
-    background: #1c2129; border-bottom: 1px solid #2a313c;
-  }
-  header h1 { font-size: 17px; margin: 0; font-weight: 600; white-space: nowrap; }
-  #status { padding: 4px 12px; border-radius: 12px; font-size: 13px; white-space: nowrap; }
-  .ok { background: #1b5e20; } .bad { background: #b71c1c; }
-  #net { margin-left: auto; font-size: 12px; color: #7d8a99; white-space: nowrap; }
-
-  /* ---------- 主区：地图自适应撑满 + 右侧固定栏 ---------- */
-  #main {
-    flex: 1; display: flex; gap: 14px; padding: 14px; min-height: 0;
-  }
-  #mapWrap {
-    flex: 1; min-width: 0; position: relative;
-    background: #0d0f12; border: 1px solid #2a313c; border-radius: 8px; overflow: hidden;
-  }
-  #mapCanvas { position: absolute; inset: 0; cursor: grab; }
-  #mapHint {
-    position: absolute; left: 10px; bottom: 8px; font-size: 12px; color: #6b7787;
-    background: rgba(0,0,0,.45); padding: 2px 8px; border-radius: 4px; pointer-events: none;
-  }
-
-  #side {
-    flex: 0 0 clamp(280px, 20vw, 380px);
-    display: flex; flex-direction: column; gap: 14px;
-    overflow-y: auto; min-height: 0; padding-right: 2px;
-  }
-  #side::-webkit-scrollbar { width: 6px; }
-  #side::-webkit-scrollbar-thumb { background: #2a313c; border-radius: 3px; }
-
-  .card { background: #1c2129; border: 1px solid #2a313c; border-radius: 8px; padding: 12px 14px; flex: 0 0 auto; }
-  .card h2 { font-size: 13px; margin: 0 0 10px; color: #8fa1b5; font-weight: 600;
-             display: flex; align-items: center; justify-content: space-between; }
-
-  /* ---------- 仪表 ---------- */
-  .gauges { display: grid; grid-template-columns: 1fr 1fr; gap: 8px 12px; font-size: 13px; }
-  .gauges .v { font-size: 19px; font-weight: 700; color: #4fc3f7; }
-  .gauges .v.small { font-size: 14px; }
-  .gauges .u { font-size: 11px; color: #7d8a99; font-weight: 400; margin-left: 2px; }
-  #battBar { height: 8px; background: #2a313c; border-radius: 4px; margin-top: 8px; overflow: hidden; }
-  #battFill { height: 100%; width: 100%; background: #4caf50; border-radius: 4px; transition: width .5s; }
-
-  /* ---------- 识别告警 ---------- */
-  .alertItem { display: flex; gap: 8px; padding: 6px 0; border-bottom: 1px solid #262d38; align-items: center; }
-  .alertItem img { width: 64px; height: 48px; object-fit: cover; border-radius: 4px; background: #000; }
-  .alertItem .t { font-size: 11px; color: #7d8a99; }
-  .alertItem .l { font-size: 13px; color: #ffd54f; font-weight: 600; }
-
-  /* ---------- 视频 ---------- */
-  #videoBox { position: relative; width: 100%; aspect-ratio: 4/3; background: #000;
-              border: 1px solid #2a313c; border-radius: 6px; overflow: hidden; }
-  #video { width: 100%; height: 100%; border: 0; display: none; }
-  #videoOff { position: absolute; inset: 0; display: flex; flex-direction: column;
-              align-items: center; justify-content: center; gap: 10px; color: #6b7787; font-size: 13px; }
-  .btn {
-    padding: 7px 18px; font-size: 13px; border: none; border-radius: 5px; cursor: pointer;
-    background: #2d6da3; color: #fff; transition: background .15s;
-  }
-  .btn:hover { background: #3a82bd; }
-  .btn.gray { background: #3a424e; }
-  .btn.gray:hover { background: #4a5563; }
-
-  /* ---------- 遥控 ---------- */
-  #stick { background: #232932; border-radius: 50%; touch-action: none; display: block; margin: 0 auto; }
-  #estop {
-    width: 100%; height: 46px; margin-top: 12px; font-size: 18px; letter-spacing: 6px;
-    background: #d32f2f; color: #fff; border: none; border-radius: 6px; cursor: pointer;
-  }
-  #estop:active { background: #ff1744; }
-  #hint { color: #6b7787; font-size: 12px; margin-top: 8px; text-align: center; }
-
-  /* 窄屏（<1100px）堆叠布局 */
-  @media (max-width: 1100px) {
-    body { overflow: auto; }
-    #main { flex-direction: column; }
-    #mapWrap { flex: 0 0 62vh; }
-    #side { flex: 1 1 auto; overflow: visible; }
-  }
-</style>
+<title>巡检机器人 · 监控台</title>
+<script src="page-bridge.js"></script>
+<link rel="stylesheet" href="theme.css">
+<script src="ui.js" defer></script>
 </head>
-<body>
-<header>
-  <h1>巡检机器人远程监控台</h1>
-  <span id="status" class="bad">未连接</span>
-  <span style="display:flex;gap:12px;margin-left:12px">
-    <a href="/points.html" style="color:#4fc3f7;text-decoration:none;font-size:13px">巡检点</a>
-    <a href="/plans.html" style="color:#4fc3f7;text-decoration:none;font-size:13px">路线计划</a>
-    <a href="/records.html" style="color:#4fc3f7;text-decoration:none;font-size:13px">记录</a>
-  </span>
-  <span id="net"></span>
+<body class="monitor-page">
+<header class="page-header">
+  <div class="page-title"><h1>现场监控</h1><p>掌握机器人位置、运行状态与现场环境</p></div>
+  <nav><a href="/tasks.html">巡检任务</a><a href="/records.html">巡检记录</a></nav>
+  <div class="header-status"><span id="net"></span><span id="status" class="bad">未连接</span></div>
 </header>
 
+<div class="overview" aria-label="实时状态概览">
+  <div class="metric">
+    <div class="metric-head"><span>行驶状态</span><span class="icon" data-icon="gauge"></span></div>
+    <div class="metric-value"><span id="gvSpeed">—</span><span class="unit">m/s</span></div>
+    <div class="metric-foot"><span>角速度 <span id="gvTurn">—</span> rad/s</span><span id="estopTag" class="tag">急停未知</span></div>
+  </div>
+  <div class="metric">
+    <div class="metric-head"><span>实时定位</span><span class="icon" data-icon="locate"></span></div>
+    <div class="metric-value position-value" id="gvPos">—</div>
+    <div class="metric-foot"><span>坐标 / m</span><span>朝向 <span id="gvYaw">—</span></span></div>
+  </div>
+  <div class="metric">
+    <div class="metric-head"><span>导航任务</span><span class="icon" data-icon="route"></span></div>
+    <div class="metric-value nav-value" id="navText">等待状态</div>
+    <div class="metric-foot">巡航 <span id="taskText">未知</span></div>
+  </div>
+  <div class="metric gas-metric">
+    <div class="metric-head"><span>环境气体</span><span id="gasFresh" class="tag">未知</span></div>
+    <div class="metric-value gasValue"><span id="gasApprox"></span><span id="gasValue">—</span><span class="unit" id="gasUnit"></span></div>
+    <div class="metric-foot">检测状态 <b id="gasState" class="muted">未知</b></div>
+  </div>
+</div>
+
 <div id="main">
-  <div id="mapWrap">
-    <canvas id="mapCanvas"></canvas>
-    <div id="mapHint">滚轮缩放 · 拖拽平移</div>
-    <div style="position:absolute;top:10px;right:10px;display:flex;gap:8px">
-      <button class="btn" id="btnPose" disabled>初始定位</button>
-      <button class="btn" id="btnGoal" style="background:#2e7d32" disabled>目标点</button>
-      <button class="btn gray" id="btnNavCancel" style="display:none">取消导航</button>
+  <div id="mapWrap" role="region" aria-label="实时地图与轨迹">
+    <canvas id="mapCanvas" aria-label="滚轮缩放地图，拖拽平移"></canvas>
+    <div class="map-top">
+      <div class="map-label"><span class="icon" data-icon="compass"></span>实时地图</div>
+      <button class="btn gray" id="fitMap" title="显示完整地图"><span class="icon" data-icon="locate"></span>适应窗口</button>
     </div>
+    <div id="mapBadge"></div>
+    <div id="mapEmpty" class="empty-state"><span class="icon" data-icon="compass"></span><span>暂无可显示的地图</span><p>在本地加载并导出地图后，这里会自动更新</p></div>
+    <div class="map-legend"><span><i></i>机器人</span><span><i class="laser"></i>激光点</span><span><i class="global"></i>全局路径</span><span><i class="local"></i>局部路径</span></div>
+    <div id="mapHint">地图加载中…</div>
   </div>
 
-  <div id="side">
-    <div class="card">
-      <h2>车辆状态</h2>
-      <div class="gauges">
-        <div>速度<div class="v"><span id="gvSpeed">-</span><span class="u">m/s</span></div></div>
-        <div>转向<div class="v"><span id="gvTurn">-</span><span class="u">rad/s</span></div></div>
-        <div>位置<div class="v small"><span id="gvPos">-</span></div></div>
-        <div>朝向<div class="v small"><span id="gvYaw">-</span></div></div>
+  <aside id="side" aria-label="设备与控制面板">
+    <section class="card">
+      <h2><span class="section-title"><span class="icon" data-icon="shield"></span>控制权限</span><span id="controlTag" class="tag">未取得</span></h2>
+      <div class="row"><span>当前控制者</span><b id="ownerText">无</b></div>
+      <div class="row"><span>车辆模式</span><b id="modeText">空闲</b></div>
+      <div class="control-buttons">
+        <button class="btn" id="btnClaim">取得控制权</button>
+        <button class="btn gray" id="btnRelease" disabled>释放控制权</button>
       </div>
-      <h2 style="margin-top:12px">电池（未接入）</h2>
-      <div class="gauges">
-        <div>电量<div class="v"><span id="gvBatt">-</span><span class="u">%</span></div></div>
-        <div>电压<div class="v"><span id="gvVolt">-</span><span class="u">V</span></div></div>
-      </div>
-      <div id="battBar"><div id="battFill" style="width:0"></div></div>
-    </div>
-
-    <div class="card">
-      <h2>识别告警 <span id="alertCount" style="color:#4fc3f7"></span></h2>
-      <div id="alertList" style="max-height:220px;overflow-y:auto">
-        <div style="color:#6b7787;font-size:12px" id="alertEmpty">暂无识别事件</div>
-      </div>
-    </div>
-
-    <div class="card">
-      <h2>视频监控
-        <span style="display:flex;gap:6px">
-          <button class="btn" id="btnCapture" style="font-size:12px;padding:3px 10px">抓拍</button>
-          <button class="btn gray" id="btnVideo" style="font-size:12px;padding:3px 10px">开启</button>
-        </span>
-      </h2>
+      <div id="actionMessage" role="status"></div>
+    </section>
+    <section class="card">
+      <h2><span class="section-title"><span class="icon" data-icon="video"></span>实时视频</span><button class="btn gray" id="btnVideo">开启视频</button></h2>
       <div id="videoBox">
-        <iframe id="video" allow="autoplay; fullscreen"></iframe>
-        <div id="videoOff">
-          <span>视频未开启</span>
-          <span style="font-size:11px">点击右上角"开启"，不看时关闭省带宽</span>
-        </div>
+        <iframe id="video" title="相机实时视频" allow="autoplay; fullscreen" allowfullscreen></iframe>
+        <div id="videoOff"><span class="icon" data-icon="video"></span><span>视频未开启</span></div>
       </div>
-    </div>
-
-    <div class="card">
-      <h2>语音播报（机器人端扬声器）</h2>
-      <div style="display:flex;gap:6px">
-        <input id="ttsText" placeholder="输入要播报的文本" style="flex:1;background:#0d0f12;border:1px solid #2a313c;color:#dde3ea;border-radius:4px;padding:6px 8px;font-size:13px">
-        <button class="btn" id="btnTts">播报</button>
+    </section>
+    <section class="card">
+      <h2><span class="section-title"><span class="icon" data-icon="joystick"></span>手动遥控</span><span id="leaseText" class="muted">未授权</span></h2>
+      <canvas id="stick" width="190" height="190" aria-label="手动遥控摇杆"></canvas>
+      <button id="estop">紧急停车</button>
+      <div id="hint">取得控制权后拖动摇杆；松开立即停车</div>
+    </section>
+    <section class="card">
+      <h2><span class="section-title"><span class="icon" data-icon="ptz"></span>云台控制</span><span id="ptzAuto" class="tag">状态未知</span></h2>
+      <div class="row"><span>控制服务</span><b id="ptzService">未知</b></div>
+      <div class="row"><span>水平 / 俯仰</span><b id="ptzPose">—</b></div>
+      <div class="row"><span>变倍</span><b id="ptzZoom">—</b></div>
+      <div class="ptzGrid">
+        <span></span><button class="btn ptz" data-action="up" aria-label="云台向上">↑</button><span></span>
+        <button class="btn ptz" data-action="left" aria-label="云台向左">←</button><button class="btn gray" id="btnPtzStop">停</button><button class="btn ptz" data-action="right" aria-label="云台向右">→</button>
+        <span></span><button class="btn ptz" data-action="down" aria-label="云台向下">↓</button><span></span>
+        <button class="btn ptz" data-action="zoom_in" aria-label="放大">＋</button><button class="btn gray" id="btnPtzRead" style="font-size:12px">读取</button><button class="btn ptz" data-action="zoom_out" aria-label="缩小">－</button>
       </div>
-      <div style="display:flex;gap:6px;margin-top:8px">
-        <select id="audioSel" style="flex:1;background:#0d0f12;border:1px solid #2a313c;color:#dde3ea;border-radius:4px;padding:6px;font-size:13px"></select>
-        <button class="btn" id="btnPlayAudio">播放</button>
-        <button class="btn gray" id="btnPreview">试听</button>
-      </div>
-      <div style="display:flex;gap:6px;margin-top:8px;align-items:center">
-        <input type="file" id="audioFile" accept="audio/*" style="display:none">
-        <button class="btn gray" id="btnUpload">上传音频文件</button>
-        <span id="audioHint" style="font-size:11px;color:#7d8a99"></span>
-      </div>
-      <div id="ttsState" style="font-size:12px;color:#7d8a99;margin-top:6px"></div>
-    </div>
-
-    <div class="card">
-      <h2>远程遥控</h2>
-      <canvas id="stick" width="200" height="200"></canvas>
-      <button id="estop">急 停</button>
-      <div id="hint">拖动摇杆或 W/S/A/D 键；松开即停</div>
-    </div>
-  </div>
+      <div class="row"><span>自动巡航</span><b id="ptzPatrolState">未知</b></div>
+      <div class="row"><span>状态新鲜度</span><b id="ptzFresh">未知</b></div>
+      <div class="row"><span>最近错误</span><span id="ptzError" class="muted">无</span></div>
+    </section>
+    <section class="card">
+      <h2><span class="section-title"><span class="icon" data-icon="scan"></span>视觉识别</span></h2>
+      <label class="toggleRow"><span>人脸抓拍 <small id="faceState" class="muted"></small></span><input type="checkbox" id="toggleFace" disabled></label>
+      <label class="toggleRow"><span>行人检测 <small id="personState" class="muted"></small></span><input type="checkbox" id="togglePerson" disabled></label>
+      <label class="toggleRow"><span>车牌检测 <small id="plateState" class="muted"></small></span><input type="checkbox" id="togglePlate" disabled></label>
+      <div class="row"><span>相机</span><b id="cameraState">未知</b></div>
+      <div class="row"><span>识别节点</span><b id="detectorState">未知</b></div>
+      <div class="row"><span>状态更新时间</span><b id="visionFresh">未知</b></div>
+      <div class="row"><span>最近错误</span><span id="visionError" class="muted">无</span></div>
+    </section>
+    <section class="card">
+      <h2><span class="section-title"><span class="icon" data-icon="gas"></span>气体设备详情</span></h2>
+      <div class="row"><span>原始寄存器</span><b id="gasRaw">—</b></div>
+      <div class="row"><span>采集</span><b id="gasEnabled">未知</b></div>
+      <div class="row"><span>串口</span><b id="gasConnected">未知</b></div>
+      <div class="row"><span>最近错误</span><span id="gasError" class="muted">无</span></div>
+    </section>
+  </aside>
 </div>
 
 <script src="map-loader.js"></script>
 <script>
 const host = location.hostname;
+const wsUrl = `ws://${host}:8765`;
+const $ = id => document.getElementById(id);
+const ui = {
+  status: $('status'), net: $('net'), mapHint: $('mapHint'), mapBadge: $('mapBadge'),
+  actionMessage: $('actionMessage'), controlTag: $('controlTag'), ownerText: $('ownerText'),
+  modeText: $('modeText'), btnClaim: $('btnClaim'), btnRelease: $('btnRelease'),
+  leaseText: $('leaseText'), estopTag: $('estopTag'),
+};
+const app = {
+  ws: null, session: null, telemetry: null, mapMeta: null, projection: null,
+  mapImage: new Image(), mapReady: false, view: { scale: 1, panX: 0, panY: 0 },
+  autoFit: true, dragging: false, dragLast: null, stickActive: false,
+  telemetryReceivedAt: 0,
+  linear: 0, angular: 0, lastTaskKey: '', lastVision: '',
+  mapError: '地图加载中…',
+};
+const TASK_NAMES = {idle:'空闲', validating:'校验', dispatching:'派发', navigating:'导航',
+  settling:'停稳确认', dwelling:'停留', pausing:'暂停中', paused:'已暂停',
+  canceling:'取消中', canceled:'已取消', succeeded:'已完成', failed:'失败',
+  interrupted:'已中断', stopping:'停车中'};
+const CONTROL_NAMES = {idle:'无控制者', manual:'网页手动', route:'网页路线', 'return':'网页返航'};
 
-// ================= WebSocket 通道 =================
-let ws;
+function requestId(prefix) {
+  return `${prefix}_${Date.now()}_${Math.random().toString(16).slice(2, 9)}`;
+}
+function sendRaw(obj) {
+  if (!app.ws || app.ws.readyState !== 1) return false;
+  app.ws.send(JSON.stringify(obj)); return true;
+}
+function sendControl(type, extra = {}) {
+  if (!app.session) { showMessage('请先取得控制权', true); return false; }
+  const sent = sendRaw({ type, request_id: requestId(type), session_id: app.session, ...extra });
+  if (!sent) showMessage('连接已断开，请等待重连', true);
+  return sent;
+}
+function showMessage(text, bad = false) {
+  ui.actionMessage.textContent = text || '';
+  ui.actionMessage.style.color = bad ? 'var(--danger)' : 'var(--warning)';
+}
+
+function setConnection(ok, text) {
+  ui.status.textContent = text;
+  ui.status.className = ok ? 'ok' : 'bad';
+}
+
 function connect() {
-  ws = new WebSocket(`ws://${host}:8765`);
-  const el = document.getElementById('status');
-  ws.onopen  = () => { el.textContent = '已连接机器人'; el.className = 'ok';
-                      document.getElementById('net').textContent = host; };
-  ws.onclose = () => { el.textContent = '连接断开，3s 后重连…'; el.className = 'bad';
-                      closeVideo();
-                      setTimeout(connect, 3000); };
-  ws.onmessage = onMessage;
+  app.ws = new RobotConnection();
+  app.ws.onopen = () => { setConnection(true, '已连接机器人'); ui.net.textContent = host; };
+  app.ws.onclose = () => {
+    setConnection(false, '连接断开，3s 后重连…');
+    releaseStick(false); stopPtzHold(false);
+    app.session = null; app.telemetry = null; updateOwnership(); closeVideo(); updateGas({}); drawMap();
+  };
+  app.ws.onerror = () => setConnection(false, 'WebSocket 连接失败');
+  app.ws.onmessage = event => {
+    let data;
+    try { data = JSON.parse(event.data); } catch (_) { return; }
+    if (data.type === 'session_state') {
+      app.session = data.session_id || null;
+      if (!app.session) { releaseStick(false); stopPtzHold(false); }
+      updateOwnership();
+    } else if (data.type === 'telemetry') {
+      app.telemetry = data; app.telemetryReceivedAt = data.received_at_ms || Date.now();
+      updateTelemetry(); drawMap();
+    }
+    else if (data.type === 'control_state') {
+      if (app.telemetry) { app.telemetry.control = data.control; app.telemetry.task = data.task; }
+      if (data.control && !data.control.owner_present) app.session = null;
+      updateOwnership(); updateTask(data.task || (app.telemetry && app.telemetry.task));
+    } else if (data.type === 'command_result') {
+      handleCommandResult(data);
+    } else if (data.type === 'task_status') {
+      showMessage(`任务：${TASK_NAMES[data.status.state_name] || data.status.state_name || ''} ${data.status.message || ''}`);
+      if (app.telemetry) app.telemetry.patrol = data.status;
+      updateTaskStatus(data.status);
+    } else if (data.type === 'task_finished') {
+      showMessage(`任务结束：${data.success ? '成功' : (data.code || '失败')} ${data.message || ''}`, !data.success);
+      updateOwnership();
+    }
+  };
 }
 connect();
 
-function send(obj) { if (ws && ws.readyState === 1) ws.send(JSON.stringify(obj)); }
-
-// ================= 视频按需开关 =================
-const videoIframe = document.getElementById('video');
-const videoOff = document.getElementById('videoOff');
-const btnVideo = document.getElementById('btnVideo');
-let videoOn = false;
-
-function openVideo() {
-  videoIframe.src = `http://${host}:8889/cam/`;
-  videoIframe.style.display = 'block';
-  videoOff.style.display = 'none';
-  btnVideo.textContent = '关闭';
-  videoOn = true;
+function handleCommandResult(data) {
+  const isError = !data.ok;
+  const detail = data.message || data.code || '';
+  if (data.command === 'control_claim') {
+    if (data.ok) {
+      app.session = data.session_id || app.session;
+      showMessage(detail || '已取得控制权');
+    } else {
+      app.session = null;
+      showMessage(detail || '无法取得控制权', true);
+    }
+    updateOwnership();
+  } else if (data.command === 'control_release') {
+    app.session = null;
+    showMessage(detail || '已释放控制权', isError);
+    updateOwnership();
+  } else if (data.command === 'vision_face_capture' ||
+             data.command === 'vision_person' || data.command === 'vision_plate') {
+    showMessage(`${data.command}：${detail || (data.ok ? '成功' : '失败')}`, isError);
+    if (!data.ok) refreshVisionToggles();
+  } else if (data.command === 'ptz_jog' || data.command === 'ptz_stop' || data.command === 'ptz_read') {
+    if (!data.ok) showMessage(detail || '云台命令失败', true);
+  } else {
+    showMessage(`${data.command}: ${detail || (data.ok ? '已受理' : '失败')}`, isError);
+  }
 }
-function closeVideo() {
-  videoIframe.src = 'about:blank';   // 断开 WebRTC，MediaMTX 停止向本端推流
-  videoIframe.style.display = 'none';
-  videoOff.style.display = 'flex';
-  btnVideo.textContent = '开启';
-  videoOn = false;
+
+function isOwner() {
+  return Boolean(app.session && app.telemetry && app.telemetry.control &&
+                 app.telemetry.control.owner_present);
 }
-btnVideo.onclick = () => videoOn ? closeVideo() : openVideo();
+function isManual() {
+  return isOwner() && app.telemetry.control.mode === 'manual' &&
+         app.telemetry.control.estop_known === true &&
+         app.telemetry.control.estopped === false;
+}
+function taskRunning() {
+  return Boolean(app.telemetry && app.telemetry.task && app.telemetry.task.running);
+}
 
-// ---- 手动抓拍 ----
-document.getElementById('btnCapture').onclick = () => {
-  send({ type: 'capture', label: 'manual' });
-  mapHint.textContent = '抓拍请求已发送…';
-};
+function updateOwnership() {
+  const t = app.telemetry || {};
+  const control = t.control || {};
+  const owner = Boolean(app.session && control.owner_present);
+  const manual = owner && control.mode === 'manual' && !taskRunning();
+  ui.btnClaim.disabled = Boolean(app.session) || Boolean(control.owner_present) ||
+    Boolean(control.local_control) || control.estop_known !== true ||
+    control.estopped === true;
+  ui.btnClaim.title = control.estop_known !== true
+    ? '等待本地急停状态反馈' : (control.estopped === true
+      ? '急停保持中，请先在本地解除' : '取得本网页的单一控制权');
+  ui.btnRelease.disabled = !owner;
+  ui.controlTag.textContent = owner ? '本网页已取得' :
+    (control.local_control ? '本地控制优先' : (control.owner_present ? '其他网页控制中' : '未取得'));
+  ui.controlTag.dataset.tone = owner ? 'good' :
+    (control.owner_present || control.local_control ? 'warn' : 'muted');
+  ui.ownerText.textContent = control.local_control ? '本地桌面' : (control.owner_present ? '网页' : '无');
+  ui.modeText.textContent = CONTROL_NAMES[control.mode] || control.mode || '空闲';
+  ui.leaseText.textContent = owner ? '控制心跳正常' : '未授权';
+  ui.leaseText.className = owner ? 'good' : 'muted';
+  ui.estopTag.textContent = control.estop_known !== true ? '急停状态未知' :
+    (control.estopped ? '急停保持中' : '急停已释放');
+  ui.estopTag.dataset.tone = control.estop_known !== true ? 'warn' :
+    (control.estopped ? 'bad' : 'good');
+  $('stick').style.opacity = manual ? '1' : '.45';
+  ['toggleFace', 'togglePerson', 'togglePlate'].forEach(id => {
+    const el = $(id);
+    el.disabled = !owner || !visionNodeAvailable(id);
+  });
+  document.querySelectorAll('.ptz').forEach(button => {
+    button.disabled = !owner || ptzLocked();
+  });
+  $('btnPtzStop').disabled = !owner;
+  $('btnPtzRead').disabled = !owner;
+  updateTaskStatus(t.patrol);
+}
 
-// ---- 语音播报 ----
-document.getElementById('btnTts').onclick = () => {
-  const t = document.getElementById('ttsText').value.trim();
+function visionNodeAvailable(id) {
+  const vis = (app.telemetry && app.telemetry.vision) || {};
+  if (id === 'toggleFace') return Boolean(vis.face && vis.face.logged_in &&
+                                           vis.face_service_ready &&
+                                           vis.face_age !== null &&
+                                           vis.face_age !== undefined && vis.face_age <= 3);
+  return Boolean(vis.detector && vis.detector.ready && vis.detector_service_ready &&
+                 vis.detector_age !== null && vis.detector_age !== undefined &&
+                 vis.detector_age <= 3);
+}
+function ptzLocked() {
+  return Boolean(app.telemetry && app.telemetry.ptz && app.telemetry.ptz.manual_locked);
+}
+
+function updateTelemetry() {
+  const t = app.telemetry;
   if (!t) return;
-  send({ type: 'tts', text: t });
-  document.getElementById('ttsState').textContent = '已发送播报请求…';
-};
-document.getElementById('ttsText').addEventListener('keydown', e => {
-  if (e.key === 'Enter') document.getElementById('btnTts').onclick();
-});
-
-// ---- 音频文件：列表 / 机器人端播放 / 浏览器试听 / 上传 ----
-async function loadAudioList() {
-  try {
-    const r = await (await fetch('/api/audio')).json();
-    const sel = document.getElementById('audioSel');
-    sel.innerHTML = r.items.length
-      ? r.items.map(i => `<option value="${i.name}">${i.name}</option>`).join('')
-      : '<option value="">（无音频文件，请上传）</option>';
-  } catch { /* 后端未起 */ }
+  $('gvSpeed').textContent = Number(t.speed || 0).toFixed(2);
+  $('gvTurn').textContent = Number(t.turn || 0).toFixed(2);
+  if (t.pose) {
+    $('gvPos').textContent = `${t.pose.x.toFixed(2)}, ${t.pose.y.toFixed(2)}`;
+    const degrees = t.pose.yaw * 180 / Math.PI;
+    $('gvYaw').textContent = `${degrees.toFixed(1)}°`;
+  } else {
+    $('gvPos').textContent = '无定位'; $('gvYaw').textContent = '-';
+  }
+  const navCount = t.nav ? t.nav.active_goal_count : 0;
+  $('navText').textContent = navCount ? `${navCount} 个 Nav2 目标` : '空闲/无目标';
+  if (!app.mapReady) {
+    ui.mapBadge.textContent = app.mapError || '地图不可用';
+  } else if (t.frame && t.frame !== 'map') {
+    ui.mapBadge.textContent = `定位 frame=${t.frame}，结果不叠加到地图`;
+  } else {
+    ui.mapBadge.textContent = '';
+  }
+  updateOwnership();
+  updateTaskStatus(t.patrol);
+  updateVision(t.vision || {});
+  updatePtz(t.ptz || {});
+  updateGas(t.gas || {});
 }
-loadAudioList();
 
-document.getElementById('btnPlayAudio').onclick = () => {
-  const f = document.getElementById('audioSel').value;
-  if (!f) return;
-  send({ type: 'audio_play', file: f });
-  document.getElementById('ttsState').textContent = `已发送播放请求：${f}`;
-};
-document.getElementById('btnPreview').onclick = () => {
-  const f = document.getElementById('audioSel').value;
-  if (!f) return;
-  new Audio(`/audio/${f}`).play();   // 浏览器端试听（不走机器人喇叭）
-};
-document.getElementById('btnUpload').onclick = () => document.getElementById('audioFile').click();
-document.getElementById('audioFile').onchange = async e => {
-  const file = e.target.files[0];
-  if (!file) return;
-  const fd = new FormData();
-  fd.append('file', file);
-  document.getElementById('audioHint').textContent = '上传中…';
-  const r = await fetch('/api/audio/upload', { method: 'POST', body: fd });
-  const d = await r.json();
-  document.getElementById('audioHint').textContent = r.ok ? `已上传：${d.file}` : (d.detail || '上传失败');
-  loadAudioList();
-  e.target.value = '';
-};
+function updateTaskStatus(status) {
+  if (!status) return;
+  const task = app.telemetry && app.telemetry.task;
+  const running = task && task.running;
+  const name = TASK_NAMES[status.state_name] || status.state_name || '';
+  if (!status.active && !status.run_id && !running) {
+    $('taskText').textContent = '无';
+    return;
+  }
+  const loop = status.total_loops ? `${status.loop_index}/${status.total_loops}` : `${status.loop_index}/∞`;
+  const step = status.step_count ? `${status.step_index}/${status.step_count}` : '-';
+  const kind = running ? (task.kind === 'return' ? '返航 · ' : '路线 · ') : '';
+  $('taskText').textContent = `${kind}${name} · 圈 ${loop} · 点 ${step}${status.current_point_name ? ' · ' + status.current_point_name : ''}`;
+  $('taskText').title = status.message || status.error_code || '';
+}
 
-// ================= 遥控指令（与 M1 相同协议） =================
-let linear = 0, angular = 0, stickActive = false;
+function updateTask(task) {
+  if (app.telemetry) app.telemetry.task = task;
+  updateOwnership();
+}
+
+function freshText(age) {
+  if (age === null || age === undefined) return '未知';
+  return age <= 2.5 ? '新鲜' : (age <= 10 ? '稍旧' : '过期');
+}
+
+function updateVision(v) {
+  const face = v.face || {}, detector = v.detector || {}, camera = v.camera || {};
+  const cameraFresh = v.camera_age !== null && v.camera_age !== undefined &&
+                      v.camera_age <= 3;
+  const faceFresh = v.face_age !== null && v.face_age !== undefined &&
+                    v.face_age <= 3;
+  const online = (cameraFresh && (camera.online === true ||
+                  camera.raw === 'streaming_active')) ||
+                 (faceFresh && Boolean(face.logged_in));
+  $('cameraState').textContent = online ? '已连接' : '本地未启动/离线';
+  $('cameraState').className = online ? 'good' : 'muted';
+  const detectorFresh = v.detector_age !== null && v.detector_age !== undefined &&
+                        v.detector_age <= 3;
+  const ready = Boolean(detector.ready && v.detector_service_ready && detectorFresh);
+  $('detectorState').textContent = ready ? '已就绪' : '本地未启动/初始化中';
+  $('detectorState').className = ready ? 'good' : 'muted';
+  $('faceState').textContent = face.logged_in ? (face.enabled ? '已启用' : '已关闭') : '本地未启动';
+  $('personState').textContent = ready ? (detector.person ? '已启用' : '已关闭') : '本地未启动';
+  $('plateState').textContent = ready ? (detector.plate ? '已启用' : '已关闭') : '本地未启动';
+  const checkboxOwner = isOwner();
+  setCheckbox('toggleFace', Boolean(face.enabled),
+              checkboxOwner && Boolean(face.logged_in) && faceFresh &&
+              Boolean(v.face_service_ready));
+  setCheckbox('togglePerson', Boolean(detector.person), checkboxOwner && ready);
+  setCheckbox('togglePlate', Boolean(detector.plate), checkboxOwner && ready);
+  const recorder = v.recorder || {};
+  const ages = [v.detector_age, v.face_age, v.camera_age]
+    .filter(value => value !== null && value !== undefined);
+  const maxAge = ages.length ? Math.max(...ages) : null;
+  $('visionFresh').textContent = maxAge === null ? '未知' :
+    `${maxAge.toFixed(1)}s · ${maxAge <= 2.5 ? '新鲜' : '过期'}`;
+  $('visionFresh').className = maxAge !== null && maxAge <= 2.5 ? 'good' : 'warning';
+  const errors = [face.last_error, detector.last_error, recorder.last_error, camera.error]
+    .filter(value => typeof value === 'string' && value.trim());
+  $('visionError').textContent = errors[0] || '无';
+  $('visionError').className = errors.length ? 'warning' : 'muted';
+}
+
+function setCheckbox(id, checked, enabled) {
+  const el = $(id);
+  if (document.activeElement !== el) el.checked = checked;
+  el.disabled = !enabled;
+}
+
+function refreshVisionToggles() {
+  if (app.telemetry) updateVision(app.telemetry.vision || {});
+}
+
+function updatePtz(p) {
+  const pose = p.pose || {}, patrol = p.patrol || {};
+  $('ptzService').textContent = p.service_ready ? '就绪' : '未就绪';
+  $('ptzService').className = p.service_ready ? 'good' : 'muted';
+  $('ptzPose').textContent = (pose.pan !== undefined)
+    ? `${Number(pose.pan).toFixed(1)}° / ${Number(pose.tilt).toFixed(1)}°` : '-';
+  $('ptzZoom').textContent = pose.zoom !== undefined ? Number(pose.zoom).toFixed(1) : '-';
+  const active = Boolean(patrol.active || patrol.enabled);
+  $('ptzAuto').textContent = active ? '自动巡航中' : '手动可用';
+  $('ptzAuto').dataset.tone = active ? 'warn' : 'good';
+  $('ptzPatrolState').textContent = patrol.state || '未知';
+  $('ptzFresh').textContent = p.patrol_age === null || p.patrol_age === undefined
+    ? '未知' : `${Number(p.patrol_age).toFixed(1)}s · ${p.patrol_age <= 2.5 ? '新鲜' : '过期'}`;
+  $('ptzFresh').className = p.patrol_age !== null && p.patrol_age !== undefined &&
+    p.patrol_age <= 2.5 ? 'good' : 'warning';
+  $('ptzError').textContent = patrol.last_error || '无';
+  $('ptzError').className = patrol.last_error ? 'warning' : 'muted';
+  document.querySelectorAll('.ptz').forEach(button => {
+    button.disabled = !isOwner() || active;
+  });
+}
+
+function updateGas(g) {
+  const data = g.data || {}, status = g.status || {};
+  const elapsed = app.telemetry ? Math.max(0, (Date.now() - app.telemetryReceivedAt) / 1000) : 0;
+  const statusFresh = Number.isFinite(g.status_age) && g.status_age + elapsed <= 2.5;
+  const limit = Number.isFinite(status.interval) ? Math.max(6, status.interval * 3) : 6;
+  const dataFresh = Number.isFinite(g.data_age) && g.data_age + elapsed <= limit;
+  const scaled = data.value_scaled;
+  const validValue = Number.isFinite(scaled) || Number.isFinite(data.raw_value);
+  const live = statusFresh && dataFresh && status.enabled === true &&
+    status.connected === true && !status.last_error && validValue;
+  const approx = live && data.decimal_scaling_verified !== true && Number.isFinite(scaled);
+  $('gasApprox').textContent = approx ? '≈' : '';
+  $('gasValue').textContent = !live ? '—' : Number.isFinite(scaled)
+    ? scaled.toFixed(Math.max(0, Math.min(3, data.decimals ?? 2))) : `${data.raw_value}（原始）`;
+  $('gasUnit').textContent = live ? (data.unit || '') : '';
+  const state = live ? (data.state || 'unknown') : 'unknown';
+  const stateNames = {normal:'正常', low_alarm:'低报', high_alarm:'高报', unknown:'未知'};
+  $('gasState').textContent = stateNames[state] || state;
+  $('gasState').className = state === 'normal' ? 'good' : (state === 'unknown' ? 'muted' : 'danger');
+  $('gasRaw').textContent = live ? (data.raw_value ?? '—') : '—';
+  $('gasEnabled').textContent = !statusFresh ? '状态未知' : status.enabled ? '已启用' : '已停止';
+  $('gasEnabled').className = statusFresh && status.enabled ? 'good' : 'muted';
+  $('gasConnected').textContent = !statusFresh ? '状态未知' : status.connected ? '已连接' : '未连接';
+  $('gasConnected').className = statusFresh && status.connected ? 'good' : 'muted';
+  $('gasError').textContent = status.last_error || '无';
+  $('gasError').className = status.last_error ? 'warning' : 'muted';
+  $('gasFresh').textContent = live ? '数据新鲜' : !statusFresh ? '无新鲜状态' :
+    !status.enabled ? '采集已停止' : !status.connected ? '设备未连接' : status.last_error ? '采集异常' : '无新鲜数据';
+  $('gasFresh').dataset.tone = live ? 'good' : 'warn';
+}
+setInterval(() => updateGas((app.telemetry && app.telemetry.gas) || {}), 250);
+
+// ------------------------------ controls ------------------------------
+ui.btnClaim.onclick = () => {
+  showMessage('正在取得控制权…');
+  sendRaw({type:'control_claim', request_id:requestId('claim')});
+};
+ui.btnRelease.onclick = () => {
+  if (app.session) sendControl('control_release');
+};
+$('estop').onclick = () => {
+  releaseStick(false);
+  sendRaw({type:'estop', request_id:requestId('estop')});
+  showMessage('急停指令已发送', true);
+};
 
 setInterval(() => {
-  if (stickActive || linear !== 0 || angular !== 0)
-    send({ type: 'cmd_vel', linear, angular });
+  if (app.stickActive && isManual()) {
+    sendRaw({type:'cmd_vel', session_id:app.session, linear:app.linear, angular:app.angular});
+  }
 }, 100);
 
-// ---- 虚拟摇杆 ----
-const stick = document.getElementById('stick');
+// ------------------------------ joystick ------------------------------
+const stick = $('stick');
 const sctx = stick.getContext('2d');
-const SR = 90, SCX = 100, SCY = 100;
-let knob = { x: SCX, y: SCY };
-
+const SR = 82, SCX = 95, SCY = 95;
+let knob = {x:SCX, y:SCY};
 function drawStick() {
-  sctx.clearRect(0, 0, 200, 200);
-  sctx.beginPath(); sctx.arc(SCX, SCY, SR, 0, 7); sctx.strokeStyle = '#4a5568'; sctx.stroke();
-  sctx.beginPath(); sctx.arc(knob.x, knob.y, 30, 0, 7);
-  sctx.fillStyle = stickActive ? '#4caf50' : '#5a6572'; sctx.fill();
+  sctx.clearRect(0, 0, 190, 190);
+  sctx.beginPath(); sctx.arc(SCX, SCY, SR, 0, Math.PI*2);
+  sctx.strokeStyle = '#48637b'; sctx.stroke();
+  sctx.beginPath(); sctx.moveTo(SCX, 22); sctx.lineTo(SCX, 168);
+  sctx.moveTo(22, SCY); sctx.lineTo(168, SCY);
+  sctx.strokeStyle = '#2d485e'; sctx.stroke();
+  sctx.beginPath(); sctx.arc(knob.x, knob.y, 28, 0, Math.PI*2);
+  sctx.fillStyle = app.stickActive ? '#41d7b0' : '#66859c'; sctx.fill();
+  sctx.beginPath(); sctx.arc(knob.x, knob.y, 8, 0, Math.PI*2);
+  sctx.strokeStyle = app.stickActive ? '#d3fff1' : '#a3bed2'; sctx.stroke();
 }
 drawStick();
-
 function updateKnob(clientX, clientY) {
   const rect = stick.getBoundingClientRect();
   let dx = clientX - rect.left - SCX, dy = clientY - rect.top - SCY;
   const len = Math.hypot(dx, dy);
-  if (len > SR) { dx *= SR / len; dy *= SR / len; }
-  knob = { x: SCX + dx, y: SCY + dy };
-  linear  = -dy / SR;
-  angular = -dx / SR;   // ROS 约定 +angular.z 为左转
+  if (len > SR) { dx *= SR/len; dy *= SR/len; }
+  knob = {x:SCX+dx, y:SCY+dy};
+  app.linear = -dy / SR;
+  app.angular = -dx / SR;
   drawStick();
+  if (isManual()) sendRaw({type:'cmd_vel', session_id:app.session,
+                           linear:app.linear, angular:app.angular});
 }
-stick.addEventListener('pointerdown', e => { stickActive = true; stick.setPointerCapture(e.pointerId); updateKnob(e.clientX, e.clientY); });
-stick.addEventListener('pointermove', e => { if (stickActive) updateKnob(e.clientX, e.clientY); });
-function releaseStick() { stickActive = false; linear = 0; angular = 0; knob = { x: SCX, y: SCY }; drawStick(); send({ type: 'cmd_vel', linear: 0, angular: 0 }); }
-stick.addEventListener('pointerup', releaseStick);
-stick.addEventListener('pointercancel', releaseStick);
+stick.addEventListener('pointerdown', event => {
+  if (!isManual()) { showMessage('请先取得控制权并确保当前为手动模式', true); return; }
+  app.stickActive = true; stick.setPointerCapture(event.pointerId);
+  updateKnob(event.clientX, event.clientY);
+});
+stick.addEventListener('pointermove', event => { if (app.stickActive) updateKnob(event.clientX, event.clientY); });
+function releaseStick(sendZero = true) {
+  if (!app.stickActive) return;
+  app.stickActive = false; app.linear = 0; app.angular = 0;
+  knob = {x:SCX, y:SCY}; drawStick();
+  if (sendZero && app.session) sendRaw({type:'cmd_vel', session_id:app.session, linear:0, angular:0});
+}
+stick.addEventListener('pointerup', () => releaseStick());
+stick.addEventListener('pointercancel', () => releaseStick());
 
-// ---- 键盘 ----
 const keys = {};
-addEventListener('keydown', e => { keys[e.key.toLowerCase()] = true;  applyKeys(); });
-addEventListener('keyup',   e => { keys[e.key.toLowerCase()] = false; applyKeys(); });
+addEventListener('keydown', event => {
+  if (['INPUT','TEXTAREA','SELECT'].includes(document.activeElement.tagName)) return;
+  const key = event.key.toLowerCase();
+  if (['w','a','s','d','arrowup','arrowdown','arrowleft','arrowright'].includes(key)) {
+    event.preventDefault(); keys[key] = true; applyKeys();
+  }
+});
+addEventListener('keyup', event => { keys[event.key.toLowerCase()] = false; applyKeys(); });
 function applyKeys() {
-  if (stickActive) return;
-  const k = k => keys[k] ? 1 : 0;
-  linear  = (k('w') || k('arrowup')) - (k('s') || k('arrowdown'));
-  angular = (k('a') || k('arrowleft')) - (k('d') || k('arrowright'));
-}
-document.getElementById('estop').onclick = () => { releaseStick(); send({ type: 'estop' }); };
-
-// ================= 地图监控（canvas 随容器自适应） =================
-const mapWrap = document.getElementById('mapWrap');
-const cv = document.getElementById('mapCanvas');
-const c2 = cv.getContext('2d');
-let meta = null;
-const mapImg = new Image();
-let mapReady = false;
-let mapStatus = '地图加载中…';
-
-let zoom = 1.0, panX = 0, panY = 0, baseScale = 1.0;
-
-async function loadMap() {
-  try {
-    meta = await loadSiteMap(mapImg);
-    fitView();
-    mapReady = true;
-    btnPose.disabled = btnGoal.disabled = false;
-    refreshNavUI();
-  } catch (error) {
-    mapStatus = error.message || '实机地图加载失败';
-    mapHint.textContent = mapStatus;
+  if (app.stickActive || !isManual()) return;
+  const k = name => keys[name] ? 1 : 0;
+  const linear = (k('w') || k('arrowup')) - (k('s') || k('arrowdown'));
+  const angular = (k('a') || k('arrowleft')) - (k('d') || k('arrowright'));
+  if (linear || angular || app.linear || app.angular) {
+    app.linear = linear; app.angular = angular;
+    sendRaw({type:'cmd_vel', session_id:app.session, linear, angular});
   }
 }
+
+// ------------------------------ video ------------------------------
+const videoIframe = $('video');
+let videoOn = false;
+function openVideo() {
+  videoIframe.src = `http://${host}:8889/cam/`;
+  videoIframe.style.display = 'block'; $('videoOff').style.display = 'none';
+  $('btnVideo').textContent = '关闭视频'; videoOn = true;
+}
+function closeVideo() {
+  videoIframe.src = 'about:blank'; videoIframe.style.display = 'none';
+  $('videoOff').style.display = 'flex'; $('btnVideo').textContent = '开启视频';
+  videoOn = false;
+}
+$('btnVideo').onclick = () => videoOn ? closeVideo() : openVideo();
+
+// ------------------------------ vision switches ------------------------------
+for (const [id, command] of [['toggleFace','vision_face_capture'],
+                             ['togglePerson','vision_person'],
+                             ['togglePlate','vision_plate']]) {
+  $(id).onchange = event => {
+    if (!isOwner()) { event.target.checked = !event.target.checked; showMessage('请先取得控制权', true); return; }
+    sendControl(command, {enabled:event.target.checked});
+  };
+}
+
+// ------------------------------ PTZ hold-to-move ------------------------------
+let heldPtz = null;
+function stopPtzHold(sendStop = true) {
+  const active = heldPtz !== null; heldPtz = null;
+  if (sendStop && active && app.session) sendControl('ptz_stop');
+}
+setInterval(() => {
+  if (heldPtz && isOwner() && !ptzLocked()) sendControl('ptz_jog', {action:heldPtz, speed:3});
+  else if (heldPtz) stopPtzHold();
+}, 200);
+document.querySelectorAll('.ptz').forEach(button => {
+  const stop = () => stopPtzHold();
+  button.addEventListener('pointerdown', event => {
+    if (!isOwner() || ptzLocked()) return;
+    event.preventDefault(); button.setPointerCapture(event.pointerId);
+    heldPtz = button.dataset.action;
+    sendControl('ptz_jog', {action:button.dataset.action, speed:3});
+  });
+  button.addEventListener('pointerup', stop);
+  button.addEventListener('pointercancel', stop);
+  button.addEventListener('lostpointercapture', stop);
+});
+$('btnPtzStop').onclick = () => { stopPtzHold(false); sendControl('ptz_stop'); };
+$('btnPtzRead').onclick = () => sendControl('ptz_read');
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden) {
+    releaseStick(); stopPtzHold();
+    Object.keys(keys).forEach(key => { keys[key] = false; });
+    if (app.session && isManual()) sendControl('cmd_vel', {linear:0,angular:0});
+  }
+});
+addEventListener('blur', () => {
+  releaseStick(); stopPtzHold(); Object.keys(keys).forEach(key => { keys[key] = false; });
+  if (app.session && isManual()) sendControl('cmd_vel', {linear:0,angular:0});
+});
+addEventListener('beforeunload', () => {
+  if (app.stickActive) sendRaw({type:'cmd_vel', session_id:app.session, linear:0, angular:0});
+  if (app.session) sendControl('ptz_stop');
+});
+
+// ------------------------------ map ------------------------------
+const mapWrap = $('mapWrap');
+const canvas = $('mapCanvas');
+const ctx = canvas.getContext('2d');
+
+function resizeCanvas() {
+  const width = mapWrap.clientWidth, height = mapWrap.clientHeight;
+  if (!width || !height) return;
+  canvas.width = width; canvas.height = height;
+  if (app.mapReady && app.autoFit) fitView();
+  drawMap();
+}
+new ResizeObserver(resizeCanvas).observe(mapWrap);
+
 function fitView() {
-  baseScale = Math.min(cv.width / meta.width, cv.height / meta.height);
-  zoom = 1.0;
-  panX = (cv.width  - meta.width  * baseScale) / 2;
-  panY = (cv.height - meta.height * baseScale) / 2;
+  if (!app.mapMeta) return;
+  const width = canvas.width, height = canvas.height;
+  const scale = Math.min(width / app.mapMeta.width, height / app.mapMeta.height) * 0.94;
+  app.view.scale = scale;
+  app.view.panX = (width - app.mapMeta.width * scale) / 2;
+  app.view.panY = (height - app.mapMeta.height * scale) / 2;
 }
 
-// canvas 尺寸跟随容器（1080p / 2K / 窗口拉伸自适应）
-new ResizeObserver(() => {
-  const w = mapWrap.clientWidth, h = mapWrap.clientHeight;
-  if (w === 0 || h === 0) return;
-  cv.width = w; cv.height = h;
-  cv.style.width = w + 'px'; cv.style.height = h + 'px';
-  if (mapReady) fitView();
-}).observe(mapWrap);
-
+let mapLoading = false;
+async function loadMap() {
+  if (mapLoading) return;
+  mapLoading = true;
+  try {
+    const meta = await fetchSiteMapMeta();
+    if (!app.mapReady || siteMapVersion(meta) !== siteMapVersion(app.mapMeta)) {
+      app.mapReady = false; drawMap();
+      const image = new Image();
+      await loadSiteMap(image, meta);
+      app.mapImage = image; app.mapMeta = meta; app.projection = new SiteMapProjection(meta);
+      app.mapReady = true; app.autoFit = true; fitView();
+    }
+    app.mapError = ''; ui.mapBadge.textContent = '';
+    const name = String(app.mapMeta.map_id || '').slice(0, 18);
+    ui.mapHint.textContent = `地图 ${name || app.mapMeta.image} · revision ${app.mapMeta.revision || 0} · 滚轮缩放 · 拖拽平移`;
+    drawMap();
+  } catch (error) {
+    app.mapReady = false;
+    app.mapError = error.message || '实机地图加载失败';
+    ui.mapHint.textContent = error.message || '实机地图加载失败';
+    ui.mapBadge.textContent = '地图不可用：禁止依据网页地图执行巡检';
+    drawMap();
+  } finally { mapLoading = false; }
+}
 loadMap();
+setInterval(loadMap, 2000);
+$('fitMap').onclick = () => { app.autoFit = true; fitView(); drawMap(); };
 
-// map 坐标(米) -> canvas 像素（含 y 翻转：pgm 首行对应 y 最大）
-function m2cx(x) { return (x - meta.origin[0]) / meta.resolution * baseScale * zoom + panX; }
-function m2cy(y) { return (meta.height - (y - meta.origin[1]) / meta.resolution) * baseScale * zoom + panY; }
-// canvas 像素 -> map 坐标(米)，逆变换（初始定位点选用）
-function c2mx(px) { return (px - panX) / (baseScale * zoom) * meta.resolution + meta.origin[0]; }
-function c2my(py) { return meta.origin[1] + (meta.height - (py - panY) / (baseScale * zoom)) * meta.resolution; }
+canvas.addEventListener('wheel', event => {
+  if (!app.mapReady) return;
+  event.preventDefault(); app.autoFit = false;
+  const rect = canvas.getBoundingClientRect();
+  const mx = event.clientX - rect.left, my = event.clientY - rect.top;
+  const oldScale = app.view.scale;
+  const factor = event.deltaY < 0 ? 1.15 : 1/1.15;
+  const newScale = Math.max(0.05, Math.min(20, oldScale * factor));
+  const imageX = (mx - app.view.panX) / oldScale;
+  const imageY = (my - app.view.panY) / oldScale;
+  app.view.scale = newScale;
+  app.view.panX = mx - imageX * newScale;
+  app.view.panY = my - imageY * newScale;
+  drawMap();
+}, {passive:false});
+canvas.addEventListener('pointerdown', event => {
+  app.dragging = true; app.dragLast = [event.clientX, event.clientY];
+  canvas.setPointerCapture(event.pointerId); canvas.style.cursor = 'grabbing';
+});
+canvas.addEventListener('pointermove', event => {
+  if (!app.dragging) return;
+  app.autoFit = false;
+  app.view.panX += event.clientX - app.dragLast[0];
+  app.view.panY += event.clientY - app.dragLast[1];
+  app.dragLast = [event.clientX, event.clientY]; drawMap();
+});
+function endDrag() { app.dragging = false; canvas.style.cursor = 'grab'; }
+canvas.addEventListener('pointerup', endDrag);
+canvas.addEventListener('pointercancel', endDrag);
 
-// ---- 初始定位 / 目标点 点选模式 ----
-let pickMode = null;              // null | 'pose' | 'goal'
-let poseStart = null, poseCur = null;
-const btnPose = document.getElementById('btnPose');
-const btnGoal = document.getElementById('btnGoal');
-const btnNavCancel = document.getElementById('btnNavCancel');
-const mapHint = document.getElementById('mapHint');
-let navStatus = 'idle';
-
-function setPickMode(mode) {
-  if (!mapReady) return;
-  pickMode = mode;
-  poseStart = poseCur = null;
-  btnPose.textContent = pickMode === 'pose' ? '取消' : '初始定位';
-  btnGoal.textContent = pickMode === 'goal' ? '取消' : '目标点';
-  cv.style.cursor = pickMode ? 'crosshair' : 'grab';
-  if (pickMode === 'pose') mapHint.textContent = '点选初始位姿：按下并拖出朝向，松开下发（ESC 取消）';
-  else if (pickMode === 'goal') mapHint.textContent = '点选导航目标：按下并拖出朝向，松开下发（ESC 取消）';
-  else mapHint.textContent = '滚轮缩放 · 拖拽平移';
-}
-btnPose.onclick = () => setPickMode(pickMode === 'pose' ? null : 'pose');
-btnGoal.onclick = () => setPickMode(pickMode === 'goal' ? null : 'goal');
-btnNavCancel.onclick = () => send({ type: 'nav_cancel' });
-addEventListener('keydown', e => { if (e.key === 'Escape' && pickMode) setPickMode(null); });
-
-const NAV_STATUS_TEXT = {
-  idle: '', sent: '目标已发送…', driving: '导航行驶中…',
-  succeeded: '已到达目标点', aborted: '导航失败',
-  canceled: '导航已取消', rejected: '目标被拒绝', error: 'Nav2 未就绪',
-  canceling: '正在取消…',
-  unlocalized: '请先设置初始位姿，等待地图定位成功',
-  estopped: '急停保持中，手动控制可解除',
-};
-function refreshNavUI() {
-  btnNavCancel.style.display = (navStatus === 'driving' || navStatus === 'sent') ? '' : 'none';
-  const t = NAV_STATUS_TEXT[navStatus] || navStatus;
-  if (!pickMode) mapHint.textContent = !mapReady ? mapStatus : (t || '滚轮缩放 · 拖拽平移');
-}
-
-// ---- 缩放/平移 ----
-cv.addEventListener('wheel', e => {
-  e.preventDefault();
-  if (!mapReady) return;
-  const rect = cv.getBoundingClientRect();
-  const mx = e.clientX - rect.left, my = e.clientY - rect.top;
-  const old = zoom;
-  zoom *= e.deltaY < 0 ? 1.15 : 1 / 1.15;
-  zoom = Math.max(0.3, Math.min(20, zoom));
-  panX = mx - (mx - panX) * (zoom / old);
-  panY = my - (my - panY) * (zoom / old);
-}, { passive: false });
-
-let panning = false, panStart = null;
-function canvasPos(e) {
-  const rect = cv.getBoundingClientRect();
-  return { x: e.clientX - rect.left, y: e.clientY - rect.top };
-}
-cv.addEventListener('pointerdown', e => {
-  if (!mapReady) return;
-  if (pickMode) {
-    poseStart = canvasPos(e); poseCur = poseStart;
-  } else {
-    panning = true; panStart = { x: e.clientX - panX, y: e.clientY - panY };
-    cv.style.cursor = 'grabbing';
+function drawPath(points, color, width) {
+  if (!points || points.length < 2) return;
+  ctx.beginPath();
+  let started = false;
+  for (const [x, y] of points) {
+    const [px, py] = app.projection.worldToCanvas(x, y, app.view);
+    if (!started) { ctx.moveTo(px, py); started = true; } else ctx.lineTo(px, py);
   }
-  cv.setPointerCapture(e.pointerId);
-});
-cv.addEventListener('pointermove', e => {
-  if (pickMode && poseStart) { poseCur = canvasPos(e); return; }
-  if (panning) { panX = e.clientX - panStart.x; panY = e.clientY - panStart.y; }
-});
-function endPan(e) {
-  if (pickMode && poseStart && poseCur) {
-    // 拖出朝向并下发（canvas y 向下，yaw 取负）
-    const dx = poseCur.x - poseStart.x, dy = poseCur.y - poseStart.y;
-    if (Math.hypot(dx, dy) > 8) {   // 拖得太短视为误触
-      const x = c2mx(poseStart.x), y = c2my(poseStart.y);
-      const yaw = Math.atan2(-dy, dx);
-      if (pickMode === 'pose') {
-        send({ type: 'initial_pose', x, y, yaw });
-        mapHint.textContent = `初始位姿已下发: (${x.toFixed(2)}, ${y.toFixed(2)})`;
-      } else {
-        send({ type: 'nav_goal', x, y, yaw });
-        mapHint.textContent = `目标已下发: (${x.toFixed(2)}, ${y.toFixed(2)})`;
+  ctx.strokeStyle = color; ctx.lineWidth = width; ctx.stroke();
+}
+
+function drawMap() {
+  $('mapEmpty').hidden = app.mapReady;
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  if (!app.mapReady) return;
+  ctx.imageSmoothingEnabled = false;
+  ctx.drawImage(app.mapImage, app.view.panX, app.view.panY,
+                app.mapMeta.width * app.view.scale,
+                app.mapMeta.height * app.view.scale);
+  const t = app.telemetry;
+  if (!t) return;
+  const frameOk = t.frame === 'map' && app.projection;
+  if (frameOk) {
+    const paths = t.paths || {};
+    drawPath(paths.global, 'rgba(79,195,247,.85)', 2);
+    drawPath(paths.local, 'rgba(255,183,77,.9)', 1.5);
+    if (Array.isArray(t.scan)) {
+      ctx.fillStyle = 'rgba(255,82,82,.7)';
+      for (const [x, y] of t.scan) {
+        const [px, py] = app.projection.worldToCanvas(x, y, app.view);
+        ctx.fillRect(px - 1, py - 1, 2, 2);
       }
     }
-    setPickMode(null);
-  }
-  panning = false;
-  if (!pickMode) cv.style.cursor = 'grab';
-}
-cv.addEventListener('pointerup', endPan);
-cv.addEventListener('pointercancel', endPan);
-
-// ---- 遥测 ----
-let robotPose = null;
-let scanPts = [];
-
-function onMessage(ev) {
-  let d;
-  try { d = JSON.parse(ev.data); } catch { return; }
-  if (d.type === 'telemetry') {
-    robotPose = d.frame === 'map' ? d.pose : null;
-    scanPts = d.frame === 'map' ? d.scan : [];
-    document.getElementById('gvSpeed').textContent = Number.isFinite(d.speed) ? d.speed.toFixed(2) : '-';
-    document.getElementById('gvTurn').textContent = Number.isFinite(d.turn) ? d.turn.toFixed(2) : '-';
-    document.getElementById('gvPos').textContent = d.frame === 'map'
-      ? `${d.pose.x.toFixed(2)}, ${d.pose.y.toFixed(2)}` : '等待地图定位';
-    document.getElementById('gvYaw').textContent = `${(d.pose.yaw * 57.2958).toFixed(1)}°`;
-    if (d.nav !== undefined && d.nav !== navStatus) {
-      navStatus = d.nav;
-      refreshNavUI();
-    }
-  } else if (d.type === 'detection') {
-    addAlert(d);
-  } else if (d.type === 'capture') {
-    if (d.ok) {
-      addAlert({ event: 'capture', label: '手动抓拍', score: 1, ts: d.ts, image: d.image });
-    } else {
-      mapHint.textContent = `抓拍失败：${d.reason || '未知原因'}`;
-    }
-  } else if (d.type === 'tts') {
-    const el = document.getElementById('ttsState');
-    el.textContent = { speaking: '正在播报…', done: '播报完成', error: '播报失败' }[d.status] || d.status;
-  }
-}
-
-// ================= 识别告警 =================
-let alertCount = 0;
-function addAlert(d) {
-  alertCount++;
-  document.getElementById('alertCount').textContent = `(${alertCount})`;
-  document.getElementById('alertEmpty')?.remove();
-  const list = document.getElementById('alertList');
-  const item = document.createElement('div');
-  item.className = 'alertItem';
-  const time = new Date(d.ts * 1000).toTimeString().slice(0, 8);
-  const eventName = { person_face: '人脸', person: '行人', vehicle_plate: '车牌', capture: '抓拍' }[d.event] || d.event;
-  item.innerHTML =
-    `<img src="${d.image}" onerror="this.style.display='none'">` +
-    `<div><div class="l">${eventName} ${d.label}</div>` +
-    `<div class="t">${time} · 置信度 ${d.score}</div></div>`;
-  list.prepend(item);
-  while (list.children.length > 30) list.lastChild.remove();
-}
-
-// ---- 渲染循环 ----
-function render() {
-  requestAnimationFrame(render);
-  if (cv.width === 0) return;
-  c2.clearRect(0, 0, cv.width, cv.height);
-  if (!mapReady) {
-    c2.fillStyle = '#5a6572'; c2.font = '16px sans-serif';
-    c2.fillText(mapStatus, 20, 40);
-    return;
-  }
-  c2.imageSmoothingEnabled = false;
-  c2.drawImage(mapImg, panX, panY, meta.width * baseScale * zoom, meta.height * baseScale * zoom);
-
-  c2.fillStyle = 'rgba(0,229,255,0.75)';
-  for (const [x, y] of scanPts) {
-    c2.fillRect(m2cx(x) - 1.5, m2cy(y) - 1.5, 3, 3);
-  }
-
-  if (robotPose) {
-    const cx = m2cx(robotPose.x), cy = m2cy(robotPose.y);
-    c2.save();
-    c2.translate(cx, cy);
-    c2.rotate(-robotPose.yaw);
-    c2.beginPath();
-    c2.moveTo(14, 0); c2.lineTo(-9, 8); c2.lineTo(-5, 0); c2.lineTo(-9, -8); c2.closePath();
-    c2.fillStyle = '#ffb300'; c2.fill();
-    c2.strokeStyle = '#14171c'; c2.lineWidth = 1.5; c2.stroke();
-    c2.restore();
-  }
-
-  // 点选模式拖拽中的临时箭头（初始定位=红，目标点=绿）
-  if (pickMode && poseStart && poseCur) {
-    const dx = poseCur.x - poseStart.x, dy = poseCur.y - poseStart.y;
-    if (Math.hypot(dx, dy) > 8) {
-      const ang = Math.atan2(dy, dx);
-      const color = pickMode === 'pose' ? '#ff5252' : '#69f0ae';
-      c2.save();
-      c2.translate(poseStart.x, poseStart.y);
-      c2.rotate(ang);
-      c2.beginPath();
-      c2.moveTo(0, 0); c2.lineTo(Math.hypot(dx, dy), 0);
-      c2.moveTo(Math.hypot(dx, dy) - 10, -6); c2.lineTo(Math.hypot(dx, dy), 0);
-      c2.lineTo(Math.hypot(dx, dy) - 10, 6);
-      c2.strokeStyle = color; c2.lineWidth = 3; c2.stroke();
-      c2.beginPath(); c2.arc(0, 0, 5, 0, 7); c2.fillStyle = color; c2.fill();
-      c2.restore();
+    if (t.pose) {
+      const [px, py] = app.projection.worldToCanvas(t.pose.x, t.pose.y, app.view);
+      const angle = app.projection.worldYawToScreen(t.pose.yaw);
+      const size = 10;
+      ctx.save(); ctx.translate(px, py); ctx.rotate(angle);
+      ctx.beginPath();
+      ctx.moveTo(size, 0); ctx.lineTo(-size * .7, size * .6);
+      ctx.lineTo(-size * .7, -size * .6); ctx.closePath();
+      ctx.fillStyle = '#4caf50'; ctx.fill();
+      ctx.strokeStyle = '#fff'; ctx.lineWidth = 1; ctx.stroke();
+      ctx.restore();
     }
   }
 }
-render();
 </script>
 </body>
 </html>

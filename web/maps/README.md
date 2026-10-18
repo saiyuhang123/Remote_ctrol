@@ -1,27 +1,26 @@
-# 实机地图
+# 网页地图资源
 
-原 Gazebo 测试场地的 `patrol.png` 和 `meta.json` 已删除。没有实际地图时，监控台和点位页面显示“尚未配置实机地图”，并禁止地图点选。
+网页端只读取本目录下的：
 
-实机建图后，将同一张地图转换为浏览器支持的 PNG/JPEG，放在本目录，并创建 `meta.json`：
+```text
+active.png
+meta.json
+```
 
-推荐直接从 Nav2 使用的实际地图 YAML 导出，工具会保持分辨率、原点和图片尺寸：
+这两个文件不再要求人工导出。运行时行为：
+
+- 本地桌面在“保存地图”成功后自动调用 `scripts/export_web_map.py`。
+- `robot_patrol` 在设置活跃地图时再次导出，并写入 `map_id`、地图 `revision` 和 `backend`。
+- 导出使用临时文件加原子替换；`meta.json` 保留完整 Nav2 `origin`，包括 `origin[2]` 朝向。
+- 浏览器使用同一套二维仿射变换绘制地图、雷达、机器人位姿和路径，因此支持 `origin_yaw` 非零。
+- 监控页每 2 秒检查元数据，按地图 ID、revision、图片 hash 和几何变化重载；首次打开尚无地图时会持续重试，元数据不匹配时清除旧图，恢复后自动加载。未变化时保留当前缩放和平移。
+- 网页通过 `/api/map/meta` 校验 PNG SHA-256、`map_id` 和 revision。图片与 meta 不一致、地图 revision 变化或路线 revision 过期时，任务页禁止执行并由 `robot_patrol` 再校验一次。
+
+手工导出仅用于维护排查：
 
 ```bash
-python3 /home/jkbot/Remote_ctrol/scripts/export_web_map.py /实际路径/site.yaml
+python3 scripts/export_web_map.py /实际路径/map.yaml \
+  --output-dir web/maps --map-id 地图ID --revision 1 --backend fastlio
 ```
 
-FAST-LIO PCD 转栅格的步骤见 [实机导航移植说明](../../实机导航移植说明.md)。手工配置格式如下：
-
-```json
-{
-  "image": "map.png",
-  "resolution": 0.05,
-  "origin": [-10.0, -10.0, 0.0],
-  "width": 1000,
-  "height": 800
-}
-```
-
-以上数值仅说明格式。`resolution`、`origin` 必须取自实测地图 YAML，`width`、`height` 必须与图片像素尺寸一致；图片保持地图原始行序，页面负责翻转 Y 轴。目前页面仅支持 `origin[2] = 0`。
-
-Nav2 仍使用实测地图的 YAML/PGM 文件，通过 `map:=/实际路径/map.yaml` 传入，不读取此处的网页图片。网页显示的地图必须与 Nav2 使用的地图一致。
+`resolution`、`origin`、`width`、`height` 均取自实际 Nav2 地图 YAML/栅格；不要在网页端手工修改这些几何值。Nav2 仍从原 YAML/PGM 加载地图，本目录只服务网页显示。

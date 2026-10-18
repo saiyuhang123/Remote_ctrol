@@ -7,9 +7,10 @@ from typing import Any, Iterable
 import json
 import sqlite3
 import threading
-import time
 
 from .models import (
+    HomePoint,
+    InspectionSummary,
     MapBinding,
     PatrolError,
     Point,
@@ -22,6 +23,8 @@ from .models import (
     validate_route_steps,
 )
 
+SCHEMA_VERSION = 2
+
 
 class PatrolStore:
     def __init__(self, database_path: str | Path):
@@ -31,6 +34,7 @@ class PatrolStore:
         self._conn = sqlite3.connect(self.path, check_same_thread=False, isolation_level=None)
         self._conn.row_factory = sqlite3.Row
         self._conn.execute("PRAGMA foreign_keys = ON")
+        self._conn.execute("PRAGMA busy_timeout = 5000")
         self._conn.execute("PRAGMA journal_mode = WAL")
         self._initialize()
 
@@ -162,8 +166,47 @@ class PatrolStore:
                     error_code TEXT NOT NULL DEFAULT ''
                 );
                 CREATE INDEX IF NOT EXISTS idx_attempts_run ON stop_attempts(run_id);
+
+                CREATE TABLE IF NOT EXISTS home_points (
+                    map_id TEXT PRIMARY KEY REFERENCES maps(map_id) ON DELETE CASCADE,
+                    map_revision INTEGER NOT NULL,
+                    x REAL NOT NULL,
+                    y REAL NOT NULL,
+                    yaw REAL NOT NULL,
+                    updated_at INTEGER NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS active_map_state (
+                    singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+                    map_id TEXT NOT NULL REFERENCES maps(map_id) ON DELETE CASCADE,
+                    updated_at INTEGER NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS inspection_summary (
+                    run_id TEXT PRIMARY KEY,
+                    inspection_date TEXT NOT NULL,
+                    map_id TEXT NOT NULL,
+                    route_id TEXT NOT NULL,
+                    face_capture_count INTEGER NOT NULL DEFAULT 0,
+                    person_count INTEGER NOT NULL DEFAULT 0,
+                    plates_json TEXT NOT NULL DEFAULT '[]',
+                    updated_at INTEGER NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_inspection_date
+                    ON inspection_summary(inspection_date DESC, updated_at DESC);
                 """
             )
+            row = self._conn.execute(
+                "SELECT version FROM schema_version ORDER BY rowid DESC LIMIT 1").fetchone()
+            version = int(row["version"]) if row else 0
+            if version > SCHEMA_VERSION:
+                raise RuntimeError(
+                    f"robot_patrol database schema {version} is newer than supported {SCHEMA_VERSION}")
+            if version < SCHEMA_VERSION:
+                self._conn.execute("DELETE FROM schema_version")
+                self._conn.execute("INSERT INTO schema_version(version) VALUES(?)",
+                                   (SCHEMA_VERSION,))
+                self._conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
 
     @staticmethod
     def _map_from_row(row: sqlite3.Row) -> MapBinding:
@@ -201,6 +244,40 @@ class PatrolStore:
             started_at_ns=row["started_at"], finished_at_ns=row["finished_at"],
         )
 
+    @staticmethod
+    def _home_from_row(row: sqlite3.Row) -> HomePoint:
+        return HomePoint(
+            map_id=row["map_id"], map_revision=row["map_revision"],
+            x=row["x"], y=row["y"], yaw=row["yaw"],
+            updated_at_ns=row["updated_at"],
+        )
+
+    @staticmethod
+    def _summary_from_row(row: sqlite3.Row) -> InspectionSummary:
+        try:
+            plates = json.loads(row["plates_json"] or "[]")
+        except (TypeError, ValueError):
+            plates = []
+        if not isinstance(plates, list):
+            plates = []
+        normalized = []
+        for item in plates:
+            if isinstance(item, str):
+                normalized.append({"plate": item, "count": 1})
+            elif isinstance(item, dict) and item.get("plate"):
+                try:
+                    count = max(1, int(item.get("count", 1)))
+                except (TypeError, ValueError):
+                    count = 1
+                normalized.append({"plate": str(item["plate"]), "count": count})
+        return InspectionSummary(
+            run_id=row["run_id"], inspection_date=row["inspection_date"],
+            map_id=row["map_id"], route_id=row["route_id"],
+            face_capture_count=int(row["face_capture_count"]),
+            person_count=int(row["person_count"]), plates=normalized,
+            updated_at_ns=row["updated_at"],
+        )
+
     # ------------------------------------------------------------------ maps
     def upsert_map(self, data: dict[str, Any], map_id: str = "") -> MapBinding:
         now = now_ns()
@@ -229,6 +306,11 @@ class PatrolStore:
                     conn.execute("DELETE FROM routes WHERE map_id = ?", (chosen_id,))
                     conn.execute("DELETE FROM points WHERE map_id = ?", (chosen_id,))
                 revision = int(existing["revision"]) + 1
+                # A home point is coordinates in one map generation. Any
+                # revision change invalidates it; stale rows are removed so a
+                # later route/return check cannot accidentally use old pose.
+                conn.execute("DELETE FROM home_points WHERE map_id = ?", (chosen_id,))
+                conn.execute("DELETE FROM active_map_state WHERE map_id = ?", (chosen_id,))
                 conn.execute(
                     """UPDATE maps SET name=?, backend=?, frame_id=?, navigation_yaml=?,
                        image_path=?, localization_file=?, resolution=?, origin_x=?, origin_y=?,
@@ -515,3 +597,133 @@ class PatrolStore:
                 (*values, limit),
             ).fetchall()
         return [self._run_from_row(row) for row in rows]
+
+    # ------------------------------------------------------------ home points
+    def get_home_point(self, map_id: str) -> HomePoint | None:
+        """Return the home point for *map_id* only when its revision matches."""
+        map_entry = self.get_map(map_id)
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM home_points WHERE map_id = ?", (map_id,)).fetchone()
+        if row is None:
+            return None
+        if int(row["map_revision"]) != int(map_entry.revision):
+            return None
+        return self._home_from_row(row)
+
+    def set_home_point(self, map_id: str, expected_map_revision: int,
+                       x: float, y: float, yaw: float) -> HomePoint:
+        import math
+        map_entry = self.get_map(map_id)
+        if expected_map_revision and int(expected_map_revision) != int(map_entry.revision):
+            raise PatrolError("STALE_DATA", "地图版本已变化，请刷新后重新保存返航点")
+        if not all(math.isfinite(float(value)) for value in (x, y, yaw)):
+            raise PatrolError("INVALID_DATA", "返航点坐标必须是有限数值")
+        now = now_ns()
+        with self._transaction() as conn:
+            conn.execute(
+                """INSERT INTO home_points(map_id,map_revision,x,y,yaw,updated_at)
+                   VALUES(?,?,?,?,?,?)
+                   ON CONFLICT(map_id) DO UPDATE SET
+                     map_revision=excluded.map_revision, x=excluded.x, y=excluded.y,
+                     yaw=excluded.yaw, updated_at=excluded.updated_at""",
+                (map_id, int(map_entry.revision), float(x), float(y), float(yaw), now),
+            )
+        return HomePoint(map_id=map_id, map_revision=int(map_entry.revision),
+                         x=float(x), y=float(y), yaw=float(yaw), updated_at_ns=now)
+
+    def clear_home_point(self, map_id: str) -> None:
+        self.get_map(map_id)
+        with self._transaction() as conn:
+            conn.execute("DELETE FROM home_points WHERE map_id = ?", (map_id,))
+
+    # ---------------------------------------------------------- active map
+    def set_active_map(self, map_id: str) -> None:
+        """Persist the locally verified active map selection.
+
+        Runtime /map verification remains the responsibility of patrol_node;
+        this row only lets a restarted local process and read-only web backend
+        agree on which map the operator selected.
+        """
+        self.get_map(map_id)
+        now = now_ns()
+        with self._transaction() as conn:
+            conn.execute(
+                """INSERT INTO active_map_state(singleton,map_id,updated_at)
+                   VALUES(1,?,?)
+                   ON CONFLICT(singleton) DO UPDATE SET
+                     map_id=excluded.map_id, updated_at=excluded.updated_at""",
+                (map_id, now),
+            )
+
+    def get_active_map_id(self) -> str:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT map_id FROM active_map_state WHERE singleton = 1").fetchone()
+        if row is None:
+            return ""
+        try:
+            self.get_map(row["map_id"])
+        except PatrolError:
+            self.clear_active_map()
+            return ""
+        return str(row["map_id"])
+
+    def clear_active_map(self) -> None:
+        with self._transaction() as conn:
+            conn.execute("DELETE FROM active_map_state WHERE singleton = 1")
+
+    # ------------------------------------------------------- inspection summary
+    def upsert_inspection_summary(
+        self, run_id: str, inspection_date: str, map_id: str, route_id: str,
+        face_capture_count: int, person_count: int,
+        plates: Iterable[Any], updated_at: int | None = None,
+    ) -> InspectionSummary:
+        if not run_id or not inspection_date or not map_id or not route_id:
+            raise PatrolError("INVALID_DATA", "巡检摘要缺少运行、日期、地图或路线标识")
+        seen: dict[str, int] = {}
+        for item in plates:
+            if isinstance(item, str):
+                plate, count = item.strip(), 1
+            elif isinstance(item, dict):
+                plate = str(item.get("plate", "")).strip()
+                try:
+                    count = max(1, int(item.get("count", 1)))
+                except (TypeError, ValueError):
+                    count = 1
+            else:
+                continue
+            if not plate:
+                continue
+            seen[plate] = seen.get(plate, 0) + count
+        normalized = [{"plate": plate, "count": count}
+                      for plate, count in seen.items()]
+        stamp = now_ns() if updated_at is None else int(updated_at)
+        with self._transaction() as conn:
+            conn.execute(
+                """INSERT INTO inspection_summary(
+                     run_id,inspection_date,map_id,route_id,face_capture_count,
+                     person_count,plates_json,updated_at)
+                   VALUES(?,?,?,?,?,?,?,?)
+                   ON CONFLICT(run_id) DO UPDATE SET
+                     inspection_date=excluded.inspection_date, map_id=excluded.map_id,
+                     route_id=excluded.route_id,
+                     face_capture_count=excluded.face_capture_count,
+                     person_count=excluded.person_count,
+                     plates_json=excluded.plates_json, updated_at=excluded.updated_at""",
+                (run_id, inspection_date, map_id, route_id,
+                 max(0, int(face_capture_count)), max(0, int(person_count)),
+                 json.dumps(normalized, ensure_ascii=False, separators=(",", ":")), stamp),
+            )
+            row = conn.execute(
+                "SELECT * FROM inspection_summary WHERE run_id = ?", (run_id,)).fetchone()
+            return self._summary_from_row(row)
+
+    def list_inspection_summaries(self, limit: int = 100) -> list[InspectionSummary]:
+        limit = max(1, min(int(limit or 100), 500))
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT * FROM inspection_summary "
+                "ORDER BY inspection_date DESC, updated_at DESC LIMIT ?", (limit,)
+            ).fetchall()
+        return [self._summary_from_row(row) for row in rows]

@@ -2,13 +2,25 @@
 <?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
 <package format="3">
   <name>robot_gateway</name>
-  <version>0.1.0</version>
-  <description>遥控网关：浏览器 WebSocket 指令转 /cmd_vel，带心跳失控保护与速度限幅</description>
+  <version>0.2.0</version>
+  <description>WebSocket gateway for web monitoring, control ownership and local tasks</description>
   <maintainer email="dev@example.com">ubuntu</maintainer>
   <license>MIT</license>
 
   <depend>rclpy</depend>
   <depend>geometry_msgs</depend>
+  <depend>nav_msgs</depend>
+  <depend>sensor_msgs</depend>
+  <depend>std_msgs</depend>
+  <depend>std_srvs</depend>
+  <depend>nav2_msgs</depend>
+  <depend>rcl_interfaces</depend>
+  <depend>action_msgs</depend>
+  <depend>tf2_ros</depend>
+  <depend>patrol_interfaces</depend>
+  <depend>hk_camera</depend>
+  <exec_depend>python3-websockets</exec_depend>
+  <exec_depend>python3-yaml</exec_depend>
 
   <export>
     <build_type>ament_python</build_type>

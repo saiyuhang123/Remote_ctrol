@@ -5,7 +5,6 @@ from pathlib import Path
 from types import SimpleNamespace
 import hashlib
 import json
-import math
 import os
 import threading
 import time
@@ -25,7 +24,7 @@ from nav_msgs.msg import OccupancyGrid, Odometry
 from std_msgs.msg import Bool, String
 from tf2_ros import Buffer, TransformListener
 
-from patrol_interfaces.action import RunRoute
+from patrol_interfaces.action import ReturnHome, RunRoute
 from patrol_interfaces.msg import (
     ExecutorHeartbeat, MapBinding, PatrolPoint, PatrolRoute, PatrolStatus, RouteStep, RunRecord,
 )
@@ -33,6 +32,7 @@ from patrol_interfaces.srv import (
     ControlRun,
     DeletePoint,
     DeleteRoute,
+    GetHomePoint,
     GetRuns,
     ListMaps,
     ListPoints,
@@ -40,14 +40,17 @@ from patrol_interfaces.srv import (
     RegisterMap,
     SaveCurrentPoint,
     SetActiveMap,
+    SetHomePoint,
     UpsertPoint,
     UpsertRoute,
 )
 
 from .engine import (
-    PatrolEngine, STATE_CANCELED, STATE_FAILED, STATE_IDLE, STATE_INTERRUPTED,
+    ControlFlags, PatrolEngine, STATE_CANCELED, STATE_CANCELING, STATE_FAILED,
+    STATE_IDLE, STATE_INTERRUPTED, STATE_NAVIGATING, STATE_SETTLING,
     STATE_SUCCEEDED, STATE_VALIDATING,
 )
+from .map_export import default_web_map_dir, export_web_map
 from .map_metadata import expected_occupancy_sha256, read_map_binding
 from .models import PatrolError, Point, RouteSnapshot, new_id, now_ns
 from .nav2_client import Nav2Driver, quaternion_to_yaw
@@ -91,11 +94,16 @@ class PatrolNode(Node):
         self.declare_parameter("status_period_sec", 1.0)
         self.declare_parameter("executor_heartbeat_period_sec", 0.2)
         self.declare_parameter("teleop_topic", "/cmd_vel_teleop")
+        self.declare_parameter("return_cancel_timeout_sec", 15.0)
+        self.declare_parameter("web_map_dir", str(default_web_map_dir()))
 
         self._callback_group = ReentrantCallbackGroup()
         self._instance_id = "patrol_" + uuid.uuid4().hex
-        self._store = PatrolStore(self.get_parameter("database_path").value)
-        self._active_map_id = ""
+        database_path = str(self.get_parameter("database_path").value)
+        if os.environ.get("ROBOT_PATROL_DB"):
+            database_path = os.environ["ROBOT_PATROL_DB"]
+        self._store = PatrolStore(database_path)
+        self._active_map_id = self._store.get_active_map_id()
         self._active_map_lock = threading.RLock()
         self._run_lock = threading.RLock()
         self._active_engine: PatrolEngine | None = None
@@ -103,6 +111,17 @@ class PatrolNode(Node):
         self._active_goal_handle = None
         self._active_request_id = ""
         self._active_owner_session_id = ""
+        self._return_active = False
+        self._return_goal_handle = None
+        self._return_driver: Nav2Driver | None = None
+        self._return_flags: ControlFlags | None = None
+        self._return_cancel_requested = False
+        self._return_safety_reason = ""
+        self._return_owner_session_id = ""
+        self._return_request_id = ""
+        self._return_map_id = ""
+        self._return_state = STATE_IDLE
+        self._return_status: dict = {}
         self._run_reserved = False
         self._pending_cancel = False
         self._safety_interrupt_reason = ""
@@ -161,6 +180,12 @@ class PatrolNode(Node):
             cancel_callback=self._cancel_callback,
             callback_group=self._callback_group,
         )
+        self._return_server = ActionServer(
+            self, ReturnHome, "/patrol/return_home", self._execute_return_home,
+            goal_callback=self._return_goal_callback,
+            cancel_callback=self._return_cancel_callback,
+            callback_group=self._callback_group,
+        )
 
         def service(type_, name, callback):
             return self.create_service(type_, name, callback, callback_group=self._callback_group)
@@ -177,6 +202,8 @@ class PatrolNode(Node):
         service(DeleteRoute, "/patrol/delete_route", self._on_delete_route)
         service(ControlRun, "/patrol/control", self._on_control)
         service(GetRuns, "/patrol/get_runs", self._on_get_runs)
+        service(GetHomePoint, "/patrol/get_home_point", self._on_get_home_point)
+        service(SetHomePoint, "/patrol/set_home_point", self._on_set_home_point)
 
         period = float(self.get_parameter("status_period_sec").value)
         self._status_timer = self.create_timer(max(0.2, period), self._publish_last_status,
@@ -331,23 +358,36 @@ class PatrolNode(Node):
         with self._run_lock:
             engine = self._active_engine
             driver = self._active_driver
-            if engine is None:
-                if self._run_reserved:
-                    self._pending_cancel = True
-                    self._safety_interrupt_reason = reason
+            return_active = self._return_active
+            return_driver = self._return_driver
+            return_flags = self._return_flags
+            # Idle manual teleoperation, guard startup and e-stop publication
+            # are not task interruptions. Only log/act once a route validation,
+            # route engine or return-home task actually owns motion.
+            if engine is None and not return_active and not self._run_reserved:
                 return
-            if self._safety_interrupt_delivered:
-                return
-            self._safety_interrupt_delivered = True
-            self._safety_interrupt_reason = reason
+            if engine is not None and not self._safety_interrupt_delivered:
+                self._safety_interrupt_delivered = True
+                self._safety_interrupt_reason = reason
+            if engine is None and self._run_reserved:
+                self._pending_cancel = True
+                self._safety_interrupt_reason = reason
+            if return_active:
+                self._return_safety_reason = reason
         self.get_logger().warn(reason)
-        engine.request_interrupt(reason)
+        if engine is not None:
+            engine.request_interrupt(reason)
         if driver is not None:
             driver.cancel_current()
+        if return_active:
+            if return_flags is not None:
+                return_flags.request_cancel(reason)
+            if return_driver is not None:
+                return_driver.cancel_current()
 
     def _monitor_active_safety(self) -> None:
         with self._run_lock:
-            if self._active_engine is None:
+            if self._active_engine is None and not self._return_active:
                 return
         now = time.monotonic()
         feedback_timeout = float(self.get_parameter("feedback_max_age_sec").value)
@@ -381,7 +421,7 @@ class PatrolNode(Node):
             driver = self._hazard_driver
             if driver is not None and driver.stop_safe():
                 self._hazard_driver = None
-                if self._active_engine is None:
+                if self._active_engine is None and not self._return_active:
                     self._run_reserved = False
 
     def _publish_last_status(self) -> None:
@@ -394,20 +434,34 @@ class PatrolNode(Node):
     def _publish_executor_heartbeat(self) -> None:
         with self._run_lock:
             engine = self._active_engine
-            active = engine is not None or self._run_reserved
+            return_active = self._return_active
+            active = engine is not None or return_active or self._run_reserved
             owner_session_id = self._active_owner_session_id
-            run_id = engine.run_id if engine is not None else ""
+            driver = self._active_driver
             if engine is not None:
+                run_id = engine.run_id
                 status = engine.status
                 state = int(status.get("state", STATE_VALIDATING))
                 dispatch_allowed = (not engine.flags.cancel_requested and
                                     not engine.flags.pause_requested)
+            elif return_active:
+                # While an old route is still canceling, report the route's
+                # executor identity above. Once the child is terminated this
+                # branch owns the same single executor slot for return-home.
+                owner_session_id = self._return_owner_session_id
+                run_id = ("return_" + self._return_request_id
+                          if self._return_request_id else "return")
+                state = int(self._return_state or STATE_VALIDATING)
+                dispatch_allowed = False
+                driver = self._return_driver
             elif active:
                 state = int(STATE_VALIDATING)
                 dispatch_allowed = False
+                run_id = ""
             else:
                 state = int(STATE_IDLE)
                 dispatch_allowed = True
+                run_id = ""
             hazard = self._hazard_driver
             stop_unconfirmed = hazard is not None and not hazard.stop_safe()
         heartbeat = ExecutorHeartbeat()
@@ -418,7 +472,8 @@ class PatrolNode(Node):
         heartbeat.active = bool(active)
         heartbeat.dispatch_allowed = bool(dispatch_allowed)
         heartbeat.stop_unconfirmed = bool(stop_unconfirmed)
-        driver = self._active_driver if self._active_driver is not None else self._hazard_driver
+        if driver is None:
+            driver = self._hazard_driver
         heartbeat.nav_goal_id = driver.current_nav_goal_id if driver is not None else ""
         heartbeat.stamp = self.get_clock().now().to_msg()
         self._executor_heartbeat_pub.publish(heartbeat)
@@ -432,6 +487,43 @@ class PatrolNode(Node):
             try:
                 goal_handle.publish_feedback(feedback)
             except Exception:  # noqa: BLE001 - action may already be terminal
+                pass
+
+    def _publish_return_status(self, *, state: int, message: str = "",
+                               error_code: str = "", point_name: str = "待命点",
+                               active: bool = True) -> None:
+        """Publish one return-home state and feed the active action."""
+        with self._run_lock:
+            driver = self._return_driver
+            data = dict(self._return_status)
+            data.update({
+                "state": int(state),
+                "sequence": int(data.get("sequence", 0)) + 1,
+                "run_id": ("return_" + self._return_request_id
+                           if self._return_request_id else "return"),
+                "route_id": "",
+                "map_id": self._return_map_id,
+                "loop_index": 1 if active else 0,
+                "total_loops": 1,
+                "step_index": 1 if active else 0,
+                "step_count": 1,
+                "current_point_name": point_name if active else "",
+                "dwell_remaining": 0.0,
+                "error_code": str(error_code or ""),
+                "message": str(message or ""),
+                "current_goal_id": driver.current_nav_goal_id if driver is not None else "",
+                "active": bool(active),
+            })
+            self._return_state = int(state)
+            self._return_status = data
+            goal_handle = self._return_goal_handle
+        self._publish_status_dict(data)
+        if goal_handle is not None:
+            feedback = ReturnHome.Feedback()
+            feedback.status = self._to_ros_status(data)
+            try:
+                goal_handle.publish_feedback(feedback)
+            except Exception:  # noqa: BLE001 - action may be terminal
                 pass
 
     # --------------------------------------------------------------- map/point
@@ -466,6 +558,12 @@ class PatrolNode(Node):
                 abs(previous.origin_yaw - float(data["origin_yaw"])) > 1e-12,
             ))
             entry = self._store.upsert_map(data, request.map_id)
+            # Every registration advances the map revision. Coordinates and
+            # web assets from the previous generation are no longer valid, so
+            # require an explicit re-activation after registration.
+            with self._active_map_lock:
+                if self._active_map_id == entry.map_id:
+                    self._active_map_id = ""
             response.map = self._to_ros_map(entry)
             response.success = True
             response.message = ("地图几何已变化；旧点位和路线已失效并清除，请重新采点" if geometry_changed
@@ -503,8 +601,10 @@ class PatrolNode(Node):
                 raise PatrolError("STALE_DATA", "地图版本已变化，请刷新后重新确认")
             self._verify_map(entry)
             self._verify_runtime_map(entry)
+            self._store.set_active_map(entry.map_id)
             with self._active_map_lock:
                 self._active_map_id = entry.map_id
+            self._export_active_web_map(entry)
             response.active_map = self._to_ros_map(entry)
             response.success = True
             response.message = "活跃地图已设置，且已与 Nav2 当前 /map 核对"
@@ -715,6 +815,92 @@ class PatrolNode(Node):
             response.message = error.message
         return response
 
+    def _export_active_web_map(self, entry) -> None:
+        """Best-effort atomic web export after activation.
+
+        Failure does not change the local active map, but stale meta/hash makes
+        the web task page refuse execution until the export succeeds.
+        """
+        try:
+            configured_dir = str(self.get_parameter("web_map_dir").value or "").strip()
+            export_web_map(
+                entry.navigation_yaml,
+                configured_dir or os.environ.get("ROBOT_WEB_MAP_DIR") or
+                str(default_web_map_dir()),
+                map_id=entry.map_id,
+                revision=int(entry.revision),
+                backend=str(entry.backend),
+            )
+            self.get_logger().info(
+                f"网页地图已自动导出：map_id={entry.map_id} revision={entry.revision}")
+        except Exception as error:  # noqa: BLE001 - local navigation remains usable
+            self.get_logger().error(f"网页地图自动导出失败，网页将禁止执行任务：{error}")
+
+    def _home_point_response(self, response, map_entry, home) -> None:
+        response.success = True
+        response.map_revision = int(map_entry.revision)
+        response.exists = home is not None
+        if home is not None:
+            response.x = float(home.x)
+            response.y = float(home.y)
+            response.yaw = float(home.yaw)
+            response.message = "ok"
+        else:
+            response.x = 0.0
+            response.y = 0.0
+            response.yaw = 0.0
+            response.message = "当前地图尚未设置返航点"
+
+    def _on_get_home_point(self, request, response):
+        try:
+            map_id = request.map_id
+            if not map_id:
+                map_id = self._active_map().map_id
+            entry = self._store.get_map(map_id)
+            home = self._store.get_home_point(map_id)
+            self._home_point_response(response, entry, home)
+        except PatrolError as error:
+            response.success = False
+            response.exists = False
+            response.message = error.message
+        return response
+
+    def _on_set_home_point(self, request, response):
+        try:
+            map_entry = self._active_map()
+            if request.map_id and request.map_id != map_entry.map_id:
+                raise PatrolError("MAP_MISMATCH", "只能为当前活跃地图设置返航点")
+            if request.expected_map_revision and                     int(request.expected_map_revision) != int(map_entry.revision):
+                raise PatrolError("STALE_DATA", "地图版本已变化，请刷新后重试")
+            if request.clear:
+                self._store.clear_home_point(map_entry.map_id)
+                self._home_point_response(response, map_entry, None)
+                response.message = "返航点已清除"
+                return response
+            with self._run_lock:
+                if self._active_engine is not None or self._return_active or self._run_reserved:
+                    raise PatrolError("BUSY", "任务活动期间不能修改返航点")
+            self._verify_map(map_entry)
+            odom, received = self.latest_odom()
+            if odom is None or (time.monotonic() - received) > float(
+                    self.get_parameter("feedback_max_age_sec").value):
+                raise PatrolError("NAV_NOT_READY", "没有新鲜的 /odom 反馈")
+            if abs(float(odom.twist.twist.linear.x)) > float(
+                    self.get_parameter("settle_linear_threshold").value) or \
+                    abs(float(odom.twist.twist.angular.z)) > float(
+                    self.get_parameter("settle_angular_threshold").value):
+                raise PatrolError("INVALID_DATA", "车辆仍在运动，确认停稳后才能保存返航点")
+            x, y, yaw, _ = self._current_pose()
+            home = self._store.set_home_point(
+                map_entry.map_id, int(map_entry.revision), x, y, yaw)
+            self._home_point_response(response, map_entry, home)
+            response.message = "当前位姿已保存为待命返航点"
+        except PatrolError as error:
+            response.success = False
+            response.exists = False
+            response.message = error.message
+        return response
+
     def _on_get_runs(self, request, response):
         try:
             runs = self._store.list_runs(request.map_id, request.route_id, request.limit)
@@ -763,6 +949,8 @@ class PatrolNode(Node):
                 self._hazard_driver = None
                 if self._active_engine is None:
                     self._run_reserved = False
+            if self._return_active or self._return_goal_handle is not None:
+                return GoalResponse.REJECT
             if self._run_reserved or self._active_engine is not None:
                 return GoalResponse.REJECT
             # This is the start of a new action request. Any cancellation
@@ -999,6 +1187,265 @@ class PatrolNode(Node):
         if engine is not None:
             self._publish_status_dict(engine.status)
         return result
+
+    # ----------------------------------------------------------- return home
+    def _return_goal_callback(self, goal_request):
+        with self._run_lock:
+            if self._return_active or self._return_goal_handle is not None:
+                return GoalResponse.REJECT
+            self._return_cancel_requested = False
+            self._return_safety_reason = ""
+        return GoalResponse.ACCEPT
+
+    def _return_cancel_callback(self, goal_handle):
+        with self._run_lock:
+            self._return_cancel_requested = True
+            flags = self._return_flags
+            driver = self._return_driver
+        if flags is not None:
+            flags.request_cancel("操作员取消返航")
+        if driver is not None:
+            driver.cancel_current()
+        return CancelResponse.ACCEPT
+
+    def _return_cancel_pending(self, goal_handle) -> bool:
+        try:
+            action_canceled = bool(goal_handle.is_cancel_requested)
+        except Exception:  # noqa: BLE001 - action boundary
+            action_canceled = False
+        with self._run_lock:
+            return self._return_cancel_requested or action_canceled
+
+    def _wait_for_return_slot(self, goal_handle, timeout: float) -> str:
+        """Cancel any route and wait until its Nav2 child is terminal."""
+        deadline = time.monotonic() + max(0.5, float(timeout))
+        while time.monotonic() < deadline:
+            if self._return_cancel_pending(goal_handle):
+                return "CANCELED"
+            with self._run_lock:
+                if self._return_safety_reason:
+                    return "INTERRUPTED"
+                engine = self._active_engine
+                hazard = self._hazard_driver
+                reserved = self._run_reserved
+            if engine is None and hazard is None and not reserved:
+                with self._run_lock:
+                    # Route callbacks use the same flag. Recheck after taking
+                    # the lock so a just-accepted route cannot slip in.
+                    if self._active_engine is None and self._hazard_driver is None:
+                        self._run_reserved = True
+                        return "OK"
+            time.sleep(0.05)
+        return "TIMEOUT"
+
+    def _finish_return_action(self, goal_handle, result, state: int, success: bool,
+                              error_code: str, message: str) -> ReturnHome.Result:
+        result.success = bool(success)
+        result.final_state = int(state)
+        result.error_code = str(error_code or "")
+        result.message = str(message or "")
+        self._publish_return_status(
+            state=state, message=message, error_code=error_code, active=False)
+        if success:
+            goal_handle.succeed()
+        elif state in (STATE_CANCELED,):
+            try:
+                goal_handle.canceled()
+            except Exception:  # noqa: BLE001 - already canceling
+                goal_handle.abort()
+        else:
+            goal_handle.abort()
+        return result
+
+    def _execute_return_home(self, goal_handle):
+        result = ReturnHome.Result()
+        result.success = False
+        request = goal_handle.request
+        driver = None
+        flags = None
+        with self._run_lock:
+            self._return_active = True
+            self._return_goal_handle = goal_handle
+            self._return_owner_session_id = str(request.owner_session_id or "").strip()
+            self._return_request_id = str(request.request_id or "").strip()
+            self._return_map_id = str(request.map_id or "").strip()
+            self._return_driver = None
+            self._return_flags = None
+            self._return_state = STATE_VALIDATING
+            self._return_status = {
+                "state": STATE_VALIDATING, "sequence": 0,
+                "run_id": ("return_" + self._return_request_id
+                           if self._return_request_id else "return"),
+                "route_id": "", "map_id": self._return_map_id,
+                "loop_index": 0, "total_loops": 1, "step_index": 0,
+                "step_count": 1, "current_point_name": "",
+                "dwell_remaining": 0.0, "error_code": "", "message": "",
+                "current_goal_id": "", "active": True,
+            }
+        try:
+            if self._return_cancel_pending(goal_handle):
+                return self._finish_return_action(
+                    goal_handle, result, STATE_CANCELED, False, "CANCELED",
+                    "返航在启动前被取消")
+            if not self._return_request_id:
+                raise PatrolError("INVALID_DATA", "request_id 不能为空")
+            if not self._return_owner_session_id:
+                raise PatrolError("INVALID_DATA", "owner_session_id 不能为空")
+            map_entry = self._active_map()
+            if self._return_map_id and self._return_map_id != map_entry.map_id:
+                raise PatrolError("MAP_MISMATCH", "返航请求地图不是当前活跃地图")
+            self._return_map_id = map_entry.map_id
+            if request.map_revision and int(request.map_revision) != int(map_entry.revision):
+                raise PatrolError("STALE_DATA", "地图版本已变化，请刷新后重试")
+            home = self._store.get_home_point(map_entry.map_id)
+            if home is None:
+                raise PatrolError("HOME_NOT_FOUND", "当前地图没有有效的待命返航点")
+            self._require_execution_safety()
+            self._publish_return_status(
+                state=STATE_VALIDATING, message="返航校验通过，正在清理当前任务")
+
+            # Return-home preempts a route owned by either local or web. The
+            # route's own action result is canceled first; return-home never
+            # dispatches while an old child goal is still alive.
+            with self._run_lock:
+                engine = self._active_engine
+                active_driver = self._active_driver
+                active_goal = self._active_goal_handle
+                route_reserved = self._run_reserved
+                if route_reserved or engine is not None:
+                    # Route execution has a validation window before its
+                    # engine object exists. The route action consults this
+                    # flag at each validation boundary, so preemption cannot
+                    # race into a first NavigateToPose dispatch.
+                    self._pending_cancel = True
+            if engine is not None:
+                self._publish_return_status(
+                    state=STATE_CANCELING, message="正在取消当前路线任务")
+                engine.request_cancel()
+                if active_driver is not None:
+                    active_driver.cancel_current()
+            if active_goal is not None:
+                try:
+                    active_goal.cancel_goal_async()
+                except Exception:  # noqa: BLE001 - already terminal
+                    pass
+            slot = self._wait_for_return_slot(
+                goal_handle,
+                float(self.get_parameter("return_cancel_timeout_sec").value))
+            if slot == "CANCELED":
+                return self._finish_return_action(
+                    goal_handle, result, STATE_CANCELED, False, "CANCELED",
+                    "返航已取消")
+            if slot == "INTERRUPTED":
+                reason = self._return_safety_reason or "安全联锁触发，返航已中断"
+                return self._finish_return_action(
+                    goal_handle, result, STATE_INTERRUPTED, False,
+                    "INTERRUPTED", reason)
+            if slot != "OK":
+                return self._finish_return_action(
+                    goal_handle, result, STATE_FAILED, False, "CANCEL_UNCONFIRMED",
+                    "上一路线目标尚未确认终止，禁止开始返航")
+
+            # Validate again after the old task settled: map files, runtime
+            # map and safety feedback may have changed while canceling.
+            map_entry = self._active_map()
+            if map_entry.map_id != self._return_map_id:
+                raise PatrolError("MAP_MISMATCH", "返航期间活跃地图已变化")
+            if request.map_revision and int(request.map_revision) != int(map_entry.revision):
+                raise PatrolError("STALE_DATA", "返航期间地图版本已变化")
+            home = self._store.get_home_point(map_entry.map_id)
+            if home is None:
+                raise PatrolError("HOME_NOT_FOUND", "当前地图没有有效的待命返航点")
+            self._require_execution_safety()
+            self._verify_map(map_entry)
+            self._verify_runtime_map(map_entry)
+
+            flags = ControlFlags()
+            driver = Nav2Driver(
+                self,
+                map_frame=self.get_parameter("map_frame").value,
+                base_frame=self.get_parameter("base_frame").value,
+                point_timeout=float(self.get_parameter("point_timeout_sec").value),
+                settle_timeout=float(self.get_parameter("settle_timeout_sec").value),
+                settle_linear=float(self.get_parameter("settle_linear_threshold").value),
+                settle_angular=float(self.get_parameter("settle_angular_threshold").value),
+                settle_duration=float(self.get_parameter("settle_duration_sec").value),
+                feedback_max_age=float(self.get_parameter("feedback_max_age_sec").value),
+                tf_max_age=float(self.get_parameter("tf_max_age_sec").value),
+                resume_position_tolerance=float(
+                    self.get_parameter("dwell_resume_position_tolerance_m").value),
+                resume_yaw_tolerance=float(
+                    self.get_parameter("dwell_resume_yaw_tolerance_rad").value),
+                cancel_confirm_timeout=float(
+                    self.get_parameter("cancel_confirm_timeout_sec").value),
+                callback_group=self._callback_group,
+                goal_update_callback=self._publish_executor_heartbeat,
+            )
+            with self._run_lock:
+                self._return_driver = driver
+                self._return_flags = flags
+            self._publish_return_status(
+                state=STATE_NAVIGATING, message="正在返回待命点")
+            if bool(self.get_parameter("require_guard").value):
+                self._publish_executor_heartbeat()
+                time.sleep(max(0.15, float(
+                    self.get_parameter("executor_heartbeat_period_sec").value) * 2.0))
+            if self._return_cancel_pending(goal_handle):
+                flags.request_cancel("操作员取消返航")
+
+            def status_callback(**changes):
+                state = int(changes.pop("state", STATE_NAVIGATING))
+                message = str(changes.pop("message", "") or "正在返回待命点")
+                self._publish_return_status(state=state, message=message)
+
+            nav_result = driver.navigate(home, flags, status_callback)
+            if nav_result == "SUCCEEDED":
+                self._publish_return_status(
+                    state=STATE_SETTLING, message="已到待命点，正在确认停稳")
+                settle = driver.settle(home, flags, status_callback)
+                if settle[0] == "OK":
+                    return self._finish_return_action(
+                        goal_handle, result, STATE_SUCCEEDED, True, "",
+                        "已返回待命点并确认停稳")
+                if settle[0] == "CANCELED":
+                    nav_result = "CANCELED"
+                else:
+                    nav_result = settle[0] or "SETTLE_FAILED"
+            if self._return_cancel_pending(goal_handle) or nav_result == "CANCELED":
+                return self._finish_return_action(
+                    goal_handle, result, STATE_CANCELED, False, "CANCELED",
+                    "返航已取消")
+            if self._return_safety_reason:
+                return self._finish_return_action(
+                    goal_handle, result, STATE_INTERRUPTED, False, "INTERRUPTED",
+                    self._return_safety_reason)
+            return self._finish_return_action(
+                goal_handle, result, STATE_FAILED, False,
+                nav_result or "NAV_FAILED", f"返回待命点失败：{nav_result}")
+        except PatrolError as error:
+            return self._finish_return_action(
+                goal_handle, result, STATE_FAILED, False, error.code, error.message)
+        except Exception as error:  # noqa: BLE001 - node boundary
+            return self._finish_return_action(
+                goal_handle, result, STATE_FAILED, False, "INTERRUPTED", str(error))
+        finally:
+            with self._run_lock:
+                stop_safe = driver is None or driver.stop_safe()
+                self._return_driver = None
+                self._return_flags = None
+                self._return_goal_handle = None
+                self._return_active = False
+                self._return_cancel_requested = False
+                self._return_safety_reason = ""
+                self._return_owner_session_id = ""
+                self._return_request_id = ""
+                self._return_state = STATE_IDLE
+                if not stop_safe:
+                    self._hazard_driver = driver
+                    self._run_reserved = True
+                elif self._hazard_driver is None:
+                    self._run_reserved = False
+            self._publish_executor_heartbeat()
 
     def _on_control(self, request, response):
         with self._run_lock:

@@ -58,6 +58,7 @@ PatrolPage::PatrolPage(PatrolClient *client, const QString &initialMapYaml,
   connect(client_, &PatrolClient::pointsChanged, this, &PatrolPage::onPointsChanged);
   connect(client_, &PatrolClient::routesChanged, this, &PatrolPage::onRoutesChanged);
   connect(client_, &PatrolClient::runsChanged, this, &PatrolPage::onRunsChanged);
+  connect(client_, &PatrolClient::homePointChanged, this, &PatrolPage::onHomePointChanged);
   connect(client_, &PatrolClient::statusChanged, this, &PatrolPage::onStatusChanged);
   connect(client_, &PatrolClient::operationFinished, this, &PatrolPage::showOperation);
   connect(client_, &PatrolClient::errorOccurred, this, &PatrolPage::showError);
@@ -118,6 +119,22 @@ void PatrolPage::buildUi() {
   activeMapLabel_->setObjectName(QStringLiteral("patrolActiveMap"));
   activeRow->addWidget(activeMapLabel_);
   mapLayout->addLayout(activeRow);
+
+  auto *homeRow = new QHBoxLayout;
+  homePointLabel_ = new QLabel(QStringLiteral("待命返航点：未设置"), mapGroup);
+  homePointLabel_->setObjectName(QStringLiteral("patrolHomePoint"));
+  homeRow->addWidget(homePointLabel_, 1);
+  saveHomeButton_ = pageButton(QStringLiteral("保存当前位姿为返航点"), mapGroup,
+                               QStringLiteral("patrolSaveHome"));
+  clearHomeButton_ = pageButton(QStringLiteral("清除返航点"), mapGroup,
+                                QStringLiteral("patrolClearHome"));
+  returnHomeButton_ = pageButton(QStringLiteral("一键返回"), mapGroup,
+                                 QStringLiteral("patrolReturnHome"));
+  returnHomeButton_->setProperty("primary", true);
+  homeRow->addWidget(saveHomeButton_);
+  homeRow->addWidget(clearHomeButton_);
+  homeRow->addWidget(returnHomeButton_);
+  mapLayout->addLayout(homeRow);
 
   messageLabel_ = new QLabel(QStringLiteral("路线巡航只调用本地 ROS2 服务，不依赖 HTTP 后端或网关"), mapGroup);
   messageLabel_->setObjectName(QStringLiteral("patrolMessage"));
@@ -287,6 +304,9 @@ void PatrolPage::buildUi() {
   connect(registerMapButton_, &QPushButton::clicked, this, &PatrolPage::registerCurrentMap);
   connect(setActiveButton_, &QPushButton::clicked, this, &PatrolPage::setActiveMap);
   connect(refreshAllButton_, &QPushButton::clicked, this, &PatrolPage::refreshAll);
+  connect(saveHomeButton_, &QPushButton::clicked, this, &PatrolPage::saveHomePoint);
+  connect(clearHomeButton_, &QPushButton::clicked, this, &PatrolPage::clearHomePoint);
+  connect(returnHomeButton_, &QPushButton::clicked, this, &PatrolPage::returnHome);
   connect(pointsTable_, &QTableWidget::itemSelectionChanged, this, &PatrolPage::updatePointFormFromSelection);
   connect(saveCurrentPointButton_, &QPushButton::clicked, this, &PatrolPage::saveCurrentPoint);
   connect(upsertPointButton_, &QPushButton::clicked, this, &PatrolPage::upsertSelectedPoint);
@@ -329,6 +349,9 @@ void PatrolPage::buildUi() {
     mapYamlEdit_->setEnabled(false);
     registerMapButton_->setEnabled(false);
     setActiveButton_->setEnabled(false);
+    saveHomeButton_->setEnabled(false);
+    clearHomeButton_->setEnabled(false);
+    returnHomeButton_->setEnabled(false);
   }
 }
 
@@ -353,6 +376,7 @@ void PatrolPage::refreshAll() {
     client_->refreshPoints(activeMapId_);
     client_->refreshRoutes(activeMapId_);
     client_->refreshRuns(activeMapId_);
+    client_->refreshHomePoint(activeMapId_);
   }
   setMessage(QStringLiteral("已请求刷新本地巡航数据"), false);
 }
@@ -371,11 +395,13 @@ void PatrolPage::onMapsChanged() {
     client_->refreshPoints(activeMapId_);
     client_->refreshRoutes(activeMapId_);
     client_->refreshRuns(activeMapId_);
+    client_->refreshHomePoint(activeMapId_);
   } else {
     pointsTable_->setRowCount(0);
     routesTable_->setRowCount(0);
     runsTable_->setRowCount(0);
     pointCombo_->clear();
+    homePointLabel_->setText(QStringLiteral("待命返航点：未设置"));
   }
   updateActionStates();
 }
@@ -411,6 +437,54 @@ void PatrolPage::onRoutesChanged() {
 }
 
 void PatrolPage::onRunsChanged() { populateRuns(); }
+
+void PatrolPage::onHomePointChanged() {
+  const auto home = client_->homePoint();
+  if (home.mapId != activeMapId_ || !home.exists) {
+    homePointLabel_->setText(QStringLiteral("待命返航点：未设置或已失效"));
+  } else {
+    homePointLabel_->setText(QStringLiteral("待命返航点：X %1 m · Y %2 m · 朝向 %3° · map rev %4")
+                                 .arg(home.x, 0, 'f', 2).arg(home.y, 0, 'f', 2)
+                                 .arg(home.yaw * 180.0 / kPi, 0, 'f', 1)
+                                 .arg(home.mapRevision));
+  }
+  updateActionStates();
+}
+
+void PatrolPage::refreshHomePoint() {
+  if (!activeMapId_.isEmpty()) client_->refreshHomePoint(activeMapId_);
+}
+
+void PatrolPage::saveHomePoint() {
+  if (activeMapId_.isEmpty()) { setMessage(QStringLiteral("请先设置活跃地图"), true); return; }
+  QString reason;
+  if (startPermission_ && !startPermission_(&reason)) {
+    setMessage(reason.isEmpty() ? QStringLiteral("当前不允许保存返航点") : reason, true);
+    return;
+  }
+  client_->saveCurrentPoseAsHome(activeMapId_, activeMap().revision);
+}
+
+void PatrolPage::clearHomePoint() {
+  if (activeMapId_.isEmpty()) { setMessage(QStringLiteral("请先设置活跃地图"), true); return; }
+  client_->clearHomePoint(activeMapId_, activeMap().revision);
+}
+
+void PatrolPage::returnHome() {
+  if (activeMapId_.isEmpty()) { setMessage(QStringLiteral("请先设置活跃地图"), true); return; }
+  const auto home = client_->homePoint();
+  if (!home.exists || home.mapId != activeMapId_) {
+    setMessage(QStringLiteral("当前地图没有有效待命返航点"), true);
+    return;
+  }
+  const auto &permission = resumePermission_ ? resumePermission_ : startPermission_;
+  QString reason;
+  if (permission && !permission(&reason)) {
+    setMessage(reason.isEmpty() ? QStringLiteral("当前不允许返航") : reason, true);
+    return;
+  }
+  client_->returnHome(activeMapId_, activeMap().revision);
+}
 
 void PatrolPage::populatePoints() {
   const int selectedRow = pointsTable_->currentRow();
@@ -676,6 +750,10 @@ void PatrolPage::resumeRun() {
 
 void PatrolPage::cancelRun() {
   const auto status = client_->status();
+  if (status.runId.startsWith(QStringLiteral("return_"))) {
+    client_->cancelReturnHome();
+    return;
+  }
   if (status.runId.isEmpty()) { setMessage(QStringLiteral("当前没有可取消的巡航任务"), true); return; }
   client_->controlRun(3, status.runId);
 }
@@ -730,7 +808,8 @@ void PatrolPage::updateActionStates() {
   const bool hasMap = !activeMapId_.isEmpty();
   const auto status = client_ ? client_->status() : PatrolStatusInfo();
   const bool activeRun = status.active;
-  const bool paused = status.state == 7;
+  const bool routeRun = activeRun && !status.runId.startsWith(QStringLiteral("return_"));
+  const bool paused = status.state == 7 && routeRun;
   registerMapButton_->setEnabled(available);
   setActiveButton_->setEnabled(available && mapsCombo_->currentIndex() >= 0);
   refreshAllButton_->setEnabled(available);
@@ -759,11 +838,22 @@ void PatrolPage::updateActionStates() {
   const bool resumePermitted = !resumePermission ||
                                resumePermission(&resumePermissionReason);
   const QString resumePermissionTip = resumePermitted ? QString() : resumePermissionReason;
-  pauseButton_->setEnabled(!offline_ && available && activeRun && !paused);
-  resumeButton_->setEnabled(!offline_ && available && activeRun && paused &&
+  pauseButton_->setEnabled(!offline_ && available && routeRun && !paused);
+  resumeButton_->setEnabled(!offline_ && available && routeRun && paused &&
                             resumePermitted);
   resumeButton_->setToolTip(resumePermissionTip);
   cancelButton_->setEnabled(!offline_ && available && activeRun);
+  const auto home = client_->homePoint();
+  const bool validHome = hasMap && home.exists && home.mapId == activeMapId_;
+  const bool returnRunning = activeRun && status.runId.startsWith(QStringLiteral("return_"));
+  const auto &returnPermission = resumePermission_ ? resumePermission_ : startPermission_;
+  QString returnReason;
+  const bool returnPermitted = !returnPermission || returnPermission(&returnReason);
+  saveHomeButton_->setEnabled(!offline_ && available && hasMap && !activeRun && startPermitted);
+  saveHomeButton_->setToolTip(startPermissionTip);
+  clearHomeButton_->setEnabled(!offline_ && available && validHome && !activeRun);
+  returnHomeButton_->setEnabled(!offline_ && available && validHome && !returnRunning && returnPermitted);
+  returnHomeButton_->setToolTip(returnPermitted ? QString() : returnReason);
   pointCombo_->setEnabled(available && hasMap && pointCombo_->count() > 0);
   tabs_->setEnabled(available);
 }

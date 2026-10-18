@@ -7,7 +7,6 @@
 #include <QDialog>
 #include "vision/vision_panel.h"
 #include "ui_mainwindow.h"
-#include "adapters/business_client.h"
 #include "adapters/local_controller.h"
 #include "patrol/patrol_client.h"
 #include "runtime/map_saver.h"
@@ -28,8 +27,6 @@
 #include <QGridLayout>
 #include <QGroupBox>
 #include <QHeaderView>
-#include <QInputDialog>
-#include <QJsonObject>
 #include <QLabel>
 #include <QMenuBar>
 #include <QLineEdit>
@@ -45,7 +42,6 @@
 #include <QSignalBlocker>
 #include <QStatusBar>
 #include <QTabWidget>
-#include <QTableWidget>
 #include <QTimer>
 #include <QToolBar>
 #include <QToolButton>
@@ -137,6 +133,9 @@ void MainWindow::setupUi() {
   connect(cancelButton_, &QPushButton::clicked, this, [this] {
     if (!cancelPatrolRun(QStringLiteral("取消导航"))) controller_->cancelNavigation();
   });
+  returnHomeButton_ = button("一键返回", headerRow, "returnHome");
+  returnHomeButton_->setToolTip("取消当前路线并返回当前地图已保存的待命点");
+  connect(returnHomeButton_, &QPushButton::clicked, this, &MainWindow::returnHome);
   auto *emergency = button("急停", headerRow, "emergencyStop"); emergency->setEnabled(!offline_);
   connect(emergency, &QPushButton::clicked, controller_, &LocalController::emergencyStop);
   headerBar->addWidget(header);
@@ -336,33 +335,25 @@ void MainWindow::setupUi() {
   connect(visionPanel_, &VisionPanel::cameraRequested, cameraPanel_, &CameraPanel::ensureCamera);
   connect(visionPanel_, &VisionPanel::message, this, &MainWindow::log);
   rightTabs_->addTab(scrollPane(capturePage), "抓拍识别");
-  auto *pointsPage = new QWidget; auto *pointsLayout = pageLayout(pointsPage);
-  hint("旧业务后端点位，与本地路线巡航分别管理。", pointsLayout);
-  auto *business = new QGroupBox("可选业务服务"); auto *businessLayout = new QVBoxLayout(business);
-  backendUrl_ = new QLineEdit(config_.backendUrl); backendUrl_->setObjectName("businessBackendUrl"); businessLayout->addWidget(backendUrl_);
-  auto *connectBusiness = button("连接 / 刷新点位", businessLayout); connectBusiness->setEnabled(!offline_);
-  connect(connectBusiness, &QPushButton::clicked, this, [this] { business_->setBaseUrl(backendUrl_->text()); business_->refreshPoints(); }); pointsLayout->addWidget(business);
-  points_ = new QTableWidget(0, 5); points_->setHorizontalHeaderLabels({"ID", "名称", "X", "Y", "朝向°"}); points_->setAlternatingRowColors(true);
-  points_->setSelectionBehavior(QAbstractItemView::SelectRows); points_->setSelectionMode(QAbstractItemView::SingleSelection); points_->setEditTriggers(QAbstractItemView::NoEditTriggers);
-  points_->horizontalHeader()->setSectionResizeMode(QHeaderView::ResizeToContents); points_->setMinimumHeight(140); pointsLayout->addWidget(points_, 1);
-  connect(points_, &QTableWidget::itemSelectionChanged, this, [this] {
-    const int row = points_->currentRow(); if (row < 0 || !points_->item(row, 0)) return;
-    const auto item = points_->item(row, 0)->data(Qt::UserRole).toJsonObject();
-    goalX_->setValue(item.value("x").toDouble()); goalY_->setValue(item.value("y").toDouble()); goalYaw_->setValue(item.value("yaw").toDouble() * 180. / pi); controlTabs_->setCurrentIndex(1);
-  });
-  auto *pointButtons = new QHBoxLayout;
-  auto *savePoint = button("保存当前位置", pointButtons); writeButtons_ << savePoint;
-  connect(savePoint, &QPushButton::clicked, this, [this] {
-    if (!allowed() || !state_.poseValid || state_.frame != "map") { log("保存点位需要有效的 map 位姿"); return; }
-    bool ok = false; const auto name = QInputDialog::getText(this, "保存点位", "点位名称", QLineEdit::Normal, "", &ok);
-    if (ok && !name.trimmed().isEmpty()) business_->addPoint(name.trimmed(), state_.x, state_.y, state_.yaw);
-  });
-  auto *remove = button("删除所选", pointButtons); writeButtons_ << remove;
-  connect(remove, &QPushButton::clicked, this, [this] { const int row = points_->currentRow(); if (allowed() && row >= 0 && points_->item(row, 0)) business_->deletePoint(points_->item(row, 0)->text().toInt()); });
-  pointsLayout->addLayout(pointButtons);
-  auto *plans = button("打开旧业务巡检计划", pointsLayout); plans->setEnabled(!offline_);
-  connect(plans, &QPushButton::clicked, this, [this] { QDesktopServices::openUrl(QUrl(backendUrl_->text() + "/plans.html")); });
-  rightTabs_->addTab(scrollPane(pointsPage), "业务点位");
+  auto *webPage = new QWidget; auto *webLayout = pageLayout(webPage);
+  auto *webInfo = new QGroupBox("网页端", webPage); auto *webInfoLayout = new QVBoxLayout(webInfo);
+  auto *webHint = new QLabel("网页端为只读监控与任务入口；地图、点位、路线、返航点仍由本地桌面维护。", webInfo);
+  webHint->setWordWrap(true); webInfoLayout->addWidget(webHint);
+  auto *webAddress = new QLabel("浏览器访问：http://<机器人IP>:8888/", webInfo);
+  webAddress->setTextInteractionFlags(Qt::TextSelectableByMouse); webInfoLayout->addWidget(webAddress);
+  auto *webButtons = new QHBoxLayout;
+  const QString webBase = config_.backendUrl;
+  auto *monitorWeb = button("监控台", webButtons); monitorWeb->setEnabled(!offline_);
+  connect(monitorWeb, &QPushButton::clicked, this, [webBase] { QDesktopServices::openUrl(QUrl(webBase + "/monitor.html")); });
+  auto *tasksWeb = button("巡检任务", webButtons); tasksWeb->setEnabled(!offline_);
+  connect(tasksWeb, &QPushButton::clicked, this, [webBase] { QDesktopServices::openUrl(QUrl(webBase + "/tasks.html")); });
+  auto *recordsWeb = button("巡检记录", webButtons); recordsWeb->setEnabled(!offline_);
+  connect(recordsWeb, &QPushButton::clicked, this, [webBase] { QDesktopServices::openUrl(QUrl(webBase + "/records.html")); });
+  webInfoLayout->addLayout(webButtons);
+  webLayout->addWidget(webInfo);
+  webLayout->addStretch();
+  rightTabs_->addTab(scrollPane(webPage), "网页端");
+
   monitorDock_ = addDock("相机与业务", "consoleMonitorDock", monitor, ads::RightDockWidgetArea);
   connect(rightTabs_, &QTabWidget::currentChanged, this, [this](int index) { if (index != 0 && cameraPanel_) cameraPanel_->stopInteraction(); });
   connect(monitorDock_, &ads::CDockWidget::visibilityChanged, this, [this](bool visible) { if (!visible && cameraPanel_) cameraPanel_->stopInteraction(); });

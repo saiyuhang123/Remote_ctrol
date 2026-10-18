@@ -149,6 +149,40 @@ class RouteSnapshot:
         }
 
 
+
+@dataclass
+class HomePoint:
+    map_id: str
+    map_revision: int
+    x: float
+    y: float
+    yaw: float
+    updated_at_ns: int = 0
+
+
+@dataclass
+class InspectionSummary:
+    run_id: str
+    inspection_date: str
+    map_id: str
+    route_id: str
+    face_capture_count: int = 0
+    person_count: int = 0
+    plates: list[dict[str, Any]] = field(default_factory=list)
+    updated_at_ns: int = 0
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "run_id": self.run_id,
+            "inspection_date": self.inspection_date,
+            "map_id": self.map_id,
+            "route_id": self.route_id,
+            "face_capture_count": self.face_capture_count,
+            "person_count": self.person_count,
+            "plates": list(self.plates),
+            "updated_at": self.updated_at_ns / 1_000_000_000.0,
+        }
+
 def validate_point_values(x: float, y: float, yaw: float) -> tuple[float, float, float]:
     return (require_finite(x, "x"), require_finite(y, "y"), require_finite(yaw, "yaw"))
 

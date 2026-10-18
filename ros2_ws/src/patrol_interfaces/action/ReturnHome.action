@@ -1,0 +1,13 @@
+# 一键返回当前地图待命点。由本地桌面或网页网关发起，和执行路线共用唯一任务槽。
+string request_id
+string owner_session_id
+string map_id
+uint64 map_revision
+---
+# final_state 使用 PatrolStatus 中的状态常量。
+bool success
+uint8 final_state
+string error_code
+string message
+---
+PatrolStatus status

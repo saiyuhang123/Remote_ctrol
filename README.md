@@ -4,32 +4,38 @@
 
 这是一个基于 ROS 2 Humble 的智能巡检机器人远程控制项目，用于实机遥控、视频监控、识别、抓拍与巡检业务管理。2026-10-09 已清理 Gazebo 仿真、测试场地地图和模拟执行逻辑。具体清单见 [实机开发说明](实机开发说明.md)。
 
-> 当前状态：3D（FAST-LIO）与 2D（SLAM Toolbox 建图、Cartographer）三套建图导航链路已有实车记录；SLAM Toolbox 定位端现已切换 AMCL，完成隔离模拟验证，实车效果待验收。此前已完成轮速里程计卷尺标定和 Nav2 到点测试。三套方案的使用命令见 [建图导航命令](建图导航命令.md)（3D）和 [2D 建图导航](2d建图导航.md)（两套 2D）。巡检执行器仍待接入。
+> 当前状态：3D（FAST-LIO）与 2D（SLAM Toolbox 建图、Cartographer）三套建图导航链路已有实车记录；SLAM Toolbox 定位端现已切换 AMCL，完成隔离模拟验证，实车效果待验收。此前已完成轮速里程计卷尺标定和 Nav2 到点测试。三套方案的使用命令见 [建图导航命令](建图导航命令.md)（3D）和 [2D 建图导航](2d建图导航.md)（两套 2D）。本地路线执行、一键返回待命点和网页任务入口已接入 `robot_patrol`。
 
 轮速里程计可与 FAST-LIO 同时记录，并通过 `odom_source:=lio/wheel/wheel_imu` 选择 Nav2 的主里程计，见 [底盘里程计说明](底盘里程计说明.md)。
 
 ## 功能概览
 
-- 浏览器虚拟摇杆和 W/S/A/D 远程控制。
-- WebSocket 遥控网关，支持速度限幅、心跳检测和 1 秒无指令自动刹车。
-- Nav2 定位、Hybrid-A* 规划、Regulated Pure Pursuit 控制和目标点导航接口，使用外部实测地图。
+网页端没有账号/密码认证，只适用于受控工场内网或隔离 VPN。禁止将 8888/8765/8889 直接映射到公网；急停仍应在现场安全回路中保持独立有效。
+
+- 浏览器二维地图、雷达、机器人位姿/速度、全局/局部路径和 Nav2 只读状态。
+- 单网页控制权、本地桌面最高优先级、控制心跳超时和断网立即停车。
+- 浏览器虚拟摇杆、W/S/A/D 和急停；网关只在网页取得控制权后创建 `/cmd_vel_teleop`。
+- 本地已有路线立即执行、暂停/继续/取消；一键返回当前地图待命点。
 - MediaMTX + FFmpeg 视频链路：RTSP 推流，浏览器 WebRTC 播放。
-- 海康相机原生人脸检测/抓拍；上位机直接用 OpenVINO YOLO 检测行人/车辆、HyperLPR3 识别车牌，不做人脸身份比对。
-- 识别事件通过 ROS 话题推送到网页，并通过 HTTP 上报业务后台。
-- 手动/自动抓拍、按日期归档、磁盘轮转和断网缓存补传。
-- 巡检点、路线和巡检计划管理，支持保存一次性、每日和按分钟周期规则；执行功能待实机接入。
-- SQLite 记录识别和抓拍结果，保留已有任务记录及 HTML 报告查询。
+- 海康相机原生人脸检测/抓拍；上位机使用 OpenVINO YOLO 检测行人、HyperLPR3 识别车牌。
+- 网页只开关已运行时的人脸抓拍、行人、车牌检测，不启动视觉进程。
+- 云台方向/变倍按住控制，气体检测实时只读显示。
+- 地图激活时自动导出网页 PNG/meta，支持 Nav2 地图 `origin` 的任意朝向。
+- 共享本地 `robot_patrol` SQLite：网页只读；巡检摘要只记录巡检日期、人脸抓拍次数、行人次数和去重车牌。
+- 不提供网页建图/导航启动、初始位姿、任意 Nav2 目标、点位/路线编辑、周期计划或气体历史。
 
 ## 系统结构
 
 ```text
-浏览器监控台
-  ├─ WebSocket :8765 ──> robot_gateway ──> /cmd_vel_teleop ──> twist_mux ──> JD03
-  ├─ WebSocket :8765 <── robot_gateway <── /odom、/scan、TF、识别事件
+浏览器监控台 / 巡检任务 / 巡检记录
+  ├─ WebSocket :8765 ──> robot_gateway ──> /cmd_vel_teleop（仅取得控制权时存在）
+  │                         ├─> /patrol/run_route (RunRoute)
+  │                         └─> /patrol/return_home (ReturnHome)
+  ├─ WebSocket :8765 <── 地图/雷达/TF/位姿、巡航状态、视觉/云台/气体状态
   ├─ WebRTC :8889 <──── MediaMTX <──── FFmpeg <──── 实际摄像头
-  └─ HTTP :8888 <───── FastAPI + SQLite
+  └─ HTTP :8888 <───── FastAPI 只读访问 robot_patrol SQLite
                               ↑
-                vision_events / capture_server
+                patrol_node / inspection_recorder 写入业务表
 ```
 
 项目采用单机器人、局域网/蒲公英组网场景下的轻量架构，不依赖 MQTT。浏览器、业务后台和机器人节点可以部署在同一台机器上，也可以根据网络情况分开部署。
@@ -38,15 +44,16 @@
 
 ```text
 Remote_ctrol/
-├── backend/                 # FastAPI 业务后端、SQLite 数据层、计划管理和报告生成
+├── backend/                 # FastAPI 静态服务和只读业务 API
 ├── config/                  # 机器人控制和端口配置
 ├── deploy/                  # MediaMTX 配置
 ├── scripts/                 # 安装、推流和一键启动脚本
-├── web/                     # 监控台、点位、计划、记录页面及地图资源
+├── web/                     # 监控台、巡检任务、巡检记录及自动导出地图资源
 ├── maps/                    # 三套方案的地图：fastlio / slam_toolbox / cartographer
 ├── desktop_ui/              # Qt + RViz2 桌面端（独立构建，含六种建图/导航显示配置）
 ├── ros2_ws/src/
-│   ├── robot_gateway/       # WebSocket 遥控/遥测网关
+│   ├── robot_gateway/       # WebSocket 控制权、任务代理和只读遥测网关
+│   ├── robot_patrol/        # 本地点位/路线执行、返航、guard 和巡检摘要
 │   ├── robot_common/        # HTTP 上报器和断网缓存
 │   ├── detector_node/       # 上位机行人/车辆检测、车牌识别
 │   ├── vision_events/       # 独立视觉执勤、本地图片与小车位姿记录
@@ -133,8 +140,7 @@ bash scripts/start_robot_monitor.sh
 默认不开视频、识别或音频。接入实际 UVC 摄像头后，可按需开启：
 
 ```bash
-ENABLE_VIDEO=1 ENABLE_DETECTOR=1 ENABLE_AUDIO=1 \
-  bash scripts/start_robot_monitor.sh
+ENABLE_VIDEO=1 ENABLE_DETECTOR=1 bash scripts/start_robot_monitor.sh
 ```
 
 网络摄像头可通过 `CAMERA_RTSP` 传入实际 RTSP 地址；流转发要求摄像头使用浏览器支持的 H.264 编码。如果视频流由其他进程提供，可保持 `ENABLE_VIDEO=0`，设置 `VIDEO_SOURCE`、`ENABLE_CAPTURE=1`、`ENABLE_DETECTOR=1` 使用该实际视频流。
@@ -144,11 +150,22 @@ ENABLE_VIDEO=1 ENABLE_DETECTOR=1 ENABLE_AUDIO=1 \
 启动后访问：
 
 - 监控台：<http://localhost:8888/monitor.html>
-- 巡检点：<http://localhost:8888/points.html>
-- 路线计划：<http://localhost:8888/plans.html>
-- 识别/抓拍记录：<http://localhost:8888/records.html>
+- 巡检任务：<http://localhost:8888/tasks.html>
+- 巡检记录：<http://localhost:8888/records.html>
 - FastAPI 文档：<http://localhost:8888/docs>
 - 健康检查：<http://localhost:8888/api/health>
+
+监控、任务和记录统一在 `/console.html` 控制台中切换；上述旧地址会自动打开对应页面。站内切页保留同一个连接和控制权，因此启动巡航后可以切到监控台看地图、视频或查看记录。切页会结束本次手动速度和云台按住操作，不会取消自动巡航。关闭或刷新整个控制台、真正断网、心跳超时或本地接管，仍会释放网页控制权并取消网页任务，重连后不自动续跑。
+
+任务圈数在前后端校验为 `0～100000` 的整数；拒绝或提交失败后可以直接重试。气体停止、异常或过期后读数显示 `—`；地图每 2 秒检查版本，首次加载失败会自动重试，版本变化后重新加载；云台按住期间持续续租，松开、切页或失去焦点后停止。模块和回归测试说明见 [网页端说明](web/README.md)。
+
+网页、网关和 `robot_patrol` 必须使用同一个业务数据库。默认路径为 `$HOME/.local/share/robot_patrol/patrol.sqlite3`；如需修改，在所有相关终端统一设置 `ROBOT_PATROL_DB`。`scripts/start_robot_monitor.sh` 还会设置默认的 `ROBOT_WEB_MAP_DIR=$ROOT/web/maps`。`robot_patrol` 的启动命令示例：
+
+```bash
+source /opt/ros/humble/setup.bash
+source ~/Remote_ctrol/ros2_ws/install/setup.bash
+ros2 launch robot_patrol patrol.launch.py
+```
 
 按 `Ctrl+C` 可以停止一键启动脚本拉起的后台进程。实机监控入口中任一组件退出时会结束本次启动，需根据终端错误修复组件后重启。
 
@@ -200,34 +217,31 @@ DEV=/dev/video4 SIZE=640x480 FPS=30 \
 
 ### 监控台 `monitor.html`
 
-- 显示地图、机器人位置、雷达点云和导航状态。
-- 鼠标拖拽选择初始定位位姿。
-- 鼠标拖拽选择 Nav2 目标点，支持取消导航。
-- 虚拟摇杆、W/S/A/D 和急停。
+- 二维地图、雷达、机器人位置/朝向/速度、Nav2 目标数量和巡航任务状态。
+- 全局/局部路径只读显示；不再提供初始位姿或任意 Nav2 目标点选。
+- 单网页控制权、虚拟摇杆、W/S/A/D、急停和 1 秒控制心跳超时。网页急停会触发本地联锁并释放网页控制权，解除急停必须在现场/本地桌面确认安全后操作。
 - 实际摄像头视频按需开启/关闭。
-- 手动抓拍和实时识别告警。
+- 视觉识别开关：人脸抓拍、行人检测、车牌检测；只控制本地已启动节点。
+- 云台方向/变倍按住控制、停止、位置读取和自动巡航锁定状态。
+- 气体实时数值、单位、原始寄存器、设备报警、连接和新鲜度；不写数据库。
 
-### 点位和路线
+### 巡检任务 `tasks.html`
 
-在 `points.html` 中维护巡检点坐标、朝向和到点动作：
+- 显示当前活跃地图、地图版本一致性、有效返航点和本地已有路线。
+- 只允许选择既有路线并立即执行，可设置圈数，支持暂停/继续/取消。
+- 支持一键返回当前地图待命点；如果路线正在执行，会先取消路线、等待停车再返航。
+- 不能编辑点位/路线、切换地图、创建定时计划或设置初始位姿。
+- 路线地图/路线版本不一致时由网页和 `robot_patrol` 双重拒绝。
 
-```json
-[
-  {"type": "dwell", "sec": 10},
-  {"type": "capture"},
-  {"type": "tts", "text": "开始检查"}
-]
-```
+### 巡检记录 `records.html`
 
-在 `plans.html` 中按顺序组合点位为路线，再保存巡检计划规则。实机巡检执行器尚未接入，计划不会自动执行，“立即执行”接口返回 HTTP 501。可保存的规则：
+- 只显示巡检日期、关联路线/运行、人脸抓拍次数、行人次数和去重车牌及出现次数。
+- 不记录气体、云台、控制权、断网、视觉服务错误或任务状态事件日志。
+- 旧网页 `data/robot.db` 和测试数据不再使用，不做迁移。
 
-- `once`：一次性执行，格式为 `YYYY-MM-DD HH:MM`
-- `daily`：每天执行，格式为 `HH:MM`
-- `interval_min`：按分钟周期执行，例如 `120`
+### 本地待命返航点
 
-### 记录和报告
-
-`records.html` 显示识别记录、抓拍记录和统计信息。计划页面可查询已有任务和报告；清理后的后台不会自动生成模拟任务或成功报告。
+本地“路线巡航”窗口可把当前停稳位姿保存为当前地图返航点，也可清除和“一键返回”。主窗口标题栏同样提供“一键返回”。网页不能修改返航点。地图 revision 改变后旧返航点自动失效。
 
 ## 实机建图与导航（3D / 2D）
 
@@ -329,57 +343,79 @@ ros2 launch chassis_nav2 cartographer_2d_localization.launch.py enable_control:=
 | `/emergency_stop` | `std_msgs/Bool` | 保持急停并取消导航 |
 | `/odom` | `nav_msgs/Odometry` | 机器人里程计，用于遥测 |
 | `/scan` | `sensor_msgs/LaserScan` | 三维雷达截取生成的平面扫描 |
-| `/initialpose` | `geometry_msgs/PoseWithCovarianceStamped` | 网页下发的 FAST-LIO 地图初始车体位姿 |
-| `/detection_events` | `std_msgs/String` | JSON 格式识别事件 |
-| `/capture_request` | `std_msgs/String` | 抓拍请求，内容为标签 |
-| `/capture_done` | `std_msgs/String` | JSON 格式抓拍结果 |
-| `navigate_to_pose` | `nav2_msgs/action/NavigateToPose` | 网页目标点导航 |
+| `/patrol/status` | `patrol_interfaces/PatrolStatus` | 本地路线/返航任务状态 |
+| `/patrol/run_route` | `patrol_interfaces/action/RunRoute` | 路线执行 Action |
+| `/patrol/return_home` | `patrol_interfaces/action/ReturnHome` | 一键返回 Action |
+| `/patrol/operator_heartbeat` | `patrol_interfaces/OperatorHeartbeat` | 操作端心跳（本地/网页） |
+| `/vision/detector_status` | `std_msgs/String` | 行人/车牌识别状态 |
+| `/hk_camera/face_status` | `std_msgs/String` | 人脸抓拍状态 |
+| `/gas_detector/data` | `std_msgs/String` | 气体实时只读数据 |
+| `/gas_detector/status` | `std_msgs/String` | 气体采集连接状态 |
+| `/ptz_patrol/status` | `std_msgs/String` | 云台自动巡航状态 |
 
 ## WebSocket 指令
 
 网关监听 `0.0.0.0:8765`，网页连接格式为 `ws://<主机IP>:8765`。
 
+网页必须先取得服务端随机 session token；除急停外，运动、路线、返航、云台和视觉开关命令都必须携带该 token。
+
 ```json
-{"type": "cmd_vel", "linear": 0.5, "angular": 0.2}
+{"type": "control_claim", "request_id": "..."}
+{"type": "control_heartbeat", "session_id": "web_...", "request_id": "..."}
+{"type": "cmd_vel", "session_id": "web_...", "linear": 0.2, "angular": 0.0}
 {"type": "estop"}
-{"type": "initial_pose", "x": 0.0, "y": 0.0, "yaw": 0.0}
-{"type": "nav_goal", "x": 1.0, "y": 2.0, "yaw": 1.57}
-{"type": "nav_cancel"}
-{"type": "capture", "label": "manual"}
+{"type": "route_start", "session_id": "web_...", "request_id": "...",
+ "map_id": "...", "map_revision": 1, "route_id": "...",
+ "route_revision": 1, "loop_count": 1}
+{"type": "route_pause", "session_id": "web_...", "request_id": "..."}
+{"type": "route_resume", "session_id": "web_...", "request_id": "..."}
+{"type": "route_cancel", "session_id": "web_...", "request_id": "..."}
+{"type": "return_home", "session_id": "web_...", "request_id": "...",
+ "map_id": "...", "map_revision": 1}
+{"type": "return_cancel", "session_id": "web_...", "request_id": "..."}
+{"type": "ptz_jog", "session_id": "web_...", "action": "left"}
+{"type": "ptz_stop", "session_id": "web_..."}
+{"type": "vision_face_capture", "session_id": "web_...", "enabled": true}
+{"type": "vision_person", "session_id": "web_...", "enabled": true}
+{"type": "vision_plate", "session_id": "web_...", "enabled": true}
 ```
+
+浏览器断开、控制心跳超过 1 秒、本地桌面启用操作或收到急停时：网关先移除手动速度发布者并停车；网页发起的路线/返航任务会被取消；本地发起的路线任务不由网关取消。
 
 配置文件 `config/config.yaml` 中的 `max_linear`、`max_angular` 会限制远程指令幅度，`cmd_timeout` 控制失控刹车时间。默认值为：线速度 `0.5 m/s`、角速度 `1.0 rad/s`、超时 `1.0 s`。
 
 ## HTTP API 概览
 
-- `GET /api/health`：服务健康检查。
-- `GET/POST /api/points`、`PUT/DELETE /api/points/{id}`：巡检点 CRUD。
-- `GET/POST /api/routes`、`PUT/DELETE /api/routes/{id}`：路线 CRUD。
-- `GET/POST /api/plans`、`PUT/DELETE /api/plans/{id}`：计划 CRUD。
-- `POST /api/plans/{id}/run`：执行入口暂未接入，对存在的计划返回 HTTP 501。
-- `GET /api/plans/tasks`、`GET /api/plans/tasks/{id}`：查询任务记录。
-- `GET /api/plans/report/{id}`：生成或查看巡检报告。
-- `GET /api/records/detections`：查询识别记录。
-- `GET /api/records/captures`：查询抓拍记录。
-- `GET /api/records/summary`：查询统计信息。
-- `POST /api/records/detections`、`POST /api/records/captures`：写入识别和抓拍记录。
+- `GET /api/health`：后端、共享数据库和网页地图状态。
+- `GET /api/local/state`：活跃地图、版本一致性、返航点和有效路线。
+- `GET /api/local/maps`：本地已登记地图。
+- `GET /api/local/maps/active`：当前活跃地图及网页 meta。
+- `GET /api/local/maps/{map_id}/routes`：指定地图的本地只读路线。
+- `GET /api/local/maps/{map_id}/home`：指定地图的有效待命点。
+- `GET /api/inspection/records`：巡检摘要。
+- `GET /api/map/meta`：网页地图几何和版本，禁止缓存。
+
+FastAPI 不挂载点位/路线/计划编辑、运动控制、初始位姿或识别记录写入接口。业务数据库由 `patrol_node` 和 `inspection_recorder` 写入，后端以 SQLite `mode=ro` 打开。旧 `data/robot.db` 不再使用。
 
 完整请求参数和响应结构可以在 `/docs` 查看。
 
 ## 数据和配置
 
-业务后端根据本项目所在目录保存数据；ROS 节点由启动脚本设置 `ROBOT_PROJECT_ROOT`（手动运行时默认 `~/Remote_ctrol`）。运行时目录：
+业务主库为本地 `robot_patrol` SQLite，网页只读打开：
 
 ```text
-~/Remote_ctrol/
-├── data/
-│   ├── robot.db             # FastAPI 主数据库
-│   ├── detector_cache.db    # 识别上报失败缓存
-│   └── capture_cache.db     # 抓拍上报失败缓存
-├── web/captures/YYYY-MM-DD/ # 抓拍和识别图片
-├── web/reports/             # HTML 巡检报告
-└── face_db/                 # 人脸底库图片，不入 Git
+$HOME/.local/share/robot_patrol/patrol.sqlite3   # 默认主库，可由 ROBOT_PATROL_DB 覆盖
+~/Remote_ctrol/web/maps/active.png               # 地图激活时自动导出
+~/Remote_ctrol/web/maps/meta.json                # map_id/revision/origin/sha256
+~/Remote_ctrol/data/vision/events.sqlite3        # 视觉模块内部媒体/事件索引
+~/Remote_ctrol/data/vision/media/                # 视觉事件图片
+~/Remote_ctrol/captures/hk_faces/                # 海康人脸抓拍
 ```
+
+- 网页、网关和 `robot_patrol` 必须设置同一个 `ROBOT_PATROL_DB`。
+- 网页地图目录可由 `ROBOT_WEB_MAP_DIR` 覆盖，默认是项目 `web/maps`。
+- 旧 `data/robot.db`、网页测试数据、点位/路线/计划写接口已废弃，不做迁移。
+- 巡检摘要只保存巡检日期、关联路线、人脸抓拍次数、行人次数和去重车牌。
 
 主要配置位于 `config/config.yaml`：
 
@@ -398,16 +434,16 @@ video:
   encoder: libx264
 ```
 
-手动启动 ROS 节点时可设置 `export ROBOT_PROJECT_ROOT=/实际路径/Remote_ctrol`；数据库、抓拍、报告和音频需使用同一项目目录。旧 WSL 目录中的历史数据不会自动迁移。
+手动启动 ROS 节点时可设置 `export ROBOT_PROJECT_ROOT=/实际路径/Remote_ctrol`；如修改业务数据库路径，需在所有终端同步设置 `ROBOT_PATROL_DB`。旧 WSL 目录和旧网页数据库不会自动迁移。
 
 ## 当前已知限制
 
-1. 实机巡检执行器尚未接入；点位、路线和计划可管理，自动调度及计划执行暂停。
+1. 网页 MVP 只支持立即执行本地已有路线和一键返回待命点；不提供定时/周期计划。实车到点停稳、返航和控制权接管时序仍需最终验收。
 2. JD03 Twist/Ecu 桥、转向符号和速度反馈已实车核对，轮速里程计已标定（`speed_scale: 0.29`）；最大控制速度 0.5 m/s。
-3. 已接入网页遥控/自主导航仲裁和急停；厂家手持遥控的权限逻辑仍需实车确认。
+3. 已接入单网页控制权、本地桌面优先、心跳超时和断网停车；厂家手持遥控的权限逻辑仍需实车确认。
 4. 电池反馈尚未接入，页面显示“未接入”和空值。
 5. 统一使用 `base_link`；外参、轴距、转角与 footprint 已确认（`hardware.yaml` 各段 `confirmed: true`）。
-6. 仿真地图已删除。配置实测网页地图的方法见 [地图说明](web/maps/README.md)。无地图时禁止地图点选。
+6. 地图在本地激活时自动导出网页 PNG/meta，支持非零 `origin_yaw`。地图版本不一致时网页任务页禁止执行。说明见 [地图说明](web/maps/README.md)。
 7. 上位机行人/车牌使用 CPU 推理，性能取决于处理器、视频分辨率与限帧配置；人脸由海康抓拍留档，不做身份判断。
 8. `bin/mediamtx` 不在 Git 中，需要准备实际运行平台的版本。
 
