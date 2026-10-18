@@ -9,12 +9,15 @@ void SessionProcess::setupChildProcess() { ::setsid(); }
 ProcessManager::ProcessManager(const DesktopConfig &config, QObject *parent) : QObject(parent), config_(config) {
   process_.setProcessChannelMode(QProcess::MergedChannels);
   connect(&process_, &QProcess::readyReadStandardOutput, this, [this] { emit output(QString::fromUtf8(process_.readAllStandardOutput())); });
-  connect(&process_, &QProcess::started, this, [this] { group_ = process_.processId(); emit runningChanged(true); });
+  connect(&process_, &QProcess::started, this, [this] {
+    group_ = process_.processId(); emit runningChanged(true);
+    if (stopRequestedDuringStart_) { stopRequestedDuringStart_ = false; stop(); }
+  });
   connect(&process_, &QProcess::errorOccurred, this, [this](QProcess::ProcessError error) { emit output("启动器：" + process_.errorString()); if (error == QProcess::FailedToStart) { group_ = 0; stopping_ = false; ++generation_; emit runningChanged(false); emit finished(-1); } });
   connect(&process_, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished), this, [this](int code, QProcess::ExitStatus) {
     // A failed launch can leave children. They still belong to this unique session group.
     if (group_ > 0) ::kill(-group_, SIGTERM);
-    group_ = 0; stopping_ = false; ++generation_; emit runningChanged(false); emit finished(code);
+    group_ = 0; stopping_ = false; stopRequestedDuringStart_ = false; ++generation_; emit runningChanged(false); emit finished(code);
   });
 }
 ProcessManager::~ProcessManager() {
@@ -34,12 +37,14 @@ bool ProcessManager::start(const QStringList &arguments) {
   if (!QFileInfo::exists(config_.projectRoot + "/ros2_ws/install/setup.bash")) { emit output("缺少 ROS2 overlay，请先按原项目方式构建工作空间"); return false; }
   ++generation_;
   stopping_ = false;
+  stopRequestedDuringStart_ = false;
   process_.setWorkingDirectory(config_.projectRoot);
   process_.start("bash", environmentArguments(config_, arguments));
   return true;
 }
 void ProcessManager::stop() {
-  if (!running() || group_ <= 0 || stopping_) return;
+  if (!running() || stopping_) return;
+  if (group_ <= 0) { stopRequestedDuringStart_ = true; return; }
   stopping_ = true;
   const auto group = group_; const auto generation = generation_;
   // ros2 launch forwards SIGINT to its children. Signalling the entire group

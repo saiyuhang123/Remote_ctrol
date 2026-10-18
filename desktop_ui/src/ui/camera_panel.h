@@ -20,8 +20,10 @@ public:
   void setControlEnabled(bool enabled);
   void stopInteraction();
   void ensureCamera();
+  void setPatrolBlocked(bool blocked);
 signals:
   void message(const QString &text);
+  void patrolStopRequested();
 protected:
   void resizeEvent(QResizeEvent *event) override;
   void hideEvent(QHideEvent *event) override;
@@ -49,4 +51,5 @@ private:
   QTimer *jogTimer_;
   int jogCommand_ = 0;
   bool jogInFlight_ = false, absolutePanTilt_ = true;
+  bool patrolBlocked_ = false;
 };

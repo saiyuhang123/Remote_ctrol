@@ -13,6 +13,7 @@ def main():
         "responsiveLayout:full-hd",
         "responsiveLayout:laptop",
         "responsiveLayout:compact",
+        "liveGasSummaryIsAlwaysVisibleAndOpensDevices",
         "presentationKeepsUnknownReverseAndInterlockSeparate",
         "patrolSummarySurvivesIdleNavigationUpdates",
         "writesOnlyLayoutPreferences",

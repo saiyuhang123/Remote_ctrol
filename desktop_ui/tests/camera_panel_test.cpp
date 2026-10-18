@@ -109,6 +109,11 @@ private slots:
     QTest::mouseClick(button("cameraReadPtz"), Qt::LeftButton);
     QTRY_VERIFY(panel.findChild<QLabel *>("cameraPoseStatus")->text().contains("100.0"));
     auto *left = button("cameraDirection23");
+    panel.setPatrolBlocked(true);
+    QVERIFY(!left->isEnabled()); QVERIFY(!button("cameraSetPtz")->isEnabled());
+    QSignalSpy patrolStop(&panel, &CameraPanel::patrolStopRequested);
+    QTest::mouseClick(button("cameraDirection0"), Qt::LeftButton); QCOMPARE(patrolStop.count(), 1);
+    panel.setPatrolBlocked(false); QVERIFY(left->isEnabled());
     QTest::mousePress(left, Qt::LeftButton);
     QTRY_VERIFY(fixture.jogs.load() >= 3); QCOMPARE(fixture.direction.load(), 23);
     QTest::mouseRelease(left, Qt::LeftButton);

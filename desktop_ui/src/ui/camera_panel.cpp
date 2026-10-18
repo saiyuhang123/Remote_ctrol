@@ -70,10 +70,14 @@ CameraPanel::CameraPanel(const DesktopConfig &config, RosAdapter *ros, bool offl
     directions_ << b;
     const int command = commands[i];
     if (!command) {
-      connect(b, &QPushButton::clicked, this, [this] { stopJog(); if (!offline_) ros_->jogCamera(0, 3, true); });
+      connect(b, &QPushButton::clicked, this, [this] {
+        stopJog();
+        if (patrolBlocked_) emit patrolStopRequested();
+        else if (!offline_) ros_->jogCamera(0, 3, true);
+      });
     } else {
       connect(b, &QPushButton::pressed, this, [this, command] {
-        if (offline_ || !controlEnabled_ || !pending_.isEmpty() || !lastFrame_.isValid() || lastFrame_.elapsed() >= 3000) return;
+        if (offline_ || patrolBlocked_ || !controlEnabled_ || !pending_.isEmpty() || !lastFrame_.isValid() || lastFrame_.elapsed() >= 3000) return;
         stopJog(); jogCommand_ = command; jogInFlight_ = true;
         ros_->jogCamera(command, 3, false); jogTimer_->start(); refresh();
       });
@@ -98,17 +102,17 @@ CameraPanel::CameraPanel(const DesktopConfig &config, RosAdapter *ros, bool offl
   });
   connect(start_, &QPushButton::clicked, this, &CameraPanel::startCamera);
   connect(connect_, &QPushButton::clicked, this, &CameraPanel::connectPreview);
-  connect(stopNode_, &QPushButton::clicked, this, [this] { stopJog(); waitingForNode_ = false; pending_.clear(); process_->stop(); refresh(); });
+  connect(stopNode_, &QPushButton::clicked, this, [this] { stopJog(); if (patrolBlocked_) emit patrolStopRequested(); waitingForNode_ = false; pending_.clear(); process_->stop(); refresh(); });
   connect(stopStream_, &QPushButton::clicked, this, [this] {
     if (offline_ || !pending_.isEmpty()) return;
-    stopJog(); pending_ = "camera_stop_stream"; ros_->cameraCommand("stop_stream"); refresh();
+    stopJog(); if (patrolBlocked_) emit patrolStopRequested(); pending_ = "camera_stop_stream"; ros_->cameraCommand("stop_stream"); refresh();
   });
   connect(read_, &QPushButton::clicked, this, [this] {
     if (offline_ || !pending_.isEmpty()) return;
     pending_ = "ptz_read"; ros_->readCameraPose(); refresh();
   });
   connect(set_, &QPushButton::clicked, this, [this] {
-    if (offline_ || !controlEnabled_ || !poseRead_ || !pending_.isEmpty()) return;
+    if (offline_ || patrolBlocked_ || !controlEnabled_ || !poseRead_ || !pending_.isEmpty()) return;
     pending_ = "ptz"; ros_->setPtz(pan_->value(), tilt_->value(), zoom_->value()); refresh();
   });
   connect(save_, &QPushButton::clicked, this, &CameraPanel::saveFrame);
@@ -186,8 +190,13 @@ CameraPanel::CameraPanel(const DesktopConfig &config, RosAdapter *ros, bool offl
   }); timer->start(); qApp->installEventFilter(this); refresh();
 }
 
-CameraPanel::~CameraPanel() { qApp->removeEventFilter(this); stopJog(); }
+CameraPanel::~CameraPanel() {
+  qApp->removeEventFilter(this); stopJog();
+  QObject::disconnect(process_, nullptr, this, nullptr);
+  delete process_;
+}
 void CameraPanel::setControlEnabled(bool enabled) { controlEnabled_ = enabled; if (!enabled) stopJog(); refresh(); }
+void CameraPanel::setPatrolBlocked(bool blocked) { patrolBlocked_ = blocked; if (blocked) stopJog(); refresh(); }
 void CameraPanel::ensureCamera() {
   if (offline_) return;
   if (!ros_->cameraNodePresent()) startCamera();
@@ -212,11 +221,11 @@ void CameraPanel::refresh() {
   stopStream_->setEnabled(!offline_ && available && !busy);
   stopNode_->setEnabled(!offline_ && process_->running());
   read_->setEnabled(!offline_ && available && !busy && ros_->capabilities().contains("camera"));
-  set_->setEnabled(!offline_ && controlEnabled_ && poseRead_ && available && !busy);
+  set_->setEnabled(!offline_ && !patrolBlocked_ && controlEnabled_ && poseRead_ && available && !busy);
   save_->setEnabled(!offline_ && fresh && !jogCommand_);
   for (auto *b : directions_) {
     const bool stop = b->objectName() == "cameraDirection0";
-    b->setEnabled(!offline_ && available && (stop || (controlEnabled_ && fresh && (!busy || jogCommand_))));
+    b->setEnabled(!offline_ && available && (stop || (!patrolBlocked_ && controlEnabled_ && fresh && (!busy || jogCommand_))));
   }
   const auto provider = process_->running() ? "本界面管理" : present ? "外部节点" : "未启动";
   QString text = QString("相机：%1 · %2").arg(provider, available ? "服务就绪" : "服务未就绪");
@@ -225,6 +234,7 @@ void CameraPanel::refresh() {
   if (busy) text += waitingForNode_ ? "\n正在启动相机…" : "\n请求处理中…";
   else if (!detail_.isEmpty()) text += "\n" + detail_;
   if (offline_) text += "\n离线验证模式";
+  if (patrolBlocked_) text += "\n云台巡航活动或待停止确认；手动云台已锁定";
   status_->setText(text);
 }
 void CameraPanel::startCamera() {

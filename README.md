@@ -51,6 +51,7 @@ Remote_ctrol/
 │   ├── detector_node/       # 上位机行人/车辆检测、车牌识别
 │   ├── vision_events/       # 独立视觉执勤、本地图片与小车位姿记录
 │   ├── vision_interfaces/   # 历史查询和可选地图标记接口
+│   ├── gas_detector/        # 独立气体检测与设备执勤 UI 接口（只读采集）
 │   ├── capture_server/      # 视频抓拍服务
 │   ├── chassis_description/ # 机器人 URDF 和网格模型
 │   ├── chassis_nav2/        # JD03、统一实机启动、TF、控制仲裁及 Nav2

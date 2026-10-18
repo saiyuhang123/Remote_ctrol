@@ -1,6 +1,10 @@
 #include "ui/mainwindow.h"
 #include "ui/console_theme.h"
 #include "ui/camera_panel.h"
+#include "devices/device_client.h"
+#include "devices/device_panel.h"
+#include "devices/gas_readout.h"
+#include <QDialog>
 #include "vision/vision_panel.h"
 #include "ui_mainwindow.h"
 #include "adapters/business_client.h"
@@ -172,6 +176,9 @@ void MainWindow::setupUi() {
   patrolAction_->setToolTip("打开独立的本地点位、路线与多点巡航页面");
   connect(patrolAction_, &QAction::triggered, this, &MainWindow::openPatrolPage);
   auto *moduleMenu = ui_->menubar->addMenu("工具"); moduleMenu->addAction(mapEditorAction_); moduleMenu->addAction(patrolAction_);
+  auto *devices = tools->addAction("设备执勤"); devices->setObjectName("deviceDutyAction");
+  devices->setToolTip("独立启动气体检测和云台往返巡航"); moduleMenu->addAction(devices);
+  connect(devices, &QAction::triggered, this, &MainWindow::openDeviceWindow);
 
   auto *shell = new QWidget; shell->setObjectName("consoleShell"); setCentralWidget(shell);
   auto *shellLayout = new QVBoxLayout(shell); shellLayout->setContentsMargins(10, 10, 10, 8); shellLayout->setSpacing(8);
@@ -300,6 +307,16 @@ void MainWindow::setupUi() {
   auto *rightLayout = new QVBoxLayout(monitor); rightLayout->setContentsMargins(0, 0, 0, 0);
   rightTabs_ = new QTabWidget; rightTabs_->setObjectName("rightWorkspaceTabs"); rightLayout->addWidget(rightTabs_);
   cameraPanel_ = new CameraPanel(config_, ros_, offline_); connect(cameraPanel_, &CameraPanel::message, this, &MainWindow::log);
+  deviceClient_ = new DeviceClient(config_, offline_, this);
+  auto *deviceDialog = new QDialog(this); deviceWindow_ = deviceDialog;
+  deviceDialog->setObjectName("deviceDutyWindow"); deviceDialog->setWindowTitle("设备执勤 · 气体检测与云台巡航");
+  auto *deviceLayout = new QVBoxLayout(deviceDialog);
+  devicePanel_ = new DevicePanel(deviceClient_, offline_); deviceLayout->addWidget(scrollPane(devicePanel_));
+  deviceDialog->resize(560, 720);
+  connect(deviceClient_, &DeviceClient::message, this, &MainWindow::log);
+  connect(deviceClient_, &DeviceClient::cameraRequested, cameraPanel_, &CameraPanel::ensureCamera);
+  connect(deviceClient_, &DeviceClient::ptzBlocked, cameraPanel_, &CameraPanel::setPatrolBlocked);
+  connect(cameraPanel_, &CameraPanel::patrolStopRequested, deviceClient_, &DeviceClient::stopPtz);
   rightTabs_->addTab(scrollPane(cameraPanel_), "相机");
   auto *capturePage = new QWidget; auto *captureLayout = pageLayout(capturePage);
   picture_ = new QLabel("尚未抓拍\n连接相机后可抓拍预览"); picture_->setObjectName("consoleCapturePreview");
@@ -363,6 +380,9 @@ void MainWindow::setupUi() {
   auto *navCard = card("导航 / 路线巡航", 3); navState_ = new QLabel("等待状态"); navState_->setObjectName("consoleNavigationStatus"); navState_->setWordWrap(true); navState_->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred); navCard->addWidget(navState_);
   auto *batteryCard = card("电池", 1); battery_ = new QProgressBar; battery_->setObjectName("consoleBattery"); battery_->setRange(0, 100); battery_->setValue(0); battery_->setFormat("—"); battery_->setMaximumWidth(130); batteryCard->addWidget(battery_);
   power_ = hint("— V", batteryCard);
+  auto *gasReadout = new GasReadout(deviceClient_, offline_);
+  metrics->addWidget(gasReadout, 2);
+  connect(gasReadout, &GasReadout::openRequested, this, &MainWindow::openDeviceWindow);
   auto *safetyCard = card("急停 / 巡航联锁", 2); stopState_ = new QLabel("急停未知"); stopState_->setObjectName("consoleStopStatus"); safetyCard->addWidget(stopState_);
   guardState_ = hint("巡航联锁未启用", safetyCard); guardState_->setObjectName("consoleGuardStatus");
   auto *details = new QToolButton; details->setText("详情"); details->setObjectName("consoleStatusDetails"); details->setCheckable(true); metrics->addWidget(details);
@@ -539,4 +559,10 @@ void MainWindow::showOperationResult(const QString &operation, bool success, con
   else operationErrorKey_.clear();
   messageSummary_->setText(text); messageSummary_->setToolTip(text);
   setConsoleTone(messageSummary_, success ? "muted" : "danger");
+}
+
+void MainWindow::openDeviceWindow() {
+  const auto available = screen()->availableGeometry().size();
+  deviceWindow_->resize(qMin(580, available.width() - 40), qMin(780, available.height() - 60));
+  deviceWindow_->show(); deviceWindow_->raise(); deviceWindow_->activateWindow();
 }

@@ -2,6 +2,7 @@
 #include "adapters/ros_adapter.h"
 #include "runtime/config.h"
 #include "runtime/process_manager.h"
+#include "devices/device_client.h"
 #include "DockWidget.h"
 #include <QAction>
 #include <QCheckBox>
@@ -110,6 +111,9 @@ private slots:
     auto *monitor = window.findChild<ads::CDockWidget *>("consoleMonitorDock");
     auto *panel = window.findChild<rviz_common::RenderPanel *>();
     QVERIFY(left && right && monitor && panel); QCOMPARE(left->count(), 3); QCOMPARE(right->count(), 3);
+    auto *gas = window.findChild<QWidget *>("consoleGasReadout"); QVERIFY(gas && gas->isVisible());
+    QVERIFY(window.rect().contains(QRect(gas->mapTo(&window, {}), gas->size())));
+    QCOMPARE(window.findChild<QLabel *>("consoleGasValue")->text(), QString("—"));
     QCOMPARE(monitor->isClosed(), size.width() < 1180);
     if (size.width() >= 1180) {
       right->setCurrentIndex(1); QTest::qWait(30);
@@ -148,6 +152,37 @@ private slots:
         right->setCurrentIndex(1); QTest::qWait(80); QVERIFY(window.saveScreenshot(captureDir + "/console_capture.png"));
       }
     }
+    auto *devices = window.findChild<QAction *>("deviceDutyAction"); QVERIFY(devices);
+    devices->trigger(); QTest::qWait(50);
+    auto *deviceWindow = window.findChild<QWidget *>("deviceDutyWindow"); QVERIFY(deviceWindow && deviceWindow->isVisible());
+    QVERIFY(deviceWindow->height() <= window.screen()->availableGeometry().height());
+    QVERIFY(!window.findChild<QPushButton *>("gasStart")->isEnabled());
+    if (!captureDir.isEmpty() && size.width() == 1366) QVERIFY(deviceWindow->grab().save(captureDir + "/device_duty.png"));
+    deviceWindow->close();
+  }
+  void liveGasSummaryIsAlwaysVisibleAndOpensDevices() {
+    MainWindow window(config(), false); window.show(); window.resize(1366, 768);
+    QVERIFY(QTest::qWaitForWindowExposed(&window));
+    auto *client = window.findChild<DeviceClient *>(); QVERIFY(client);
+    client->status("gas", {{"enabled", true}, {"connected", true}, {"interval", 2.0}});
+    client->gasSample({{"raw_value", 123}, {"value_scaled", 12.3}, {"decimals", 1},
+      {"unit", "ppm"}, {"state_code", 1}, {"decimal_scaling_verified", false}});
+    auto *value = window.findChild<QLabel *>("consoleGasValue"); QVERIFY(value && value->isVisible());
+    QCOMPARE(value->text(), QString("≈ 12.3 ppm"));
+    QVERIFY(window.findChild<QLabel *>("consoleGasState")->text().contains("低报"));
+    window.findChild<QTabWidget *>("rightWorkspaceTabs")->setCurrentIndex(1);
+    QVERIFY(value->isVisible()); QCOMPARE(value->text(), QString("≈ 12.3 ppm"));
+    const auto captureDir = qEnvironmentVariable("DESKTOP_CONSOLE_CAPTURE_DIR");
+    if (!captureDir.isEmpty()) {
+      QDir().mkpath(captureDir);
+      window.findChild<QLabel *>("consoleSource")->setText("隔离测试 · 模拟气体读数，未连接实车");
+      window.findChild<QLabel *>("consoleMode")->setText("模拟采样");
+      window.repaint(); QCoreApplication::sendPostedEvents(nullptr, QEvent::UpdateRequest);
+      QVERIFY(window.saveScreenshot(captureDir + "/console_gas_simulated.png"));
+    }
+    QTest::mouseClick(window.findChild<QToolButton *>("consoleGasOpen"), Qt::LeftButton);
+    auto *devices = window.findChild<QWidget *>("deviceDutyWindow"); QVERIFY(devices && devices->isVisible());
+    devices->close();
   }
   void presentationKeepsUnknownReverseAndInterlockSeparate() {
     MainWindow window(config(), true); window.show(); QVERIFY(QTest::qWaitForWindowExposed(&window));

@@ -147,6 +147,14 @@ private slots:
     QCOMPARE(unrelated.state(), QProcess::Running);
     unrelated.kill(); QVERIFY(unrelated.waitForFinished(1000));
   }
+  void stopDuringProcessStartupIsRetained() {
+    auto c = config(); c.projectRoot = QDir(DESKTOP_UI_SOURCE_DIR).absoluteFilePath("..");
+    ProcessManager process(c); QSignalSpy finished(&process, &ProcessManager::finished);
+    QVERIFY(process.start({"/usr/bin/sleep", "30"}));
+    process.stop(); // No event loop turn: the QProcess started signal has not arrived.
+    QTRY_VERIFY_WITH_TIMEOUT(!process.running(), 3000);
+    QCOMPARE(finished.size(), 1);
+  }
   void mapSaveTimeoutIgnoresLateResponse() {
     FixtureExecutor fixture;
     auto service = mockService<std_srvs::srv::Trigger>(fixture.node, "/map_save", [](auto, auto response) {

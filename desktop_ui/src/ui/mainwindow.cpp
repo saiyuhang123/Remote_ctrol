@@ -1,5 +1,7 @@
 #include "ui/mainwindow.h"
 #include "ui/camera_panel.h"
+#include "devices/device_client.h"
+#include "devices/device_panel.h"
 #include "vision/vision_panel.h"
 #include "ui/console_theme.h"
 #include "ui/map_editor_dialog.h"
@@ -134,8 +136,15 @@ MainWindow::~MainWindow() {
   }
   controller_->stopManual();
   if (process_->running()) controller_->emergencyStop();
+  QObject::disconnect(process_, nullptr, this, nullptr);
+  delete process_;
+  process_ = nullptr;
   delete visionPanel_;
   visionPanel_ = nullptr;
+  delete deviceWindow_;
+  deviceWindow_ = nullptr; devicePanel_ = nullptr;
+  delete deviceClient_;
+  deviceClient_ = nullptr;
   delete cameraPanel_;
   cameraPanel_ = nullptr;
   delete controller_;
@@ -167,6 +176,8 @@ void MainWindow::updateControls() {
   const bool ok = allowed(); const bool running = process_->running(); const bool busy = saver_->busy();
   enableControl_->setEnabled(!offline_);
   cameraPanel_->setControlEnabled(ok);
+  devicePanel_->setControlEnabled(ok);
+  deviceClient_->setControlEnabled(ok);
   const bool motion = ok && controller_->controlEnabled();
   const bool patrolRunning = patrolClient_ && patrolClient_->hasActiveOrPendingRun();
   for (auto *b : writeButtons_) { const auto cap = b->property("capability").toString(); b->setEnabled(ok && (!b->property("motion").toBool() || motion) && (cap.isEmpty() || ros_->capabilities().contains(cap))); }

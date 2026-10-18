@@ -7,6 +7,7 @@
 #include <QVector>
 class CameraPanel; class LocalController; class BusinessClient; class ProcessManager; class MapSaver; class RvizHost; class MapEditorDialog; class PatrolClient; class PatrolPage;
 class VisionPanel;
+class DeviceClient; class DevicePanel;
 class QAction; class QCheckBox; class QComboBox; class QDoubleSpinBox; class QLabel; class QLineEdit; class QTimer;
 class QPlainTextEdit; class QProgressBar; class QPushButton; class QTableWidget; class QTabWidget; class QToolButton;
 class QBoxLayout;
@@ -50,6 +51,7 @@ private:
   void startSession();
   void openMapEditor();
   void openPatrolPage();
+  void openDeviceWindow();
   bool mapEditorSourceMatchesCurrent() const;
   void refreshEditorNavigationFeedback();
   void showPoints(const QJsonArray &points);
@@ -74,6 +76,9 @@ private:
   QDoubleSpinBox *goalX_ = nullptr, *goalY_ = nullptr, *goalYaw_ = nullptr, *speed_ = nullptr, *turn_ = nullptr;
   CameraPanel *cameraPanel_ = nullptr;
   VisionPanel *visionPanel_ = nullptr;
+  DeviceClient *deviceClient_ = nullptr;
+  DevicePanel *devicePanel_ = nullptr;
+  QWidget *deviceWindow_ = nullptr;
   QLabel *connection_ = nullptr, *pose_ = nullptr, *velocity_ = nullptr, *stopState_ = nullptr, *navState_ = nullptr;
   QLabel *speedValue_ = nullptr, *localizationState_ = nullptr, *guardState_ = nullptr;
   QLabel *modeBadge_ = nullptr, *navigationHint_ = nullptr, *sessionHint_ = nullptr, *messageSummary_ = nullptr;

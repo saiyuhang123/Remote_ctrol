@@ -34,4 +34,5 @@ private:
   qint64 group_ = 0;
   quint64 generation_ = 0;
   bool stopping_ = false;
+  bool stopRequestedDuringStart_ = false;
 };
