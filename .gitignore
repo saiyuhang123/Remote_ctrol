@@ -26,6 +26,7 @@ hk_log/
 backend/data/
 captures/
 reports/
+data/vision/
 maps/
 
 # ================= 本机私有配置覆盖（config.yaml 入库，本机差异用 local 覆盖）=================

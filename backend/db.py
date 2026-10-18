@@ -77,6 +77,12 @@ def conn():
 def init_db():
     c = conn()
     c.executescript(SCHEMA)
+    columns = {row[1] for row in c.execute('PRAGMA table_info(detection_record)')}
+    if 'event_id' not in columns:
+        c.execute('ALTER TABLE detection_record ADD COLUMN event_id TEXT DEFAULT NULL')
+    if 'metadata' not in columns:
+        c.execute("ALTER TABLE detection_record ADD COLUMN metadata TEXT DEFAULT '{}'")
+    c.execute('CREATE UNIQUE INDEX IF NOT EXISTS detection_event_id ON detection_record(event_id) WHERE event_id IS NOT NULL')
     c.commit()
 
 

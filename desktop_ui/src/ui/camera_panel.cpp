@@ -9,11 +9,13 @@
 #include <QFileInfo>
 #include <QFormLayout>
 #include <QGridLayout>
+#include <QHideEvent>
 #include <QLabel>
 #include <QPushButton>
 #include <QResizeEvent>
 #include <QStandardPaths>
 #include <QTimer>
+#include <QToolButton>
 #include <QVBoxLayout>
 #include <algorithm>
 #include <cmath>
@@ -24,6 +26,7 @@ CameraPanel::CameraPanel(const DesktopConfig &config, RosAdapter *ros, bool offl
   auto *layout = new QVBoxLayout(this);
   preview_ = new QLabel("海康相机未连接\n点击启动相机，或连接已有节点");
   preview_->setObjectName("cameraPreview"); preview_->setMinimumSize(220, 124);
+  preview_->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
   preview_->setAlignment(Qt::AlignCenter); preview_->setWordWrap(true);
   preview_->setStyleSheet("background:#252b33;color:#dce1e8;border-radius:4px;");
   layout->addWidget(preview_, 1);
@@ -47,7 +50,10 @@ CameraPanel::CameraPanel(const DesktopConfig &config, RosAdapter *ros, bool offl
   pan_ = number("cameraPan", 0, 360, 0); tilt_ = number("cameraTilt", 0, 360, 0); zoom_ = number("cameraZoom", 1, 40, 1);
   form->addRow("水平 (°)", pan_); form->addRow("俯仰 / SDK (°)", tilt_); form->addRow("光学变倍 (×)", zoom_);
   tilt_->setToolTip("设备的绝对垂直坐标，部分机型用 270~360° 表示向上的角度；以读取值和设备范围为准");
-  layout->addLayout(form);
+  auto *deviceDetails = new QWidget;
+  auto *deviceLayout = new QVBoxLayout(deviceDetails);
+  deviceLayout->setContentsMargins(0, 0, 0, 0);
+  deviceLayout->addLayout(form);
   auto *directions = new QGridLayout;
   const QStringList labels{"↑ 上", "← 左", "停止云台", "右 →", "↓ 下", "＋ 放大", "－ 缩小"};
   const int commands[] = {21, 23, 0, 24, 22, 11, 12};
@@ -59,6 +65,7 @@ CameraPanel::CameraPanel(const DesktopConfig &config, RosAdapter *ros, bool offl
   });
   for (int i = 0; i < labels.size(); ++i) {
     auto *b = new QPushButton(labels[i]); b->setObjectName("cameraDirection" + QString::number(commands[i]));
+    b->setProperty("consoleRole", "direction");
     b->setAutoRepeat(false); b->setToolTip("按住转动或变倍，松开停止"); directions->addWidget(b, rows[i], columns[i]);
     directions_ << b;
     const int command = commands[i];
@@ -76,12 +83,19 @@ CameraPanel::CameraPanel(const DesktopConfig &config, RosAdapter *ros, bool offl
   layout->addWidget(new QLabel("方向控制：按住转动，松开停止")); layout->addLayout(directions);
 
   poseStatus_ = new QLabel("先读取云台位置，再修改目标；移动云台需启用操作");
-  poseStatus_->setWordWrap(true); poseStatus_->setObjectName("cameraPoseStatus"); layout->addWidget(poseStatus_);
+  poseStatus_->setWordWrap(true); poseStatus_->setObjectName("cameraPoseStatus"); deviceLayout->addWidget(poseStatus_);
   auto *actions = new QGridLayout;
   read_ = new QPushButton("读取当前云台"); read_->setObjectName("cameraReadPtz"); actions->addWidget(read_, 0, 0);
   set_ = new QPushButton("设置云台与变倍"); set_->setObjectName("cameraSetPtz"); actions->addWidget(set_, 0, 1);
-  save_ = new QPushButton("保存当前画面"); save_->setObjectName("cameraSave"); actions->addWidget(save_, 1, 0, 1, 2);
-  layout->addLayout(actions);
+  deviceLayout->addLayout(actions);
+  save_ = new QPushButton("保存当前画面"); save_->setObjectName("cameraSave"); layout->addWidget(save_);
+  auto *detailsToggle = new QToolButton; detailsToggle->setObjectName("cameraDetailsToggle");
+  detailsToggle->setText("云台位置与设备参数"); detailsToggle->setCheckable(true);
+  detailsToggle->setArrowType(Qt::RightArrow); detailsToggle->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
+  layout->addWidget(detailsToggle); deviceDetails->hide(); layout->addWidget(deviceDetails);
+  connect(detailsToggle, &QToolButton::toggled, this, [deviceDetails, detailsToggle](bool yes) {
+    deviceDetails->setVisible(yes); detailsToggle->setArrowType(yes ? Qt::DownArrow : Qt::RightArrow);
+  });
   connect(start_, &QPushButton::clicked, this, &CameraPanel::startCamera);
   connect(connect_, &QPushButton::clicked, this, &CameraPanel::connectPreview);
   connect(stopNode_, &QPushButton::clicked, this, [this] { stopJog(); waitingForNode_ = false; pending_.clear(); process_->stop(); refresh(); });
@@ -174,6 +188,13 @@ CameraPanel::CameraPanel(const DesktopConfig &config, RosAdapter *ros, bool offl
 
 CameraPanel::~CameraPanel() { qApp->removeEventFilter(this); stopJog(); }
 void CameraPanel::setControlEnabled(bool enabled) { controlEnabled_ = enabled; if (!enabled) stopJog(); refresh(); }
+void CameraPanel::ensureCamera() {
+  if (offline_) return;
+  if (!ros_->cameraNodePresent()) startCamera();
+  else if (pending_.isEmpty() && (!lastFrame_.isValid() || lastFrame_.elapsed() >= 3000)) connectPreview();
+}
+void CameraPanel::stopInteraction() { stopJog(); }
+void CameraPanel::hideEvent(QHideEvent *event) { stopJog(); QWidget::hideEvent(event); }
 bool CameraPanel::eventFilter(QObject *object, QEvent *event) {
   if (event->type() == QEvent::WindowDeactivate || event->type() == QEvent::ApplicationDeactivate) stopJog();
   return QWidget::eventFilter(object, event);

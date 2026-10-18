@@ -18,10 +18,13 @@ public:
   CameraPanel(const DesktopConfig &config, RosAdapter *ros, bool offline, QWidget *parent = nullptr);
   ~CameraPanel() override;
   void setControlEnabled(bool enabled);
+  void stopInteraction();
+  void ensureCamera();
 signals:
   void message(const QString &text);
 protected:
   void resizeEvent(QResizeEvent *event) override;
+  void hideEvent(QHideEvent *event) override;
   bool eventFilter(QObject *object, QEvent *event) override;
 private:
   void refresh();

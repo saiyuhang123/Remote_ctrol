@@ -6,10 +6,11 @@
 #include <QMainWindow>
 #include <QVector>
 class CameraPanel; class LocalController; class BusinessClient; class ProcessManager; class MapSaver; class RvizHost; class MapEditorDialog; class PatrolClient; class PatrolPage;
+class VisionPanel;
 class QAction; class QCheckBox; class QComboBox; class QDoubleSpinBox; class QLabel; class QLineEdit; class QTimer;
-class QPlainTextEdit; class QProgressBar; class QPushButton; class QTableWidget; class QStackedWidget;
-class DashBoard;
-namespace ads { class CDockManager; }
+class QPlainTextEdit; class QProgressBar; class QPushButton; class QTableWidget; class QTabWidget; class QToolButton;
+class QBoxLayout;
+namespace ads { class CDockManager; class CDockWidget; }
 namespace Ui { class MainWindow; }
 
 class MainWindow : public QMainWindow {
@@ -22,10 +23,20 @@ public:
 protected:
   void closeEvent(QCloseEvent *event) override;
   void changeEvent(QEvent *event) override;
+  void resizeEvent(QResizeEvent *event) override;
+  bool eventFilter(QObject *object, QEvent *event) override;
 private:
   const Profile &profile() const;
   void setupUi();
+  void restoreConsoleLayout();
+  void saveConsoleLayout();
+  void resetConsoleLayout();
+  void sizeConsolePanes();
+  void adaptConsoleDensity();
+  void refreshStatusSummary();
+  void showOperationResult(const QString &operation, bool success, const QString &text);
   void applyProfile();
+  void refreshOdometrySource();
   void log(const QString &message);
   void updateControls();
   void syncPatrolState();
@@ -56,19 +67,32 @@ private:
   RobotSnapshot state_;
   QString lastNavigationEvent_;
   QComboBox *profiles_ = nullptr, *odom_ = nullptr;
+  QLabel *odomHint_ = nullptr;
+  QString fastlioNavigationOdomSource_ = "lio";
   QCheckBox *enableControl_ = nullptr, *manage_ = nullptr, *sensors_ = nullptr, *chassis_ = nullptr, *bridge_ = nullptr, *patrolInterlock_ = nullptr;
   QLineEdit *backendUrl_ = nullptr, *mapPrefix_ = nullptr, *navigationYaml_ = nullptr;
   QDoubleSpinBox *goalX_ = nullptr, *goalY_ = nullptr, *goalYaw_ = nullptr, *speed_ = nullptr, *turn_ = nullptr;
   CameraPanel *cameraPanel_ = nullptr;
+  VisionPanel *visionPanel_ = nullptr;
   QLabel *connection_ = nullptr, *pose_ = nullptr, *velocity_ = nullptr, *stopState_ = nullptr, *navState_ = nullptr;
+  QLabel *speedValue_ = nullptr, *localizationState_ = nullptr, *guardState_ = nullptr;
+  QLabel *modeBadge_ = nullptr, *navigationHint_ = nullptr, *sessionHint_ = nullptr, *messageSummary_ = nullptr;
   QLabel *power_ = nullptr, *picture_ = nullptr, *ocr_ = nullptr;
   QProgressBar *battery_ = nullptr;
-  QStackedWidget *speedStack_ = nullptr;
-  DashBoard *dashboard_ = nullptr;
   QPlainTextEdit *logs_ = nullptr;
   QTableWidget *points_ = nullptr;
   QPushButton *start_ = nullptr, *stop_ = nullptr, *save_ = nullptr, *take_ = nullptr, *unlock_ = nullptr;
   QPushButton *sendGoalButton_ = nullptr;
+  QPushButton *cancelButton_ = nullptr;
+  QTabWidget *controlTabs_ = nullptr, *rightTabs_ = nullptr;
+  QWidget *manualPage_ = nullptr, *statusDetails_ = nullptr;
+  QToolButton *logToggle_ = nullptr;
+  QBoxLayout *runtimeFooterLayout_ = nullptr;
+  ads::CDockWidget *controlDock_ = nullptr, *monitorDock_ = nullptr, *mapDock_ = nullptr;
+  QByteArray defaultDockState_;
+  bool layoutReady_ = false, compactLayout_ = false, rightBeforeCompact_ = true;
+  QString operationErrorKey_;
+  QImage capturedPreview_;
   MapEditorDialog *mapEditor_ = nullptr;
   PatrolClient *patrolClient_ = nullptr;
   PatrolPage *patrolPage_ = nullptr;

@@ -5,6 +5,7 @@
 #include <sensor_msgs/msg/image.hpp>
 #include <std_msgs/msg/string.hpp>
 #include <std_srvs/srv/trigger.hpp>
+#include <std_srvs/srv/set_bool.hpp>
 #include <atomic>
 #include <deque>
 #include <mutex>
@@ -72,6 +73,8 @@ private:
     void onFaceCapture(const FaceCaptureEvent& event);
     void processFaceCaptures();
     bool startAlarmReception();
+    void setFaceCapture(bool enabled, std_srvs::srv::SetBool::Response& response);
+    void publishFaceStatus();
 
     // ---- Service callbacks ----
     void onCapturePicture(
@@ -121,8 +124,11 @@ private:
     std::deque<FaceCaptureEvent> face_queue_;
     std::atomic<uint64_t>  face_dropped_{0};
     uint64_t               face_sequence_ = 0;
+    uint64_t               face_dropped_total_ = 0, face_saved_total_ = 0;
+    std::string            face_last_error_;
     std::array<uint32_t, 2> face_coordinate_size_{};
     rclcpp::TimerBase::SharedPtr face_timer_;
+    rclcpp::TimerBase::SharedPtr face_status_timer_;
     rclcpp::TimerBase::SharedPtr ptz_timer_;
     int active_ptz_command_ = 0, active_ptz_speed_ = 0;
     std::chrono::steady_clock::time_point ptz_deadline_;
@@ -136,6 +142,7 @@ private:
     rclcpp::Publisher<msg::FaceCapture>::SharedPtr            face_pub_;
     rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr      face_image_pub_;
     rclcpp::Publisher<std_msgs::msg::String>::SharedPtr       status_pub_;
+    rclcpp::Publisher<std_msgs::msg::String>::SharedPtr       face_status_pub_;
 
     // ---- 订阅器 ----
     rclcpp::Subscription<std_msgs::msg::String>::SharedPtr    cmd_sub_;
@@ -149,6 +156,7 @@ private:
     rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr        logout_srv_;
     rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr        start_stream_srv_;
     rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr        stop_stream_srv_;
+    rclcpp::Service<std_srvs::srv::SetBool>::SharedPtr        face_capture_srv_;
 };
 
 } // namespace hk_camera

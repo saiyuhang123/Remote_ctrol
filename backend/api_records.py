@@ -1,9 +1,10 @@
 """识别/抓拍记录 API"""
 import time
+import json
 from typing import Optional
 
 from fastapi import APIRouter
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from . import db
 
@@ -17,6 +18,8 @@ class DetectionIn(BaseModel):
     score: float = 0.0
     image: str = ''
     task_id: Optional[int] = None
+    event_id: Optional[str] = Field(default=None, min_length=1, max_length=128)
+    metadata: dict = Field(default_factory=dict)
 
 
 class CaptureIn(BaseModel):
@@ -28,9 +31,12 @@ class CaptureIn(BaseModel):
 
 @router.post('/detections')
 def add_detection(d: DetectionIn):
-    rid = db.execute(
-        'INSERT INTO detection_record(ts,event,label,score,image,task_id) VALUES(?,?,?,?,?,?)',
-        (d.ts or time.time(), d.event, d.label, d.score, d.image, d.task_id))
+    db.execute(
+        'INSERT OR IGNORE INTO detection_record(ts,event,label,score,image,task_id,event_id,metadata) VALUES(?,?,?,?,?,?,?,?)',
+        (d.ts or time.time(), d.event, d.label, d.score, d.image, d.task_id,
+         d.event_id, json.dumps(d.metadata, ensure_ascii=False, allow_nan=False)))
+    rid = (db.query('SELECT id FROM detection_record WHERE event_id=?', (d.event_id,))[0]['id']
+           if d.event_id else db.query('SELECT last_insert_rowid() AS id')[0]['id'])
     return {'ok': True, 'id': rid}
 
 

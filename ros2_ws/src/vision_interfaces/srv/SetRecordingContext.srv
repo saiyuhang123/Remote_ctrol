@@ -1,0 +1,6 @@
+# Optional human-confirmed map label. Empty map_id clears context.
+string map_id
+string map_revision
+---
+bool success
+string message

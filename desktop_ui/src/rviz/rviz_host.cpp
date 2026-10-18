@@ -4,6 +4,8 @@
 #include <QMenuBar>
 #include <QDockWidget>
 #include <QVBoxLayout>
+#include <QToolBar>
+#include <QStatusBar>
 #include <rviz_common/ros_integration/ros_node_abstraction.hpp>
 #include <rviz_common/tool.hpp>
 #include <rviz_common/tool_manager.hpp>
@@ -26,15 +28,22 @@ RvizHost::RvizHost(const QString &path, QWidget *parent) : QWidget(parent) {
   frame_->setWindowFlags(Qt::Widget);
   // RViz retains pointers to its menus for config loading; keep them alive.
   frame_->menuBar()->hide();
+  for (auto *toolbar : frame_->findChildren<QToolBar *>()) toolbar->hide();
+  frame_->statusBar()->hide();
   auto *layout = new QVBoxLayout(this); layout->setContentsMargins(0, 0, 0, 0); layout->addWidget(frame_);
   setPanelsVisible(false);
 }
 RvizHost::~RvizHost() { delete frame_; frame_ = nullptr; node_.reset(); }
 bool RvizHost::loadProfile(const QString &path) {
   if (!QFileInfo::exists(path)) return false;
+  // Embedded profiles are loaded explicitly by the host. Dock geometry and
+  // transient display edits must not prompt to overwrite packaged .rviz files.
+  frame_->setWindowModified(false);
   frame_->loadDisplayConfig(path);
   for (auto *dock : frame_->findChildren<QDockWidget *>()) frame_->resizeDocks({dock}, {210}, Qt::Horizontal);
   setPanelsVisible(panelsVisible_);
+  for (auto *toolbar : frame_->findChildren<QToolBar *>()) toolbar->hide();
+  frame_->statusBar()->hide();
   frame_->setWindowFlags(Qt::Widget); frame_->show(); return true;
 }
 void RvizHost::selectTool(const QString &id) {

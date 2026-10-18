@@ -15,6 +15,9 @@
 #include <QTemporaryDir>
 #include <QTest>
 #include <QTimer>
+#include <QSettings>
+#include <QTabWidget>
+#include "DockWidget.h"
 #include <geometry_msgs/msg/pose_with_covariance_stamped.hpp>
 #include <geometry_msgs/msg/pose_stamped.hpp>
 #include <geometry_msgs/msg/twist.hpp>
@@ -79,8 +82,12 @@ int redArrowPixels(const QImage &image) {
 
 class UiIntegrationTest : public QObject {
   Q_OBJECT
+  QTemporaryDir settingsDirectory_;
 private slots:
-  void initTestCase() { rclcpp::init(0, nullptr, rclcpp::InitOptions(), rclcpp::SignalHandlerOptions::None); }
+  void initTestCase() {
+    QSettings::setPath(QSettings::IniFormat, QSettings::UserScope, settingsDirectory_.path());
+    rclcpp::init(0, nullptr, rclcpp::InitOptions(), rclcpp::SignalHandlerOptions::None);
+  }
   void cleanupTestCase() { rclcpp::shutdown(); }
   void localNavigationInitialPoseAndRealPointCloudRendering() {
     using Navigate = nav2_msgs::action::NavigateToPose;
@@ -257,6 +264,8 @@ private slots:
     QCOMPARE(goals.size(), 0); QCOMPARE(commands.size(), 0); QCOMPARE(stops.size(), 0);
     QVERIFY(window.saveScreenshot("/tmp/robot_desktop_selected_goal.png"));
     arm->setChecked(true);
+    auto *workspace = window.findChild<QTabWidget *>("controlWorkspaceTabs"); QVERIFY(workspace);
+    workspace->setCurrentIndex(1);
     auto *x = window.findChild<QDoubleSpinBox *>("goalX"); auto *y = window.findChild<QDoubleSpinBox *>("goalY"); auto *yaw = window.findChild<QDoubleSpinBox *>("goalYaw");
     QVERIFY(x && y && yaw); x->setValue(2.); y->setValue(-1.); yaw->setValue(45.);
     QTest::mouseClick(relocate, Qt::LeftButton); QTRY_COMPARE(initialPoses.size(), 1);
@@ -277,18 +286,33 @@ private slots:
     localized = true; QTRY_VERIFY_WITH_TIMEOUT(pose->text().contains("x="), 5000);
     auto *take = window.findChild<QPushButton *>("takeManual"); auto *unlock = window.findChild<QPushButton *>("releaseStop"); auto *forward = window.findChild<QPushButton *>("manualDirection1");
     QVERIFY(take && unlock && forward); QTRY_VERIFY(unlock->isEnabled());
+    workspace->setCurrentIndex(2);
     QTest::mouseClick(unlock, Qt::LeftButton); QTRY_VERIFY(!stops.empty() && !stops.back());
+    workspace->setCurrentIndex(1);
     QTest::qWait(250); QTest::mouseClick(send, Qt::LeftButton); QTRY_COMPARE(goals.size(), 1);
     QTRY_COMPARE(previews.size(), 2);
     QCOMPARE(previews.back().pose.position.x, 2.);
     QCOMPARE(goals.back().pose.header.frame_id, std::string("map")); QCOMPARE(goals.back().pose.pose.position.x, 2.);
     QVERIFY(std::abs(goals.back().pose.pose.orientation.z - std::sin(M_PI / 8.)) < 1e-9);
+    workspace->setCurrentIndex(2);
     QTest::mouseClick(take, Qt::LeftButton); QTRY_VERIFY(cancellations > 0);
     QTRY_VERIFY(take->text() == "手动已接管" && unlock->isEnabled());
     QVERIFY(!forward->isEnabled()); QTest::mouseClick(unlock, Qt::LeftButton); QTRY_VERIFY(forward->isEnabled());
     QTest::mousePress(forward, Qt::LeftButton); QTRY_VERIFY(!commands.empty() && commands.back().linear.x > 0.);
     QTest::mouseRelease(forward, Qt::LeftButton); QTRY_COMPARE(commands.back().linear.x, 0.);
     const int count = commands.size(); QTest::qWait(180); QCOMPARE(commands.size(), count);
+    // Moving controls into tabs must not leave the held command running.
+    QTest::mousePress(forward, Qt::LeftButton); QTRY_VERIFY(commands.back().linear.x > 0.);
+    workspace->setCurrentIndex(1); QTRY_COMPARE(commands.back().linear.x, 0.);
+    QTest::mouseRelease(forward, Qt::LeftButton);
+    const auto afterTab = commands.size(); QTest::qWait(180); QCOMPARE(commands.size(), afterTab);
+    workspace->setCurrentIndex(2);
+    QTest::mousePress(forward, Qt::LeftButton); QTRY_VERIFY(commands.back().linear.x > 0.);
+    auto *controlDock = window.findChild<ads::CDockWidget *>("consoleControlDock"); QVERIFY(controlDock);
+    controlDock->toggleView(false); QTRY_COMPARE(commands.back().linear.x, 0.);
+    QTest::mouseRelease(forward, Qt::LeftButton);
+    const auto afterHide = commands.size(); QTest::qWait(180); QCOMPARE(commands.size(), afterHide);
+    controlDock->toggleView(true);
     arm->setChecked(false);
     geometry_msgs::msg::PoseWithCovarianceStamped ignored; ignored.header.frame_id = "map"; ignored.pose.pose.orientation.w = 1.; initial->publish(ignored);
     QTest::qWait(200); QCOMPARE(initialPoses.size(), 2);

@@ -6,6 +6,8 @@
 #include <QPushButton>
 #include <QSignalSpy>
 #include <QTest>
+#include <QToolButton>
+#include <QTabWidget>
 #include <rclcpp/rclcpp.hpp>
 #include <sensor_msgs/msg/image.hpp>
 #include <std_srvs/srv/trigger.hpp>
@@ -80,6 +82,7 @@ private slots:
   void previewAndPtzAreIndependentOfNavigation() {
     CameraFixture fixture; RosAdapter ros(config()); CameraPanel panel(config(), &ros, false);
     panel.resize(430, 680); panel.show();
+    QTest::mouseClick(panel.findChild<QToolButton *>("cameraDetailsToggle"), Qt::LeftButton);
     auto button = [&](const char *name) { return panel.findChild<QPushButton *>(name); };
     QTRY_VERIFY_WITH_TIMEOUT(button("cameraConnect")->isEnabled(), 5000);
     QVERIFY(!button("cameraStart")->isEnabled()); QVERIFY(!button("cameraStopNode")->isEnabled());
@@ -133,6 +136,7 @@ private slots:
   void zoomOnlyDeviceDoesNotOfferAbsolutePanTilt() {
     CameraFixture fixture(false); RosAdapter ros(config()); CameraPanel panel(config(), &ros, false);
     panel.setControlEnabled(true); panel.show();
+    QTest::mouseClick(panel.findChild<QToolButton *>("cameraDetailsToggle"), Qt::LeftButton);
     auto *read = panel.findChild<QPushButton *>("cameraReadPtz");
     QTRY_VERIFY_WITH_TIMEOUT(read->isEnabled(), 5000); QTest::mouseClick(read, Qt::LeftButton);
     QTRY_VERIFY(!panel.findChild<QDoubleSpinBox *>("cameraPan")->isEnabled());
@@ -148,10 +152,27 @@ private slots:
       QVERIFY(!panel.findChild<QPushButton *>(name)->isEnabled());
     QCOMPARE(fixture.login.load(), 0); QCOMPARE(fixture.moves.load(), 0);
   }
+  void hiddenCameraPageStopsHeldJogAndDoesNotResume() {
+    CameraFixture fixture; RosAdapter ros(config()); QTabWidget workspace;
+    CameraPanel panel(config(), &ros, false); workspace.addTab(&panel, "相机"); workspace.addTab(new QWidget, "其他");
+    workspace.resize(430, 750); workspace.show(); panel.setControlEnabled(true);
+    auto *connect = panel.findChild<QPushButton *>("cameraConnect");
+    QTRY_VERIFY(connect->isEnabled()); QTest::mouseClick(connect, Qt::LeftButton);
+    auto *left = panel.findChild<QPushButton *>("cameraDirection23"); QTRY_VERIFY(left->isEnabled());
+    QTest::mousePress(left, Qt::LeftButton); QTRY_COMPARE(fixture.direction.load(), 23);
+    workspace.setCurrentIndex(1); QTRY_COMPARE(fixture.direction.load(), 0);
+    QTest::mouseRelease(left, Qt::LeftButton);
+    const int stopped = fixture.jogs.load(); QTest::qWait(350); QCOMPARE(fixture.jogs.load(), stopped);
+    workspace.setCurrentIndex(0); QTest::qWait(200); QCOMPARE(fixture.direction.load(), 0);
+    QTest::mousePress(left, Qt::LeftButton); QTRY_COMPARE(fixture.direction.load(), 23);
+    workspace.hide(); QTRY_COMPARE(fixture.direction.load(), 0);
+    QTest::mouseRelease(left, Qt::LeftButton);
+  }
   void liveCameraPreview() {
     if (!qEnvironmentVariableIsSet("DESKTOP_CAMERA_LIVE_TEST")) QSKIP("Explicit opt-in required for physical camera read-only preview");
     RosAdapter ros(config()); CameraPanel panel(config(), &ros, false);
     panel.resize(720, 850); panel.show();
+    QTest::mouseClick(panel.findChild<QToolButton *>("cameraDetailsToggle"), Qt::LeftButton);
     QSignalSpy frames(&ros, &RosAdapter::image), poses(&ros, &RosAdapter::cameraPose);
     auto *start = panel.findChild<QPushButton *>("cameraStart");
     auto *connect = panel.findChild<QPushButton *>("cameraConnect");

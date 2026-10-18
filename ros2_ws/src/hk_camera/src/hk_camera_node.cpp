@@ -6,6 +6,8 @@
 #include <opencv2/opencv.hpp>
 #include <stdexcept>
 #include <QDir>
+#include <QJsonDocument>
+#include <QJsonObject>
 
 namespace hk_camera
 {
@@ -25,6 +27,7 @@ HKCameraNode::HKCameraNode(const std::string& name)
     connectCameraSignals();
     face_timer_ = create_wall_timer(std::chrono::milliseconds(100),
                                   [this] { processFaceCaptures(); });
+    face_status_timer_ = create_wall_timer(std::chrono::seconds(1), [this] { publishFaceStatus(); });
 
     RCLCPP_INFO(get_logger(), "HKCameraNode initialized (SDK %s)",
                 camera_->getSDKVersion().c_str());
@@ -48,9 +51,14 @@ HKCameraNode::~HKCameraNode()
     ptz_timer_->cancel();
     accept_faces_ = false;
     face_timer_->cancel();
+    face_status_timer_->cancel();
     for (const auto& connection : camera_connections_) QObject::disconnect(connection);
     decoder_->stop();
     if (alarm_handle_ >= 0) camera_->closeAlarmChan(alarm_handle_);
+    while (true) {
+        { std::lock_guard<std::mutex> guard(face_mutex_); if (face_queue_.empty()) break; }
+        processFaceCaptures();
+    }
     if (user_id_ >= 0)      camera_->logout(user_id_);
     camera_->cleanup();
     delete decoder_;
@@ -99,8 +107,14 @@ void HKCameraNode::loadParameters()
 rcl_interfaces::msg::SetParametersResult HKCameraNode::onParamChange(
     const std::vector<rclcpp::Parameter>& params)
 {
-    (void)params;
     rcl_interfaces::msg::SetParametersResult result;
+    for (const auto& parameter : params) {
+        if (parameter.get_name() == "enable_face_capture") {
+            result.successful = false;
+            result.reason = "Use /hk_camera/set_face_capture for runtime control; parameter is the startup default";
+            return result;
+        }
+    }
     result.successful = true;
     result.reason = "Most params require re-login to take effect";
     // 注意: IP/端口/用户名等变更需要重新登录
@@ -119,6 +133,7 @@ void HKCameraNode::setupPublishers()
         "/hk_camera/alarm", 10);
     status_pub_ = create_publisher<std_msgs::msg::String>(
         "/hk_camera/status", 10);
+    face_status_pub_ = create_publisher<std_msgs::msg::String>("/hk_camera/face_status", 5);
     face_pub_ = create_publisher<msg::FaceCapture>(
         "/hk_camera/face_capture", rclcpp::QoS(10).reliable().transient_local());
     face_image_pub_ = create_publisher<sensor_msgs::msg::Image>(
@@ -136,6 +151,9 @@ void HKCameraNode::setupSubscribers()
 
 void HKCameraNode::setupServices()
 {
+    face_capture_srv_ = create_service<std_srvs::srv::SetBool>("/hk_camera/set_face_capture",
+        [this](std_srvs::srv::SetBool::Request::SharedPtr req,
+               std_srvs::srv::SetBool::Response::SharedPtr res) { setFaceCapture(req->data, *res); });
     capture_srv_ = create_service<srv::CapturePicture>(
         "/hk_camera/capture",
         [this](const srv::CapturePicture::Request::SharedPtr  req,
@@ -306,6 +324,7 @@ bool HKCameraNode::startAlarmReception()
 void HKCameraNode::processFaceCaptures()
 {
     const auto dropped = face_dropped_.exchange(0);
+    face_dropped_total_ += dropped;
     if (dropped) RCLCPP_WARN(get_logger(), "Face queue full: dropped %lu events", dropped);
     FaceCaptureEvent event;
     {
@@ -314,7 +333,8 @@ void HKCameraNode::processFaceCaptures()
         event = std::move(face_queue_.front());
         face_queue_.pop_front();
     }
-    if (!accept_faces_ || user_id_.load() < 0 ||
+    // Stopping reception must not discard events already accepted into the queue.
+    if (user_id_.load() < 0 ||
         (event.user_id >= 0 && event.user_id != user_id_.load())) return;
     if (event.channel == 0) event.channel = channel_;
     event.coordinate_width = face_coordinate_size_[0];
@@ -347,6 +367,7 @@ void HKCameraNode::processFaceCaptures()
         message.annotated_path = files.annotated_path;
         message.metadata_path = files.metadata_path;
         face_pub_->publish(message);
+        ++face_saved_total_;
         if (!files.annotated.empty())
             face_image_pub_->publish(*cv_bridge::CvImage(message.header, "bgr8", files.annotated).toImageMsg());
         for (const auto& warning : files.warnings)
@@ -356,6 +377,7 @@ void HKCameraNode::processFaceCaptures()
     }
     catch (const std::exception& error)
     {
+        face_last_error_ = error.what();
         RCLCPP_ERROR(get_logger(), "Face %u could not be saved: %s", event.face_id, error.what());
     }
 }
@@ -363,6 +385,46 @@ void HKCameraNode::processFaceCaptures()
 // ============================================================
 // Service 实现
 // ============================================================
+
+void HKCameraNode::setFaceCapture(bool enabled, std_srvs::srv::SetBool::Response& response)
+{
+    if (enabled) {
+        if (user_id_ < 0) { response.message = "Camera not logged in; connect camera first"; return; }
+        const bool before = enable_face_capture_;
+        enable_face_capture_ = true;
+        response.success = startAlarmReception();
+        if (!response.success) enable_face_capture_ = before;
+        response.message = response.success ? "SDK face reception enabled; device facesnap rules must be configured"
+                                            : "SDK face alarm setup failed";
+    } else {
+        accept_faces_ = false;
+        if (alarm_handle_ >= 0 && !camera_->closeAlarmChan(alarm_handle_)) {
+            accept_faces_ = true;
+            response.message = "SDK face alarm close failed; reception remains enabled";
+            return;
+        }
+        alarm_handle_ = -1;
+        enable_face_capture_ = false;
+        response.success = true;
+        response.message = "New face reception stopped; accepted events will finish saving";
+    }
+    face_last_error_ = response.success ? "" : response.message;
+    publishFaceStatus();
+}
+
+void HKCameraNode::publishFaceStatus()
+{
+    size_t queued;
+    { std::lock_guard<std::mutex> guard(face_mutex_); queued = face_queue_.size(); }
+    QJsonObject value{{"component", "hikvision_face"}, {"logged_in", user_id_.load() >= 0},
+        {"enabled", accept_faces_.load()}, {"queue", static_cast<double>(queued)},
+        {"saved", static_cast<double>(face_saved_total_)}, {"dropped", static_cast<double>(face_dropped_total_)},
+        {"last_error", QString::fromStdString(face_last_error_)},
+        {"face_dir", QString::fromStdString(face_capture_dir_)}};
+    std_msgs::msg::String message;
+    message.data = QJsonDocument(value).toJson(QJsonDocument::Compact).toStdString();
+    face_status_pub_->publish(message);
+}
 
 void HKCameraNode::onLogin(
     const std_srvs::srv::Trigger::Request::SharedPtr,
@@ -403,9 +465,9 @@ void HKCameraNode::onLogout(
         if (alarm_handle_ >= 0) camera_->closeAlarmChan(alarm_handle_);
         alarm_handle_ = -1;
         decoder_->stop();
-        {
-            std::lock_guard<std::mutex> guard(face_mutex_);
-            face_queue_.clear();
+        while (true) {
+            { std::lock_guard<std::mutex> guard(face_mutex_); if (face_queue_.empty()) break; }
+            processFaceCaptures();
         }
         camera_->logout(user_id_);
         user_id_ = -1;

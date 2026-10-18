@@ -1,0 +1,11 @@
+# Empty event_id queries a page; nonempty event_id returns one detail.
+string event_id
+string event_type
+string cursor
+uint32 limit
+---
+bool success
+string message
+string events_json
+string next_cursor
+uint64 total

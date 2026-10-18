@@ -1,318 +1,221 @@
-#!/usr/bin/env python3
-"""图像识别节点（纯 CPU）：行人/人脸/车牌。
-
-链路：视频源(默认 MediaMTX RTSP) -> YOLOv8n(OpenVINO) 检测+ByteTrack 跟踪
-      -> 行人分支(人脸质量门->SFace 比对) / 车辆分支(HyperLPR3 车牌)
-      -> 按轨迹聚合一次性上报 + 时空冷却去重
-      -> /detection_events 话题(JSON) + 抓拍存档 web/captures/
-
-设计要点（对比 test/ 原型的修复）：
-- track 每帧都跑，只有重分支抽帧（解决 ID 爆炸）
-- 按轨迹聚合：收集期内攒最佳人脸匹配，一次性上报（不再 94 条 Stranger）
-- 时空冷却：同区域同类别事件不重复上报
-"""
+"""Standalone person/plate detection; human-face work belongs to Hikvision."""
 import json
 import os
-import queue
+from pathlib import Path
 import threading
 import time
-from pathlib import Path
-
+import uuid
+import fcntl
 import cv2
-import numpy as np
 import rclpy
-from ament_index_python.packages import get_package_share_directory
 from rclpy.node import Node
+from rclpy.qos import qos_profile_sensor_data
+from rcl_interfaces.msg import SetParametersResult
+from sensor_msgs.msg import Image
 from std_msgs.msg import String
-
-# CPU 线程限流（i7 6核12线程，给其他任务留余量）
-os.environ.setdefault('OMP_NUM_THREADS', '4')
-os.environ.setdefault('OPENBLAS_NUM_THREADS', '4')
-os.environ.setdefault('MKL_NUM_THREADS', '4')
-
-import torch
-torch.set_num_threads(4)
-cv2.setNumThreads(4)
-
-from ultralytics import YOLO
-import hyperlpr3 as pr3
-
-from robot_common.reporter import HttpReporter
-from robot_common.paths import PROJECT_ROOT
-
-YOLO_CLASSES = [0, 2, 5, 7]          # person, car, bus, truck
-FACE_SCORE_REPORT = 0.5              # 达到即上报姓名
-FACE_COLLECT_SEC = 2.5               # 人脸收集期（超时按现有最佳结果上报）
-PERSON_MIN_H = 90                    # 人框最小高度(px)，太小不具备识别条件
-CAR_MIN_W = 90
-PLATE_MIN_CONF = 0.7
-FACE_MIN_PX = 50                     # 人脸最小尺寸(px)
-FACE_MIN_SCORE = 0.7                 # YuNet 置信度门
-SFACE_THRESHOLD = 0.363              # SFace 余弦相似度阈值
-COOLDOWN_SAME_IDENTITY = 1800.0      # 同一人/同一车牌 30 分钟内不重复上报
-COOLDOWN_ZONE = 600.0                # 画面同区域"未识别人员"10 分钟冷却
+from ament_index_python.packages import get_package_share_directory
+from .detection_pipeline import Pipeline, YoloCpu
 
 
 class DetectorNode(Node):
-    def __init__(self):
-        super().__init__('detector_node')
-        self.declare_parameter('video_source', 'rtsp://127.0.0.1:8554/cam')
-        self.declare_parameter('conf_threshold', 0.45)
-        self.declare_parameter('infer_width', 640)
-        self.declare_parameter('infer_height', 480)
-        self.declare_parameter(
-            'captures_dir',
-            str(PROJECT_ROOT / 'web' / 'captures'))
-        self.declare_parameter(
-            'face_db_dir',
-            str(PROJECT_ROOT / 'face_db'))
-        self.declare_parameter('backend_url', 'http://127.0.0.1:8888')
-        # 识别结果入业务库（离线自动缓存补传）
-        self._reporter = HttpReporter(
-            self.get_parameter('backend_url').value,
-            cache_db=str(PROJECT_ROOT / 'data' / 'detector_cache.db'))
-
-        self._src = self.get_parameter('video_source').value
-        self._conf = float(self.get_parameter('conf_threshold').value)
-        self._iw = int(self.get_parameter('infer_width').value)
-        self._ih = int(self.get_parameter('infer_height').value)
-        self._cap_dir = Path(self.get_parameter('captures_dir').value)
-        self._cap_dir.mkdir(parents=True, exist_ok=True)
-
-        share = get_package_share_directory('detector_node')
-        models = Path(share) / 'models'
-        face_db = self.get_parameter('face_db_dir').value or str(Path(share) / 'face_db')
-
-        # 模型：YOLOv8n(OpenVINO 优先) + YuNet + SFace + HyperLPR3
-        ov_dir = models / 'yolov8n_openvino_model'
-        self._yolo = YOLO(str(ov_dir if ov_dir.exists() else models / 'yolov8n.pt'),
-                          task='detect')
-        self._tracker_yaml = str(Path(share) / 'config' / 'bytetrack_custom.yaml')
-
-        self._face_det = cv2.FaceDetectorYN.create(
-            str(models / 'face_detection_yunet.onnx'), '', (320, 320),
-            score_threshold=FACE_MIN_SCORE)
-        self._face_rec = cv2.FaceRecognizerSF.create(
-            str(models / 'face_recognition_sface.onnx'), '')
-        self._face_db = self._load_face_db(face_db)
-        self._plate = pr3.LicensePlateCatcher()
-
-        self._tracks = {}        # track_id -> dict(state)
-        self._recent = {}        # 去重键 -> 上次上报时间
-        self._events = queue.Queue(maxsize=100)   # 待发布事件
-        self._pub = self.create_publisher(String, '/detection_events', 10)
-        self.create_timer(0.1, self._flush_events)  # 10Hz 发布
-
-        self.get_logger().info(
-            f'识别节点就绪：视频源={self._src}，人脸库={list(self._face_db) or "空"}')
-        threading.Thread(target=self._capture_loop, daemon=True).start()
-
-    # ---------------- 人脸底库 ----------------
-    def _load_face_db(self, db_dir):
-        db = {}
-        d = Path(db_dir)
-        d.mkdir(parents=True, exist_ok=True)
-        for f in d.iterdir():
-            if f.suffix.lower() not in ('.jpg', '.png', '.jpeg'):
-                continue
-            img = cv2.imread(str(f))
-            if img is None:
-                continue
-            self._face_det.setInputSize((img.shape[1], img.shape[0]))
-            _, faces = self._face_det.detect(img)
-            if faces is not None and len(faces):
-                db[f.stem] = self._face_rec.feature(
-                    self._face_rec.alignCrop(img, faces[0]))
-        return db
-
-    def _recognize_face(self, crop):
-        """满足质量门才提特征比对；返回 (name, score) 或 None"""
-        h, w = crop.shape[:2]
-        self._face_det.setInputSize((w, h))
-        _, faces = self._face_det.detect(crop)
-        if faces is None or not len(faces):
-            return None
-        f = faces[0]
-        fw, fh = f[2], f[3]
-        if fw < FACE_MIN_PX or fh < FACE_MIN_PX:
-            return None                      # 脸太小，不具备识别条件
-        feat = self._face_rec.feature(self._face_rec.alignCrop(crop, f))
-        best, score = None, 0.0
-        for name, ref in self._face_db.items():
-            s = self._face_rec.match(feat, ref, cv2.FaceRecognizerSF_FR_COSINE)
-            if s > score:
-                best, score = name, float(s)
-        if best and score >= SFACE_THRESHOLD:
-            return best, score
-        return ('未登记人员', score) if self._face_db else None
-
-    # ---------------- 上报（去重 + 存档 + 入队） ----------------
-    def _dedup_ok(self, key, cooldown):
-        now = time.time()
-        if key in self._recent and now - self._recent[key] < cooldown:
-            return False
-        self._recent[key] = now
-        # 顺带清理过期键
-        for k in [k for k, t in self._recent.items() if now - t > 7200]:
-            del self._recent[k]
-        return True
-
-    def _report(self, track, event, label, score, crop, frame_idx):
-        self._save_and_emit(track, event, label, score, crop, frame_idx)
-        track['reported'] = True
-
-    def _save_and_emit(self, track, event, label, score, crop, frame_idx):
-        day = time.strftime('%Y-%m-%d')
-        out_dir = self._cap_dir / day
-        out_dir.mkdir(parents=True, exist_ok=True)
-        fname = f"{int(time.time())}_{event}_{label}_t{track['tid']}.jpg"
-        path = out_dir / fname
-        cv2.imwrite(str(path), crop)
-        payload = {
-            'type': 'detection', 'event': event, 'label': label,
-            'score': round(float(score), 3), 'ts': int(time.time()),
-            'image': f'captures/{day}/{fname}',
-        }
-        # 入业务库（M2），失败自动离线缓存补传
-        self._reporter.post('/api/records/detections', {
-            'ts': payload['ts'], 'event': event, 'label': label,
-            'score': payload['score'], 'image': payload['image'],
-        })
+    def __init__(self, **kwargs):
+        super().__init__('detector_node', **kwargs)
+        project = Path(os.environ.get('ROBOT_PROJECT_ROOT', Path.home() / 'Remote_ctrol'))
+        defaults = dict(input_mode='ros', image_topic='/hk_camera/image_raw',
+                        video_source='rtsp://127.0.0.1:8554/cam', enable_person=True,
+                        enable_plate=True, max_inference_hz=4., cpu_threads=2,
+                        staging_dir=str(project/'data/vision/staging'), conf_threshold=.45,
+                        track_ttl_sec=2., plate_confirmations=2)
+        for key, value in defaults.items():
+            self.declare_parameter(key, value)
+        if self.get_parameter('input_mode').value not in ('ros', 'video'):
+            raise ValueError('input_mode must be ros or video')
+        if not .1 <= self.get_parameter('max_inference_hz').value <= 30.:
+            raise ValueError('max_inference_hz must be 0.1..30')
+        if not 1 <= self.get_parameter('cpu_threads').value <= 16:
+            raise ValueError('cpu_threads must be 1..16')
+        if not 1 <= self.get_parameter('plate_confirmations').value <= 10 or self.get_parameter('track_ttl_sec').value <= 0:
+            raise ValueError('plate_confirmations must be 1..10 and track_ttl_sec must be positive')
+        cv2.setNumThreads(self.get_parameter('cpu_threads').value)
+        self.lock = threading.Lock()
+        self.latest = None
+        self.stop_event = threading.Event()
+        self.instance = str(uuid.uuid4())
+        self.staging = Path(self.get_parameter('staging_dir').value).expanduser().resolve()
+        self.staging.mkdir(parents=True, exist_ok=True)
+        self.ownership = (self.staging/'detector.lock').open('a')
         try:
-            self._events.put_nowait(payload)
-        except queue.Full:
-            self.get_logger().warn('事件队列已满，丢弃')
-        self.get_logger().info(f'上报: {event} {label} score={score:.2f}')
+            fcntl.flock(self.ownership, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            raise RuntimeError('another detector owns this staging directory') from None
+        self.pipeline = None
+        self.state = dict(component='detector', ready=False, frames=0, events=0,
+                          last_error='', input_ready=False, person=False, plate=False)
+        self.outgoing = []
+        self.pub = self.create_publisher(String, '/vision/raw_detections', 100)
+        self.status_pub = self.create_publisher(String, '/vision/detector_status', 5)
+        self.subscription = None
+        self.last_frame_mono = 0.
+        if self.get_parameter('input_mode').value == 'ros':
+            self.subscription = self.create_subscription(Image, self.get_parameter('image_topic').value,
+                                                          self.on_image, qos_profile_sensor_data)
+        self.add_on_set_parameters_callback(self.parameters_changed)
+        self.create_timer(.1, self.publish_events)
+        self.create_timer(1., self.publish_status)
+        self.worker = threading.Thread(target=self.run, daemon=True)
+        self.worker.start()
 
-    def _flush_events(self):
-        while True:
+    def parameters_changed(self, parameters):
+        for parameter in parameters:
+            if parameter.name in ('enable_person', 'enable_plate') and not isinstance(parameter.value, bool):
+                return SetParametersResult(successful=False, reason='feature switches must be bool')
+            if parameter.name == 'max_inference_hz' and (not isinstance(parameter.value, (float, int)) or not .1 <= parameter.value <= 30):
+                return SetParametersResult(successful=False, reason='inference rate must be 0.1..30')
+            if parameter.name not in ('enable_person', 'enable_plate', 'max_inference_hz'):
+                return SetParametersResult(successful=False, reason='restart detector to change input/model configuration')
+        return SetParametersResult(successful=True)
+
+    def on_image(self, message):
+        with self.lock:
+            self.latest = message
+            self.last_frame_mono = time.monotonic()
+
+    def publish_status(self):
+        with self.lock:
+            state = dict(self.state)
+        state['input_ready'] = time.monotonic()-self.last_frame_mono < 3.
+        self.status_pub.publish(String(data=json.dumps(state, ensure_ascii=False)))
+
+    def publish_events(self):
+        with self.lock:
+            events, self.outgoing = self.outgoing, []
+        for event in events:
+            self.pub.publish(String(data=json.dumps(event, ensure_ascii=False)))
+
+    def load_pipeline(self, need_plate):
+        if self.pipeline is None:
+            share = Path(get_package_share_directory('detector_node'))
+            self.pipeline = Pipeline(YoloCpu(share/'models/yolov8n_openvino_model/yolov8n.xml',
+                                            self.get_parameter('cpu_threads').value,
+                                            self.get_parameter('conf_threshold').value),
+                                     track_ttl=self.get_parameter('track_ttl_sec').value,
+                                     plate_confirmations=self.get_parameter('plate_confirmations').value)
+        if need_plate and self.pipeline.plate is None:
             try:
-                payload = self._events.get_nowait()
-            except queue.Empty:
-                return
-            self._pub.publish(String(data=json.dumps(payload, ensure_ascii=False)))
+                import hyperlpr3
+                self.pipeline.plate = hyperlpr3.LicensePlateCatcher()
+            except Exception as error:
+                with self.lock:
+                    self.state['last_error'] = 'plate model: ' + str(error)
+        return self.pipeline
 
-    # ---------------- 主循环 ----------------
-    def _capture_loop(self):
-        cap = cv2.VideoCapture(self._src)
-        while not cap.isOpened():
-            self.get_logger().warn(f'视频源 {self._src} 未就绪，3s 后重试…')
-            time.sleep(3)
-            cap = cv2.VideoCapture(self._src)
+    def save_events(self, events, stamp, time_basis):
+        for result in events:
+            image = result.pop('image')
+            key = str(uuid.uuid4())
+            path = self.staging / (key + '.jpg')
+            temp = self.staging / (key + '.tmp.jpg')
+            if not cv2.imwrite(str(temp), image):
+                raise RuntimeError('cannot write detection image')
+            os.replace(temp, path)
+            result.update(source='host_yolo_plate', source_instance_id=self.instance,
+                          source_event_key=self.instance+'/'+key, event_time_ns=stamp,
+                          received_time_ns=time.time_ns(), time_basis=time_basis, image_path=str(path))
+            metadata = self.staging / (key + '.json')
+            temporary = self.staging / (key + '.json.tmp')
+            temporary.write_text(json.dumps(result, ensure_ascii=False, allow_nan=False))
+            os.replace(temporary, metadata)
+            result['metadata_path'] = str(metadata)
+            with self.lock:
+                self.outgoing.append(result)
+                self.state['events'] += 1
 
-        frame_idx = 0
-        while rclpy.ok():
-            ok, frame = cap.read()
-            if not ok:
-                # 文件源循环播放；流源重连
-                if isinstance(self._src, str) and os.path.exists(self._src):
-                    cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
-                else:
-                    time.sleep(0.5)
-                    cap = cv2.VideoCapture(self._src)
-                continue
-            frame_idx += 1
-            try:
-                self._process_frame(frame, frame_idx)
-            except Exception as e:
-                self.get_logger().error(f'帧处理异常: {e}')
-
-    def _process_frame(self, frame, frame_idx):
-        h0, w0 = frame.shape[:2]
-        infer = cv2.resize(frame, (self._iw, self._ih))
-        sx, sy = w0 / self._iw, h0 / self._ih
-        now = time.time()
-
-        results = self._yolo.track(
-            source=infer, classes=YOLO_CLASSES, conf=self._conf,
-            device='cpu', persist=True, tracker=self._tracker_yaml, verbose=False)
-
-        if not results or results[0].boxes is None or results[0].boxes.id is None:
-            self._expire_tracks(now)
-            return
-
-        boxes = results[0].boxes.xyxy.cpu().numpy()
-        clss = results[0].boxes.cls.cpu().numpy().astype(int)
-        tids = results[0].boxes.id.cpu().numpy().astype(int)
-
-        for box, cls_id, tid in zip(boxes, clss, tids):
-            x1 = max(0, int(box[0] * sx)); y1 = max(0, int(box[1] * sy))
-            x2 = min(w0, int(box[2] * sx)); y2 = min(h0, int(box[3] * sy))
-            tr = self._tracks.setdefault(
-                tid, {'tid': tid, 'reported': False, 'first_seen': now,
-                      'last_seen': now, 'best_face': None, 'cls': cls_id})
-            tr['last_seen'] = now
-            if tr['reported']:
-                continue
-
-            # 画面区域键（去重用）：目标中心按 200px 分桶
-            zone_key = (int((x1 + x2) / 400), int((y1 + y2) / 400))
-
-            if cls_id == 0:      # 行人
-                self._person_branch(tr, frame[y1:y2, x1:x2], (x2 - x1, y2 - y1),
-                                    now, frame_idx, zone_key)
-            elif cls_id in (2, 5, 7):   # 车辆
-                self._vehicle_branch(tr, frame[y1:y2, x1:x2], (x2 - x1, y2 - y1),
-                                     frame_idx, zone_key)
-
-        self._expire_tracks(now)
-
-    def _person_branch(self, tr, crop, wh, now, frame_idx, zone_key):
-        if wh[1] < PERSON_MIN_H or crop.size == 0:
-            return
-        # 收集期：质量门通过才识别，保留最佳结果
-        face = self._recognize_face(crop)
-        if face is not None:
-            name, score = face
-            if tr['best_face'] is None or score > tr['best_face'][1]:
-                tr['best_face'] = (name, score)
-            if score >= FACE_SCORE_REPORT and name != '未登记人员':
-                if self._dedup_ok(('face', name), COOLDOWN_SAME_IDENTITY):
-                    self._report(tr, 'person_face', name, score, crop, frame_idx)
-                return
-        # 收集期结束：按现有最佳结果一次性上报
-        if now - tr['first_seen'] >= FACE_COLLECT_SEC:
-            if tr['best_face'] is not None:
-                name, score = tr['best_face']
-                key = (('face', name) if name != '未登记人员'
-                       else ('stranger_zone',) + zone_key)
-                if self._dedup_ok(key, COOLDOWN_SAME_IDENTITY if name != '未登记人员'
-                                  else COOLDOWN_ZONE):
-                    self._report(tr, 'person_face', name, score, crop, frame_idx)
-            else:
-                # 没看到脸：报普通行人告警（按画面区域冷却去重）
-                if self._dedup_ok(('person_zone',) + zone_key, COOLDOWN_ZONE):
-                    self._report(tr, 'person', '行人', 0.0, crop, frame_idx)
-
-    def _vehicle_branch(self, tr, crop, wh, frame_idx, zone_key):
-        if wh[0] < CAR_MIN_W or crop.size == 0:
-            return
+    def run(self):
+        cap = None
+        video = self.get_parameter('input_mode').value == 'video'
+        source = self.get_parameter('video_source').value
+        next_frame = time.monotonic()
         try:
-            plates = self._plate(crop)
-        except Exception:
-            return
-        if not plates:
-            return
-        plate_no, conf, color = plates[0][0], plates[0][1], plates[0][2]
-        if conf < PLATE_MIN_CONF:
-            return
-        if self._dedup_ok(('plate', plate_no), COOLDOWN_SAME_IDENTITY):
-            self._report(tr, 'vehicle_plate', f'{plate_no}({color})', conf,
-                         crop, frame_idx)
+            while not self.stop_event.is_set():
+                person, plate = (self.get_parameter(key).value for key in ('enable_person', 'enable_plate'))
+                if not person and not plate:
+                    self.pipeline = None
+                    with self.lock:
+                        self.state.update(ready=True, person=False, plate=False)
+                        self.latest = None
+                    self.stop_event.wait(.1)
+                    continue
+                if self.stop_event.wait(max(0., next_frame-time.monotonic())):
+                    break
+                next_frame = time.monotonic() + 1./self.get_parameter('max_inference_hz').value
+                try:
+                    pipeline = self.load_pipeline(plate)
+                    if not plate:
+                        pipeline.plate = None
+                    if video:
+                        if cap is None or not cap.isOpened():
+                            if cap:
+                                cap.release()
+                            cap = cv2.VideoCapture(source)
+                            if not cap.isOpened():
+                                raise RuntimeError('video source unavailable')
+                            pipeline.reset()
+                        ok, frame = cap.read()
+                        stamp, basis = time.time_ns(), 'host_video_receipt'
+                        if not ok:
+                            if Path(source).is_file():
+                                cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+                            else:
+                                cap.release()
+                            raise RuntimeError('video stream ended/disconnected')
+                        self.last_frame_mono = time.monotonic()
+                    else:
+                        with self.lock:
+                            message, self.latest = self.latest, None
+                        if message is None:
+                            continue
+                        from cv_bridge import CvBridge
+                        frame = CvBridge().imgmsg_to_cv2(message, desired_encoding='bgr8')
+                        stamp = message.header.stamp.sec*10**9 + message.header.stamp.nanosec
+                        basis = 'ros_image_stamp' if stamp else 'host_image_receipt'
+                        stamp = stamp or time.time_ns()
+                    start = time.monotonic()
+                    self.save_events(pipeline.process(frame, person, plate), stamp, basis)
+                    with self.lock:
+                        self.state.update(ready=True, person=person, plate=plate and pipeline.plate is not None,
+                                          inference_ms=(time.monotonic()-start)*1000)
+                        if not plate or pipeline.plate is not None:
+                            self.state['last_error'] = ''
+                        self.state['frames'] += 1
+                except Exception as error:
+                    with self.lock:
+                        self.state.update(ready=False, last_error=str(error))
+                    self.stop_event.wait(1.)
+        finally:
+            if cap:
+                cap.release()
 
-    def _expire_tracks(self, now):
-        for tid in [t for t, v in self._tracks.items() if now - v['last_seen'] > 10.0]:
-            del self._tracks[tid]
+    def shutdown_worker(self):
+        self.stop_event.set()
+        self.worker.join(timeout=8.)
+        if not self.worker.is_alive():
+            self.ownership.close()
 
 
-def main():
-    rclpy.init()
-    node = DetectorNode()
+def main(args=None):
+    rclpy.init(args=args)
+    node = None
     try:
+        node = DetectorNode()
         rclpy.spin(node)
+    except (KeyboardInterrupt, rclpy.executors.ExternalShutdownException):
+        pass
     finally:
-        node.destroy_node()
-        rclpy.shutdown()
+        if node:
+            node.shutdown_worker()
+            node.destroy_node()
+        if rclpy.ok():
+            rclpy.shutdown()
 
 
 if __name__ == '__main__':

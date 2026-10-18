@@ -247,7 +247,9 @@ FaceCaptureFiles saveFaceCapture(const FaceCaptureEvent& event,
     }
     metadata << "]\n}\n";
     const auto text = metadata.str();
-    writeBytes(result.metadata_path, std::vector<uint8_t>(text.begin(), text.end()));
+    const auto temporary_metadata = result.metadata_path + ".tmp";
+    writeBytes(temporary_metadata, std::vector<uint8_t>(text.begin(), text.end()));
+    std::filesystem::rename(temporary_metadata, result.metadata_path);
     return result;
 }
 } // namespace hk_camera

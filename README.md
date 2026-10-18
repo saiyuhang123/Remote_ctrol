@@ -14,7 +14,7 @@
 - WebSocket 遥控网关，支持速度限幅、心跳检测和 1 秒无指令自动刹车。
 - Nav2 定位、Hybrid-A* 规划、Regulated Pure Pursuit 控制和目标点导航接口，使用外部实测地图。
 - MediaMTX + FFmpeg 视频链路：RTSP 推流，浏览器 WebRTC 播放。
-- YOLOv8n/OpenVINO 行人检测、YuNet + SFace 人脸识别、HyperLPR3 车牌识别。
+- 海康相机原生人脸检测/抓拍；上位机直接用 OpenVINO YOLO 检测行人/车辆、HyperLPR3 识别车牌，不做人脸身份比对。
 - 识别事件通过 ROS 话题推送到网页，并通过 HTTP 上报业务后台。
 - 手动/自动抓拍、按日期归档、磁盘轮转和断网缓存补传。
 - 巡检点、路线和巡检计划管理，支持保存一次性、每日和按分钟周期规则；执行功能待实机接入。
@@ -29,7 +29,7 @@
   ├─ WebRTC :8889 <──── MediaMTX <──── FFmpeg <──── 实际摄像头
   └─ HTTP :8888 <───── FastAPI + SQLite
                               ↑
-                detector_node / capture_server
+                vision_events / capture_server
 ```
 
 项目采用单机器人、局域网/蒲公英组网场景下的轻量架构，不依赖 MQTT。浏览器、业务后台和机器人节点可以部署在同一台机器上，也可以根据网络情况分开部署。
@@ -48,7 +48,9 @@ Remote_ctrol/
 ├── ros2_ws/src/
 │   ├── robot_gateway/       # WebSocket 遥控/遥测网关
 │   ├── robot_common/        # HTTP 上报器和断网缓存
-│   ├── detector_node/       # 行人、人脸、车牌识别
+│   ├── detector_node/       # 上位机行人/车辆检测、车牌识别
+│   ├── vision_events/       # 独立视觉执勤、本地图片与小车位姿记录
+│   ├── vision_interfaces/   # 历史查询和可选地图标记接口
 │   ├── capture_server/      # 视频抓拍服务
 │   ├── chassis_description/ # 机器人 URDF 和网格模型
 │   ├── chassis_nav2/        # JD03、统一实机启动、TF、控制仲裁及 Nav2
@@ -67,7 +69,7 @@ Remote_ctrol/
 - Nav2、Open3D、RViz2、twist_mux（联调定位/导航时需要）
 - Python 3、pip、FFmpeg、V4L2
 - MediaMTX 可执行文件：放置在 `bin/mediamtx`
-- 识别节点依赖：OpenCV、NumPy、PyTorch、Ultralytics、HyperLPR3
+- 识别节点依赖：OpenCV、NumPy、OpenVINO、HyperLPR3、ONNX Runtime（CPU）
 
 安装基础工具及 ROS 接口依赖。仅运行网页和网关时，仍需 `nav2_msgs` 等消息包；完整实机导航依赖可用 `scripts/install_navigation_deps.sh` 安装：
 
@@ -89,10 +91,10 @@ python3 -m pip install --user fastapi "uvicorn[standard]" \
 如果要启用图像识别，还需要安装：
 
 ```bash
-python3 -m pip install --user torch ultralytics hyperlpr3
+./scripts/install_vision_deps.sh
 ```
 
-识别模型已经放在 `ros2_ws/src/detector_node/models/`，包括 YOLOv8、YuNet 和 SFace 模型。人脸底库使用单独目录保存，不提交到 Git。
+已有模型资源位于 `ros2_ws/src/detector_node/models/`。当前独立视觉链路使用 YOLO OpenVINO 导出物和 HyperLPR3，不加载历史 YuNet/SFace 资源或人脸底库。CPU 依赖安装使用 `./scripts/install_vision_deps.sh`；独立启动、Qt 按钮、记录及验证见 [视觉执勤说明](ros2_ws/src/vision_events/README.md)。
 
 ## 首次构建
 
@@ -405,7 +407,7 @@ video:
 4. 电池反馈尚未接入，页面显示“未接入”和空值。
 5. 统一使用 `base_link`；外参、轴距、转角与 footprint 已确认（`hardware.yaml` 各段 `confirmed: true`）。
 6. 仿真地图已删除。配置实测网页地图的方法见 [地图说明](web/maps/README.md)。无地图时禁止地图点选。
-7. 识别默认使用 CPU 推理，性能取决于处理器和视频分辨率；人脸底库为空时只能识别为未登记人员或普通行人。
+7. 上位机行人/车牌使用 CPU 推理，性能取决于处理器、视频分辨率与限帧配置；人脸由海康抓拍留档，不做身份判断。
 8. `bin/mediamtx` 不在 Git 中，需要准备实际运行平台的版本。
 
 ## 常见排查

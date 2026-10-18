@@ -15,6 +15,7 @@ from .api_points import router as points_router
 from .api_routes import router as routes_router
 from .api_plans import router as plans_router
 from .api_audio import router as audio_router
+from .api_vision import router as vision_router
 
 WEB_DIR = Path(__file__).resolve().parents[1] / 'web'
 
@@ -24,6 +25,7 @@ app.include_router(points_router)
 app.include_router(routes_router)
 app.include_router(plans_router)
 app.include_router(audio_router)
+app.include_router(vision_router)
 
 
 @app.on_event('startup')

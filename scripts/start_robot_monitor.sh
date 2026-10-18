@@ -51,8 +51,9 @@ if [ "$ENABLE_CAPTURE" = 1 ]; then
     -p use_sim_time:=false -p "video_source:=$VIDEO_SOURCE"
 fi
 if [ "$ENABLE_DETECTOR" = 1 ]; then
+  start ros2 run vision_events recorder --ros-args -p upload_enabled:=true
   start ros2 run detector_node detector --ros-args \
-    -p use_sim_time:=false -p "video_source:=$VIDEO_SOURCE"
+    -p use_sim_time:=false -p input_mode:=video -p "video_source:=$VIDEO_SOURCE"
 fi
 if [ "$ENABLE_AUDIO" = 1 ]; then
   start ros2 run audio_player tts_node --ros-args -p use_sim_time:=false

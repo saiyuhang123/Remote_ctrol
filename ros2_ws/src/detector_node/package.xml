@@ -2,12 +2,15 @@
 <package format="3">
   <name>detector_node</name>
   <version>0.1.0</version>
-  <description>图像识别节点：行人/人脸/车牌检测识别（YOLOv8n+OpenVINO / YuNet+SFace / HyperLPR3），结果上报</description>
+  <description>Independent CPU person and plate detection (OpenVINO YOLO / HyperLPR3), no face models.</description>
   <maintainer email="dev@example.com">ubuntu</maintainer>
   <license>Proprietary</license>
 
   <exec_depend>rclpy</exec_depend>
   <exec_depend>std_msgs</exec_depend>
+  <exec_depend>sensor_msgs</exec_depend>
+  <exec_depend>cv_bridge</exec_depend>
+  <exec_depend>rcl_interfaces</exec_depend>
   <exec_depend>robot_common</exec_depend>
 
   <export>

@@ -1,0 +1,7 @@
+vision_events:
+  ros__parameters:
+    max_pose_age_sec: 0.3
+    map_id: ''
+    map_revision: ''
+    upload_enabled: false
+    backend_url: http://127.0.0.1:8888

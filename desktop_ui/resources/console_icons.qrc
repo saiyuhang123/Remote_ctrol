@@ -1,0 +1,9 @@
+<RCC>
+  <qresource prefix="/console">
+    <file alias="target.svg">console/target.svg</file>
+    <file alias="locate.svg">console/locate.svg</file>
+    <file alias="layers.svg">console/layers.svg</file>
+    <file alias="edit.svg">console/edit.svg</file>
+    <file alias="route.svg">console/route.svg</file>
+  </qresource>
+</RCC>

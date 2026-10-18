@@ -20,7 +20,7 @@ setup(
     zip_safe=True,
     maintainer='ubuntu',
     maintainer_email='dev@example.com',
-    description='图像识别节点：行人/人脸/车牌（纯CPU）',
+    description='Independent CPU person/plate detection; faces handled by camera',
     license='Proprietary',
     entry_points={
         'console_scripts': [
