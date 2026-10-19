@@ -231,7 +231,7 @@ function renderRoutes() {
     if (route.route_id === app.selectedRouteId) tr.className = 'selected';
     tr.innerHTML = `<td><input type="radio" name="route" ${route.valid ? '' : 'disabled'}
         ${route.route_id === app.selectedRouteId ? 'checked' : ''}></td>
-      <td><div class="routeName">${escapeHtml(route.name)}</div>
+      <td><div class="routeName">${escapeHtml(route.name)} · ${route.navigation_mode === 'RECORDED_NETWORK' ? '固定路线' : '自由导航'}</div>
           <div class="routeMeta">${escapeHtml(route.route_id)}${route.invalid_reason ? ' · ' + escapeHtml(route.invalid_reason) : ''}</div></td>
       <td>${route.revision}</td><td>${route.steps.length}</td>
       <td><span class="tag ${route.valid ? 'valid' : 'invalid'}">${route.valid ? '可执行' : '禁止'}</span></td>`;

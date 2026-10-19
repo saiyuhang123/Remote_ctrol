@@ -5,6 +5,7 @@ string map_id
 uint64 route_revision
 uint64 map_revision
 uint32 loop_count
+string plan_digest
 ---
 bool success
 uint8 final_state

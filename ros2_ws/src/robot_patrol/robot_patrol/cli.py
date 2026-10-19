@@ -5,6 +5,7 @@ import argparse
 import json
 import sys
 import time
+from pathlib import Path
 
 import rclpy
 from rclpy.node import Node
@@ -24,6 +25,7 @@ from patrol_interfaces.srv import (
     SetActiveMap,
     UpsertPoint,
     UpsertRoute,
+    RoadCommand,
 )
 
 
@@ -39,6 +41,7 @@ def call_service(node: Node, client, request, timeout: float = 10.0):
 
 def print_route(route):
     print(f"route {route.route_id}  {route.name}  map={route.map_id}  rev={route.revision}")
+    print(f"  mode={route.navigation_mode or 'FREE_NAV'} network={route.network_id} rev={route.network_revision}")
     for index, step in enumerate(route.steps, start=1):
         print(f"  {index}. {step.point_name} ({step.point_id}) "
               f"x={step.x:.3f} y={step.y:.3f} yaw={step.yaw:.3f} dwell={step.dwell_seconds:.1f}s")
@@ -103,6 +106,10 @@ def main(args=None):
     p.add_argument("--route-id", default="")
     p.add_argument("--revision", type=int, default=0)
 
+    p.add_argument("--mode", choices=['FREE_NAV','RECORDED_NETWORK'], default='FREE_NAV')
+    p.add_argument("--network-id", default='')
+    p.add_argument("--network-revision", type=int, default=0)
+
     p = sub.add_parser("delete-route")
     p.add_argument("route_id")
     p.add_argument("--revision", type=int, default=0)
@@ -115,6 +122,13 @@ def main(args=None):
     p.add_argument("--route-revision", type=int, default=0)
     p.add_argument("--map-revision", type=int, default=0)
     p.add_argument("--owner", default="cli")
+    p.add_argument("--plan-digest", default='')
+
+    p = sub.add_parser('road', help='道路录制/路网服务；操作和字段见 recorded_routes/README.md')
+    p.add_argument('operation')
+    p.add_argument('--json', default='{}')
+    p.add_argument('--file', default='')
+    p.add_argument('--owner', default='cli')
 
     p = sub.add_parser("pause")
     p.add_argument("run_id")
@@ -129,7 +143,16 @@ def main(args=None):
     rclpy.init(args=[])
     node = Node("patrol_cli")
     try:
-        if parsed.command == "list-maps":
+        if parsed.command == 'road':
+            payload = json.loads(Path(parsed.file).read_text() if parsed.file else parsed.json)
+            payload['owner_session_id'] = parsed.owner
+            payload['command_id'] = 'cli_' + str(time.time_ns())
+            request = RoadCommand.Request(operation=parsed.operation.upper(), payload_json=json.dumps(payload))
+            response = call_service(node, node.create_client(RoadCommand, '/patrol/road_command'), request, timeout=30)
+            if not response.success:
+                raise RuntimeError(response.error_code + ': ' + response.message)
+            print(json.dumps(json.loads(response.data_json), ensure_ascii=False, indent=2))
+        elif parsed.command == "list-maps":
             response = call_service(node, node.create_client(ListMaps, "/patrol/list_maps"), ListMaps.Request())
             if not response.success:
                 raise RuntimeError(response.message)
@@ -198,6 +221,9 @@ def main(args=None):
             request.map_id = parsed.map_id
             request.name = parsed.name
             request.expected_revision = parsed.revision
+            request.navigation_mode = parsed.mode
+            request.network_id = parsed.network_id
+            request.network_revision = parsed.network_revision
             for item in parsed.steps.split(","):
                 point_id, _, dwell = item.partition(":")
                 step = RouteStep()
@@ -242,6 +268,7 @@ def main(args=None):
             goal.route_id = parsed.route_id
             goal.map_id = parsed.map_id
             goal.loop_count = parsed.loops
+            goal.plan_digest = parsed.plan_digest
             goal.route_revision = parsed.route_revision
             goal.map_revision = parsed.map_revision
             send_future = client.send_goal_async(goal, feedback_callback=lambda fb: print_status(fb.feedback.status))

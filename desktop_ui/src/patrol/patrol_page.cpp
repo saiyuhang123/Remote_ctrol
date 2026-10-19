@@ -1,4 +1,6 @@
 #include "patrol/patrol_page.h"
+#include "patrol/recorded_road_page.h"
+#include "patrol/patrol_ui_style.h"
 
 #include <QComboBox>
 #include <QDoubleSpinBox>
@@ -17,6 +19,13 @@
 #include <QTabWidget>
 #include <QTimer>
 #include <QVBoxLayout>
+#include <QMessageBox>
+#include <QCloseEvent>
+#include <QSignalBlocker>
+#include <QPlainTextEdit>
+#include <QDialog>
+#include <QScrollArea>
+#include <QDateTime>
 #include <cmath>
 
 namespace {
@@ -25,23 +34,37 @@ constexpr double kPi = 3.14159265358979323846;
 QTableWidget *table(const QStringList &headers, QWidget *parent) {
   auto *view = new QTableWidget(0, headers.size(), parent);
   view->setHorizontalHeaderLabels(headers);
-  view->setSelectionBehavior(QAbstractItemView::SelectRows);
-  view->setSelectionMode(QAbstractItemView::SingleSelection);
-  view->setEditTriggers(QAbstractItemView::NoEditTriggers);
-  view->horizontalHeader()->setSectionResizeMode(QHeaderView::ResizeToContents);
-  view->verticalHeader()->setVisible(false);
+  patrolui::configureTable(view);
+  auto *empty = patrolui::hint(
+      headers.front() == QStringLiteral("名称") ? QStringLiteral("暂无导航点\n在右侧填写名称，保存第一个导航点。")
+      : headers.front() == QStringLiteral("路线") ? QStringLiteral("暂无路线\n点击“新建路线”开始编排。")
+      : headers.front() == QStringLiteral("点位") ? QStringLiteral("尚未添加点位\n从上方选择导航点，按顺序加入路线。")
+                                               : QStringLiteral("暂无执行记录\n执行巡航后可在这里查看结果。"), view->viewport());
+  empty->setAlignment(Qt::AlignCenter);
+  empty->setObjectName("patrolTableEmpty");
+  empty->setAttribute(Qt::WA_TransparentForMouseEvents);
+  auto *emptyLayout = new QVBoxLayout(view->viewport());
+  emptyLayout->setContentsMargins(10, 10, 10, 10);
+  emptyLayout->addWidget(empty);
   return view;
+}
+
+void updateEmptyTable(QTableWidget *view) {
+  if (auto *empty = view->findChild<QLabel *>("patrolTableEmpty"))
+    empty->setVisible(view->rowCount() == 0);
 }
 
 QPushButton *pageButton(const QString &text, QWidget *parent, const QString &name) {
   auto *button = new QPushButton(text, parent);
   button->setObjectName(name);
+  button->setAutoDefault(false);
   return button;
 }
 
 QTableWidgetItem *readOnlyItem(const QString &text) {
   auto *item = new QTableWidgetItem(text);
   item->setFlags(item->flags() & ~Qt::ItemIsEditable);
+  item->setToolTip(text);
   return item;
 }
 }  // namespace
@@ -53,7 +76,10 @@ PatrolPage::PatrolPage(PatrolClient *client, const QString &initialMapYaml,
     : QWidget(parent), client_(client), mapYaml_(initialMapYaml), backend_(backend),
       localizationFile_(localizationFile), profileName_(profileName), offline_(offline),
       startPermission_(std::move(startPermission)) {
+  Q_INIT_RESOURCE(console_icons);
   setObjectName(QStringLiteral("patrolPage"));
+  setAttribute(Qt::WA_StyledBackground);
+  setStyleSheet(patrolui::styleSheet());
   buildUi();
   connect(client_, &PatrolClient::mapsChanged, this, &PatrolPage::onMapsChanged);
   connect(client_, &PatrolClient::pointsChanged, this, &PatrolPage::onPointsChanged);
@@ -78,185 +104,279 @@ void PatrolPage::setResumePermission(std::function<bool(QString *)> permission) 
 
 void PatrolPage::buildUi() {
   auto *root = new QVBoxLayout(this);
-  root->setContentsMargins(8, 8, 8, 8);
-  root->setSpacing(8);
+  root->setContentsMargins(16, 14, 16, 10);
+  root->setSpacing(10);
 
-  auto *mapGroup = new QGroupBox(QStringLiteral("本地巡航地图绑定"), this);
-  auto *mapLayout = new QVBoxLayout(mapGroup);
-  auto *mapRow = new QHBoxLayout;
-  serviceLabel_ = new QLabel(client_->available()
-                                 ? (offline_ ? QStringLiteral("本地巡航服务：离线模式（仅编辑）")
-                                             : QStringLiteral("本地巡航服务：接口已构建"))
-                                 : QStringLiteral("本地巡航服务：不可用"), mapGroup);
-  serviceLabel_->setObjectName(QStringLiteral("patrolServiceStatus"));
-  mapRow->addWidget(serviceLabel_);
-  mapRow->addWidget(new QLabel(QStringLiteral("当前模式：") + profileName_, mapGroup));
-  mapRow->addStretch();
-  refreshAllButton_ = pageButton(QStringLiteral("刷新"), mapGroup, QStringLiteral("patrolRefreshAll"));
-  mapRow->addWidget(refreshAllButton_);
-  mapLayout->addLayout(mapRow);
+  auto *header = patrolui::card(this);
+  auto *headerLayout = new QVBoxLayout(header);
+  headerLayout->setContentsMargins(16, 12, 16, 12);
+  headerLayout->setSpacing(10);
+  auto *titleRow = new QHBoxLayout;
+  auto *title = new QLabel("路线巡航", header);
+  title->setObjectName("patrolTitle");
+  titleRow->addWidget(title);
+  auto *profileLabel = patrolui::hint(profileName_, header);
+  profileLabel->setWordWrap(false);
+  titleRow->addWidget(profileLabel);
+  titleRow->addStretch();
+  serviceLabel_ = new QLabel(header);
+  serviceLabel_->setObjectName("patrolServiceStatus");
+  serviceLabel_->setProperty("patrolBadge", true);
+  titleRow->addWidget(serviceLabel_);
+  refreshAllButton_ = pageButton("刷新", header, "patrolRefreshAll");
+  titleRow->addWidget(refreshAllButton_);
+  auto *settingsToggle = pageButton("地图与返航设置", header, "patrolMapSettingsToggle");
+  settingsToggle->setCheckable(true);
+  titleRow->addWidget(settingsToggle);
+  headerLayout->addLayout(titleRow);
 
+  auto *summary = new QHBoxLayout;
+  activeMapLabel_ = new QLabel("活跃地图：未设置", header);
+  activeMapLabel_->setObjectName("patrolActiveMap");
+  activeMapLabel_->setProperty("patrolBadge", true);
+  activeMapLabel_->setWordWrap(true);
+  activeMapLabel_->setMinimumWidth(220);
+  summary->addWidget(activeMapLabel_);
+  homePointLabel_ = patrolui::hint("待命返航点：未设置", header);
+  homePointLabel_->setObjectName("patrolHomePoint");
+  summary->addWidget(homePointLabel_, 1);
+  returnHomeButton_ = pageButton("一键返回", header, "patrolReturnHome");
+  summary->addWidget(returnHomeButton_);
+  headerLayout->addLayout(summary);
+
+  auto *mapSettings = new QWidget(header);
+  mapSettings->setObjectName("patrolMapSettings");
+  auto *mapLayout = new QVBoxLayout(mapSettings);
+  mapLayout->setContentsMargins(0, 4, 0, 0);
+  mapLayout->setSpacing(8);
   auto *yamlRow = new QHBoxLayout;
-  yamlRow->addWidget(new QLabel(QStringLiteral("导航 YAML"), mapGroup));
-  mapYamlEdit_ = new QLineEdit(mapYaml_, mapGroup);
-  mapYamlEdit_->setObjectName(QStringLiteral("patrolMapYaml"));
-  mapYamlEdit_->setMinimumWidth(360);
+  yamlRow->addWidget(new QLabel("导航地图", mapSettings));
+  mapYamlEdit_ = new QLineEdit(mapYaml_, mapSettings);
+  mapYamlEdit_->setObjectName("patrolMapYaml");
+  mapYamlEdit_->setPlaceholderText("选择与当前定位对应的地图 YAML 文件");
+  mapYamlEdit_->setMinimumWidth(180);
   yamlRow->addWidget(mapYamlEdit_, 1);
-  registerMapButton_ = pageButton(QStringLiteral("登记当前地图"), mapGroup,
-                                  QStringLiteral("patrolRegisterMap"));
+  registerMapButton_ = pageButton("登记当前地图", mapSettings, "patrolRegisterMap");
   yamlRow->addWidget(registerMapButton_);
   mapLayout->addLayout(yamlRow);
-
   auto *activeRow = new QHBoxLayout;
-  activeRow->addWidget(new QLabel(QStringLiteral("已登记地图"), mapGroup));
-  mapsCombo_ = new QComboBox(mapGroup);
-  mapsCombo_->setObjectName(QStringLiteral("patrolMaps"));
-  mapsCombo_->setMinimumWidth(260);
+  activeRow->addWidget(new QLabel("已登记地图", mapSettings));
+  mapsCombo_ = new QComboBox(mapSettings);
+  mapsCombo_->setObjectName("patrolMaps");
+  mapsCombo_->setSizeAdjustPolicy(QComboBox::AdjustToMinimumContentsLengthWithIcon);
+  mapsCombo_->setMinimumContentsLength(16);
   activeRow->addWidget(mapsCombo_, 1);
-  setActiveButton_ = pageButton(QStringLiteral("设为活跃地图"), mapGroup,
-                                QStringLiteral("patrolSetActiveMap"));
+  setActiveButton_ = pageButton("设为活跃地图", mapSettings, "patrolSetActiveMap");
   activeRow->addWidget(setActiveButton_);
-  activeMapLabel_ = new QLabel(QStringLiteral("活跃地图：未设置"), mapGroup);
-  activeMapLabel_->setObjectName(QStringLiteral("patrolActiveMap"));
-  activeRow->addWidget(activeMapLabel_);
+  saveHomeButton_ = pageButton("当前位置设为返航点", mapSettings, "patrolSaveHome");
+  clearHomeButton_ = pageButton("清除返航点", mapSettings, "patrolClearHome");
+  clearHomeButton_->setProperty("patrolDanger", true);
+  activeRow->addWidget(saveHomeButton_);
+  activeRow->addWidget(clearHomeButton_);
   mapLayout->addLayout(activeRow);
-
-  auto *homeRow = new QHBoxLayout;
-  homePointLabel_ = new QLabel(QStringLiteral("待命返航点：未设置"), mapGroup);
-  homePointLabel_->setObjectName(QStringLiteral("patrolHomePoint"));
-  homeRow->addWidget(homePointLabel_, 1);
-  saveHomeButton_ = pageButton(QStringLiteral("保存当前位姿为返航点"), mapGroup,
-                               QStringLiteral("patrolSaveHome"));
-  clearHomeButton_ = pageButton(QStringLiteral("清除返航点"), mapGroup,
-                                QStringLiteral("patrolClearHome"));
-  returnHomeButton_ = pageButton(QStringLiteral("一键返回"), mapGroup,
-                                 QStringLiteral("patrolReturnHome"));
-  returnHomeButton_->setProperty("primary", true);
-  homeRow->addWidget(saveHomeButton_);
-  homeRow->addWidget(clearHomeButton_);
-  homeRow->addWidget(returnHomeButton_);
-  mapLayout->addLayout(homeRow);
-
-  messageLabel_ = new QLabel(QStringLiteral("路线巡航只调用本地 ROS2 服务，不依赖 HTTP 后端或网关"), mapGroup);
-  messageLabel_->setObjectName(QStringLiteral("patrolMessage"));
-  messageLabel_->setWordWrap(true);
-  mapLayout->addWidget(messageLabel_);
-  root->addWidget(mapGroup);
+  headerLayout->addWidget(mapSettings);
+  mapSettings->hide();
+  connect(settingsToggle, &QPushButton::toggled, mapSettings, &QWidget::setVisible);
+  root->addWidget(header);
 
   tabs_ = new QTabWidget(this);
-  tabs_->setObjectName(QStringLiteral("patrolTabs"));
+  tabs_->setObjectName("patrolTabs");
+  tabs_->setDocumentMode(true);
 
-  // Points tab.
+  // Point capture and manual coordinates share a compact side card.
   auto *pointsTab = new QWidget(tabs_);
   auto *pointsLayout = new QHBoxLayout(pointsTab);
-  pointsTable_ = table({QStringLiteral("名称"), QStringLiteral("X"), QStringLiteral("Y"),
-                        QStringLiteral("朝向°"), QStringLiteral("修订")}, pointsTab);
-  pointsTable_->setObjectName(QStringLiteral("patrolPointsTable"));
-  pointsLayout->addWidget(pointsTable_, 1);
-  auto *pointForm = new QGroupBox(QStringLiteral("点位"), pointsTab);
-  auto *pointFormLayout = new QVBoxLayout(pointForm);
-  auto *pointFields = new QFormLayout;
-  pointNameEdit_ = new QLineEdit(pointForm);
-  pointNameEdit_->setObjectName(QStringLiteral("patrolPointName"));
-  pointNameEdit_->setPlaceholderText(QStringLiteral("点位名称"));
-  pointX_ = new QDoubleSpinBox(pointForm); pointX_->setRange(-100000, 100000); pointX_->setDecimals(3);
-  pointY_ = new QDoubleSpinBox(pointForm); pointY_->setRange(-100000, 100000); pointY_->setDecimals(3);
-  pointYaw_ = new QDoubleSpinBox(pointForm); pointYaw_->setRange(-180, 180); pointYaw_->setDecimals(2);
-  pointFields->addRow(QStringLiteral("名称"), pointNameEdit_);
-  pointFields->addRow(QStringLiteral("X (m)"), pointX_);
-  pointFields->addRow(QStringLiteral("Y (m)"), pointY_);
-  pointFields->addRow(QStringLiteral("朝向 (°)"), pointYaw_);
-  pointFormLayout->addLayout(pointFields);
-  saveCurrentPointButton_ = pageButton(QStringLiteral("保存当前位置为导航点"), pointForm,
-                                       QStringLiteral("patrolSaveCurrentPoint"));
-  upsertPointButton_ = pageButton(QStringLiteral("新增 / 更新点位"), pointForm,
-                                  QStringLiteral("patrolUpsertPoint"));
-  deletePointButton_ = pageButton(QStringLiteral("删除所选点位"), pointForm,
-                                  QStringLiteral("patrolDeletePoint"));
-  pointFormLayout->addWidget(saveCurrentPointButton_);
-  pointFormLayout->addWidget(upsertPointButton_);
-  pointFormLayout->addWidget(deletePointButton_);
-  auto *pointHint = new QLabel(QStringLiteral("“保存当前位置”由 robot_patrol 读取停稳后的 map 位姿；"
-                                               "手动新增只用于演示或外部导入。"), pointForm);
-  pointHint->setWordWrap(true);
-  pointFormLayout->addWidget(pointHint);
-  pointFormLayout->addStretch();
-  pointsLayout->addWidget(pointForm, 0);
-  tabs_->addTab(pointsTab, QStringLiteral("点位"));
+  pointsLayout->setContentsMargins(0, 10, 0, 0);
+  pointsLayout->setSpacing(12);
+  auto *pointList = patrolui::card(pointsTab);
+  auto *pointListLayout = new QVBoxLayout(pointList);
+  pointListLayout->setContentsMargins(14, 14, 14, 12);
+  auto *pointsTop = new QHBoxLayout;
+  pointsTop->addWidget(patrolui::heading("导航点", pointList));
+  pointsCountLabel_ = patrolui::hint("0 个点位", pointList);
+  pointsTop->addStretch();
+  pointsTop->addWidget(pointsCountLabel_);
+  pointListLayout->addLayout(pointsTop);
+  pointsTable_ = table({"名称", "X (m)", "Y (m)", "朝向 (°)", "版本"}, pointList);
+  pointsTable_->setObjectName("patrolPointsTable");
+  pointListLayout->addWidget(pointsTable_, 1);
+  pointListLayout->addWidget(patrolui::hint("选择点位查看或修改坐标。坐标均相对于当前地图。", pointList));
+  pointsLayout->addWidget(pointList, 1);
 
-  // Routes tab.
+  auto *pointForm = patrolui::card(pointsTab);
+  pointForm->setMinimumWidth(294);
+  pointForm->setMaximumWidth(350);
+  auto *pointFormLayout = new QVBoxLayout(pointForm);
+  pointFormLayout->setContentsMargins(16, 16, 16, 16);
+  pointFormLayout->setSpacing(10);
+  pointFormLayout->addWidget(patrolui::heading("录入导航点", pointForm));
+  pointFormLayout->addWidget(patrolui::hint("将车辆开到目标位置并停稳，填写名称后保存当前位置。", pointForm));
+  pointNameEdit_ = new QLineEdit(pointForm);
+  pointNameEdit_->setObjectName("patrolPointName");
+  pointNameEdit_->setPlaceholderText("例如：设备间入口");
+  pointFormLayout->addWidget(new QLabel("点位名称", pointForm));
+  pointFormLayout->addWidget(pointNameEdit_);
+  saveCurrentPointButton_ = pageButton("保存当前位置为导航点", pointForm, "patrolSaveCurrentPoint");
+  saveCurrentPointButton_->setProperty("primary", true);
+  pointFormLayout->addWidget(saveCurrentPointButton_);
+  auto *coordinates = new QGroupBox("手动坐标 / 所选点位", pointForm);
+  auto *pointFields = new QFormLayout(coordinates);
+  pointFields->setSpacing(10);
+  pointX_ = new QDoubleSpinBox(coordinates); pointX_->setRange(-100000, 100000); pointX_->setDecimals(3);
+  pointY_ = new QDoubleSpinBox(coordinates); pointY_->setRange(-100000, 100000); pointY_->setDecimals(3);
+  pointYaw_ = new QDoubleSpinBox(coordinates); pointYaw_->setRange(-180, 180); pointYaw_->setDecimals(2);
+  pointFields->addRow("X (m)", pointX_);
+  pointFields->addRow("Y (m)", pointY_);
+  pointFields->addRow("朝向 (°)", pointYaw_);
+  upsertPointButton_ = pageButton("新增 / 更新点位", coordinates, "patrolUpsertPoint");
+  pointFields->addRow(upsertPointButton_);
+  pointFormLayout->addWidget(coordinates);
+  pointFormLayout->addStretch();
+  deletePointButton_ = pageButton("删除所选点位", pointForm, "patrolDeletePoint");
+  deletePointButton_->setProperty("patrolDanger", true);
+  pointFormLayout->addWidget(deletePointButton_);
+  auto *pointScroll = new QScrollArea(pointsTab);
+  pointScroll->setObjectName("patrolPointEditorScroll");
+  pointScroll->setWidgetResizable(true);
+  pointScroll->setMinimumHeight(100);
+  pointScroll->setMinimumWidth(310);
+  pointScroll->setMaximumWidth(366);
+  pointScroll->setWidget(pointForm);
+  pointsLayout->addWidget(pointScroll);
+  tabs_->addTab(pointsTab, "点位管理");
+
   auto *routesTab = new QWidget(tabs_);
   auto *routesLayout = new QHBoxLayout(routesTab);
-  auto *routeListPanel = new QWidget(routesTab);
+  routesLayout->setContentsMargins(0, 10, 0, 0);
+  routesLayout->setSpacing(12);
+  auto *routeListPanel = patrolui::card(routesTab);
+  routeListPanel->setMinimumWidth(248);
+  routeListPanel->setMaximumWidth(340);
   auto *routeListLayout = new QVBoxLayout(routeListPanel);
-  routeListLayout->setContentsMargins(0, 0, 0, 0);
-  routesTable_ = table({QStringLiteral("路线"), QStringLiteral("步骤"), QStringLiteral("修订")},
-                       routeListPanel);
-  routesTable_->setObjectName(QStringLiteral("patrolRoutesTable"));
+  routeListLayout->setContentsMargins(14, 14, 14, 14);
+  auto *routesTop = new QHBoxLayout;
+  routesTop->addWidget(patrolui::heading("巡检路线", routeListPanel));
+  routesTop->addStretch();
+  routesCountLabel_ = patrolui::hint("0 条", routeListPanel);
+  routesTop->addWidget(routesCountLabel_);
+  routeListLayout->addLayout(routesTop);
+  routesTable_ = table({"路线", "点位数", "版本"}, routeListPanel);
+  routesTable_->setObjectName("patrolRoutesTable");
   routeListLayout->addWidget(routesTable_, 1);
   auto *routeListButtons = new QHBoxLayout;
-  newRouteButton_ = pageButton(QStringLiteral("新建路线"), routeListPanel, QStringLiteral("patrolNewRoute"));
-  deleteRouteButton_ = pageButton(QStringLiteral("删除路线"), routeListPanel, QStringLiteral("patrolDeleteRoute"));
-  routeListButtons->addWidget(newRouteButton_);
+  newRouteButton_ = pageButton("新建路线", routeListPanel, "patrolNewRoute");
+  deleteRouteButton_ = pageButton("删除", routeListPanel, "patrolDeleteRoute");
+  deleteRouteButton_->setProperty("patrolDanger", true);
+  routeListButtons->addWidget(newRouteButton_, 1);
   routeListButtons->addWidget(deleteRouteButton_);
   routeListLayout->addLayout(routeListButtons);
   routesLayout->addWidget(routeListPanel, 1);
 
-  auto *routeEditor = new QWidget(routesTab);
+  auto *routeRight = new QWidget(routesTab);
+  auto *routeRightLayout = new QVBoxLayout(routeRight);
+  routeRightLayout->setContentsMargins(0, 0, 0, 0);
+  routeRightLayout->setSpacing(10);
+  auto *editorCard = patrolui::card(routeRight);
+  auto *editorCardLayout = new QVBoxLayout(editorCard);
+  editorCardLayout->setContentsMargins(14, 12, 14, 12);
+  auto *editorHeader = new QHBoxLayout;
+  editorHeader->addWidget(patrolui::heading("路线编排", editorCard));
+  routeDraftLabel_ = new QLabel("新路线", editorCard);
+  routeDraftLabel_->setObjectName("patrolRouteDraftState");
+  routeDraftLabel_->setProperty("patrolBadge", true);
+  editorHeader->addWidget(routeDraftLabel_);
+  editorHeader->addStretch();
+  saveRouteButton_ = pageButton("保存路线", editorCard, "patrolSaveRoute");
+  saveRouteButton_->setProperty("primary", true);
+  editorHeader->addWidget(saveRouteButton_);
+  editorCardLayout->addLayout(editorHeader);
+
+  auto *routeEditor = new QWidget(editorCard);
   auto *routeEditorLayout = new QVBoxLayout(routeEditor);
   routeEditorLayout->setContentsMargins(0, 0, 0, 0);
+  routeEditorLayout->setSpacing(8);
   auto *routeNameRow = new QHBoxLayout;
-  routeNameRow->addWidget(new QLabel(QStringLiteral("路线名称"), routeEditor));
+  routeNameRow->addWidget(new QLabel("路线名称", routeEditor));
   routeNameEdit_ = new QLineEdit(routeEditor);
-  routeNameEdit_->setObjectName(QStringLiteral("patrolRouteName"));
+  routeNameEdit_->setObjectName("patrolRouteName");
+  routeNameEdit_->setPlaceholderText("输入巡检路线名称");
   routeNameRow->addWidget(routeNameEdit_, 1);
+  navigationMode_ = new QComboBox(routeEditor);
+  navigationMode_->setObjectName("patrolNavigationMode");
+  navigationMode_->addItem("自由导航", "FREE_NAV");
+  navigationMode_->addItem("固定路线（沿录制路网）", "RECORDED_NETWORK");
+  routeNameRow->addWidget(navigationMode_);
   routeEditorLayout->addLayout(routeNameRow);
+  auto *modeRow = new QHBoxLayout;
+  routeNetwork_ = new QComboBox(routeEditor);
+  routeNetwork_->setObjectName("patrolRouteNetwork");
+  routeNetwork_->setSizeAdjustPolicy(QComboBox::AdjustToMinimumContentsLengthWithIcon);
+  routeNetwork_->setMinimumContentsLength(12);
+  previewRecorded_ = pageButton("预览实际路线", routeEditor, "patrolPreviewRecorded");
+  modeRow->addWidget(routeNetwork_, 1);
+  modeRow->addWidget(previewRecorded_);
+  routeEditorLayout->addLayout(modeRow);
   auto *addStepRow = new QHBoxLayout;
   pointCombo_ = new QComboBox(routeEditor);
-  pointCombo_->setObjectName(QStringLiteral("patrolPointCombo"));
-  pointCombo_->setMinimumWidth(180);
+  pointCombo_->setObjectName("patrolPointCombo");
+  pointCombo_->setMinimumWidth(140);
   addStepDwell_ = new QDoubleSpinBox(routeEditor);
-  addStepDwell_->setObjectName(QStringLiteral("patrolAddStepDwell"));
+  addStepDwell_->setObjectName("patrolAddStepDwell");
   addStepDwell_->setRange(0, 86400); addStepDwell_->setDecimals(1);
-  addStepDwell_->setSuffix(QStringLiteral(" s"));
-  addStepButton_ = pageButton(QStringLiteral("添加点位"), routeEditor, QStringLiteral("patrolAddStep"));
-  addStepRow->addWidget(new QLabel(QStringLiteral("加入路线"), routeEditor));
+  addStepDwell_->setSuffix(" s");
+  addStepDwell_->setToolTip("该点位到达后的停留时间");
+  addStepButton_ = pageButton("添加点位", routeEditor, "patrolAddStep");
+  addStepRow->addWidget(new QLabel("加入路线", routeEditor));
   addStepRow->addWidget(pointCombo_, 1);
+  addStepRow->addWidget(new QLabel("停留", routeEditor));
   addStepRow->addWidget(addStepDwell_);
   addStepRow->addWidget(addStepButton_);
   routeEditorLayout->addLayout(addStepRow);
-  stepsTable_ = table({QStringLiteral("点位"), QStringLiteral("X"), QStringLiteral("Y"),
-                       QStringLiteral("停留(s)")}, routeEditor);
-  stepsTable_->setObjectName(QStringLiteral("patrolStepsTable"));
+  stepsTable_ = table({"点位", "X (m)", "Y (m)", "停留 (s)"}, routeEditor);
+  stepsTable_->setObjectName("patrolStepsTable");
+  stepsTable_->setMinimumHeight(118);
   routeEditorLayout->addWidget(stepsTable_, 1);
   auto *stepButtons = new QHBoxLayout;
   stepDwell_ = new QDoubleSpinBox(routeEditor);
-  stepDwell_->setObjectName(QStringLiteral("patrolStepDwell"));
-  stepDwell_->setRange(0, 86400); stepDwell_->setDecimals(1);
-  stepDwell_->setSuffix(QStringLiteral(" s"));
-  updateDwellButton_ = pageButton(QStringLiteral("更新停留"), routeEditor, QStringLiteral("patrolUpdateDwell"));
-  moveUpButton_ = pageButton(QStringLiteral("上移"), routeEditor, QStringLiteral("patrolStepUp"));
-  moveDownButton_ = pageButton(QStringLiteral("下移"), routeEditor, QStringLiteral("patrolStepDown"));
-  removeStepButton_ = pageButton(QStringLiteral("移除步骤"), routeEditor, QStringLiteral("patrolRemoveStep"));
-  stepButtons->addWidget(new QLabel(QStringLiteral("停留"), routeEditor));
+  stepDwell_->setObjectName("patrolStepDwell");
+  stepDwell_->setRange(0, 86400); stepDwell_->setDecimals(1); stepDwell_->setSuffix(" s");
+  updateDwellButton_ = pageButton("更新停留", routeEditor, "patrolUpdateDwell");
+  moveUpButton_ = pageButton("上移", routeEditor, "patrolStepUp");
+  moveDownButton_ = pageButton("下移", routeEditor, "patrolStepDown");
+  removeStepButton_ = pageButton("移除", routeEditor, "patrolRemoveStep");
+  removeStepButton_->setProperty("patrolDanger", true);
   stepButtons->addWidget(stepDwell_);
   stepButtons->addWidget(updateDwellButton_);
+  stepButtons->addStretch();
   stepButtons->addWidget(moveUpButton_);
   stepButtons->addWidget(moveDownButton_);
   stepButtons->addWidget(removeStepButton_);
-  stepButtons->addStretch();
   routeEditorLayout->addLayout(stepButtons);
-  auto *saveRouteRow = new QHBoxLayout;
-  saveRouteButton_ = pageButton(QStringLiteral("保存路线"), routeEditor, QStringLiteral("patrolSaveRoute"));
-  saveRouteButton_->setProperty("primary", true);
-  saveRouteRow->addWidget(saveRouteButton_);
-  saveRouteRow->addStretch();
-  routeEditorLayout->addLayout(saveRouteRow);
+  auto *routeScroll = new QScrollArea(editorCard);
+  routeScroll->setObjectName("patrolRouteEditorScroll");
+  routeScroll->setWidgetResizable(true);
+  routeScroll->setMinimumHeight(100);
+  routeScroll->setWidget(routeEditor);
+  editorCardLayout->addWidget(routeScroll, 1);
+  routeRightLayout->addWidget(editorCard, 1);
 
-  auto *runGroup = new QGroupBox(QStringLiteral("执行"), routeEditor);
+  // Execution stays outside the editor's scroll area on shorter displays.
+  auto *runGroup = patrolui::card(routeRight);
   auto *runLayout = new QVBoxLayout(runGroup);
+  runLayout->setContentsMargins(14, 12, 14, 12);
+  runLayout->setSpacing(8);
+  auto *runHeader = new QHBoxLayout;
+  runHeader->addWidget(patrolui::heading("任务执行", runGroup));
+  runHeader->addStretch();
+  statusLabel_ = new QLabel("状态：空闲", runGroup);
+  statusLabel_->setObjectName("patrolStatusLabel");
+  statusLabel_->setProperty("patrolBadge", true);
+  statusLabel_->setWordWrap(true);
+  statusLabel_->setMaximumWidth(440);
+  runHeader->addWidget(statusLabel_);
+  runLayout->addLayout(runHeader);
   startReadinessLabel_ = new QLabel(runGroup);
-  startReadinessLabel_->setObjectName(QStringLiteral("patrolStartReadiness"));
+  startReadinessLabel_->setObjectName("patrolStartReadiness");
   startReadinessLabel_->setWordWrap(true);
   startReadinessLabel_->setTextFormat(Qt::PlainText);
   startReadinessLabel_->setTextInteractionFlags(Qt::TextSelectableByMouse);
@@ -264,51 +384,71 @@ void PatrolPage::buildUi() {
   startReadinessLabel_->setMargin(8);
   runLayout->addWidget(startReadinessLabel_);
   auto *runRow = new QHBoxLayout;
-  runRow->addWidget(new QLabel(QStringLiteral("循环"), runGroup));
+  runRow->addWidget(new QLabel("循环次数", runGroup));
   loopCount_ = new QSpinBox(runGroup);
-  loopCount_->setObjectName(QStringLiteral("patrolLoopCount"));
-  loopCount_->setRange(0, 100000);
-  loopCount_->setValue(1);
-  loopCount_->setSpecialValueText(QStringLiteral("持续循环"));
+  loopCount_->setObjectName("patrolLoopCount");
+  loopCount_->setRange(0, 100000); loopCount_->setValue(1);
+  loopCount_->setSpecialValueText("持续循环");
+  loopCount_->setToolTip("0 表示持续循环，其他数字表示执行圈数");
   runRow->addWidget(loopCount_);
-  startButton_ = pageButton(QStringLiteral("开始"), runGroup, QStringLiteral("patrolStart"));
-  pauseButton_ = pageButton(QStringLiteral("暂停"), runGroup, QStringLiteral("patrolPause"));
-  resumeButton_ = pageButton(QStringLiteral("继续"), runGroup, QStringLiteral("patrolResume"));
-  cancelButton_ = pageButton(QStringLiteral("取消"), runGroup, QStringLiteral("patrolCancel"));
-  runRow->addWidget(startButton_);
-  runRow->addWidget(pauseButton_);
-  runRow->addWidget(resumeButton_);
-  runRow->addWidget(cancelButton_);
   runRow->addStretch();
+  startButton_ = pageButton("开始", runGroup, "patrolStart");
+  startButton_->setProperty("primary", true);
+  pauseButton_ = pageButton("暂停", runGroup, "patrolPause");
+  resumeButton_ = pageButton("继续", runGroup, "patrolResume");
+  cancelButton_ = pageButton("取消任务", runGroup, "patrolCancel");
+  cancelButton_->setProperty("patrolDanger", true);
+  runRow->addWidget(startButton_); runRow->addWidget(pauseButton_);
+  runRow->addWidget(resumeButton_); runRow->addWidget(cancelButton_);
   runLayout->addLayout(runRow);
-  statusLabel_ = new QLabel(QStringLiteral("状态：空闲"), runGroup);
-  statusLabel_->setObjectName(QStringLiteral("patrolStatusLabel"));
-  progressLabel_ = new QLabel(QStringLiteral("尚未执行路线"), runGroup);
-  progressLabel_->setObjectName(QStringLiteral("patrolProgressLabel"));
-  statusLabel_->setWordWrap(true);
-  progressLabel_->setWordWrap(true);
-  runLayout->addWidget(statusLabel_);
+  progressLabel_ = patrolui::hint("尚未执行路线", runGroup);
+  progressLabel_->setObjectName("patrolProgressLabel");
   runLayout->addWidget(progressLabel_);
-  routeEditorLayout->addWidget(runGroup);
-  routesLayout->addWidget(routeEditor, 2);
-  tabs_->addTab(routesTab, QStringLiteral("路线 / 执行"));
+  auto *roadProgress = patrolui::hint(QString(), runGroup);
+  roadProgress->setObjectName("patrolRoadProgress");
+  roadProgress->hide();
+  runLayout->addWidget(roadProgress);
+  routeRightLayout->addWidget(runGroup);
+  routesLayout->addWidget(routeRight, 3);
+  tabs_->addTab(routesTab, "路线与执行");
 
-  // Runs tab.
   auto *runsTab = new QWidget(tabs_);
-  auto *runsLayout = new QVBoxLayout(runsTab);
+  auto *runsOuter = new QVBoxLayout(runsTab);
+  runsOuter->setContentsMargins(0, 10, 0, 0);
+  auto *runsCard = patrolui::card(runsTab);
+  auto *runsLayout = new QVBoxLayout(runsCard);
+  runsLayout->setContentsMargins(14, 14, 14, 14);
   auto *runsTop = new QHBoxLayout;
-  runsTop->addWidget(new QLabel(QStringLiteral("最近任务记录"), runsTab));
+  runsTop->addWidget(patrolui::heading("最近任务记录", runsCard));
   runsTop->addStretch();
-  refreshRunsButton_ = pageButton(QStringLiteral("刷新记录"), runsTab, QStringLiteral("patrolRefreshRuns"));
+  refreshRunsButton_ = pageButton("刷新记录", runsCard, "patrolRefreshRuns");
   runsTop->addWidget(refreshRunsButton_);
+  auto *roadEvents = pageButton("查看道路事件", runsCard, "patrolRoadEvents");
+  runsTop->addWidget(roadEvents);
   runsLayout->addLayout(runsTop);
-  runsTable_ = table({QStringLiteral("Run"), QStringLiteral("路线"), QStringLiteral("状态"),
-                      QStringLiteral("圈数"), QStringLiteral("步骤"), QStringLiteral("结果"),
-                      QStringLiteral("说明")}, runsTab);
-  runsTable_->setObjectName(QStringLiteral("patrolRunsTable"));
+  runsTable_ = table({"任务编号", "路线", "状态", "圈数", "点位数", "结果", "说明"}, runsCard);
+  runsTable_->setObjectName("patrolRunsTable");
+  runsTable_->horizontalHeader()->setSectionResizeMode(0, QHeaderView::Interactive);
+  runsTable_->setColumnWidth(0, 180);
+  runsTable_->horizontalHeader()->setSectionResizeMode(6, QHeaderView::Stretch);
   runsLayout->addWidget(runsTable_, 1);
-  tabs_->addTab(runsTab, QStringLiteral("执行记录"));
+  runsLayout->addWidget(patrolui::hint("选中任务后，可查看沿录制道路行驶、等待障碍、绕行及停止等事件。", runsCard));
+  runsOuter->addWidget(runsCard);
+  connect(roadEvents, &QPushButton::clicked, this, [this] {
+    const int row = runsTable_->currentRow();
+    if (row < 0 || !runsTable_->item(row, 0)) { setMessage("请先选择一条执行记录", true); return; }
+    client_->roadCommand("EVENTS", {{"run_id", runsTable_->item(row, 0)->text()}});
+  });
+  tabs_->addTab(runsTab, "执行记录");
+  roadsPage_ = new RecordedRoadPage(client_, tabs_);
+  tabs_->addTab(roadsPage_, "录制路网");
   root->addWidget(tabs_, 1);
+
+  messageLabel_ = patrolui::hint("先录入点位，再编排路线；固定路线需先录制并发布道路路网。", this);
+  messageLabel_->setObjectName("patrolMessage");
+  messageLabel_->setTextFormat(Qt::PlainText);
+  messageLabel_->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
+  root->addWidget(messageLabel_);
 
   connect(registerMapButton_, &QPushButton::clicked, this, &PatrolPage::registerCurrentMap);
   connect(setActiveButton_, &QPushButton::clicked, this, &PatrolPage::setActiveMap);
@@ -325,8 +465,12 @@ void PatrolPage::buildUi() {
     if (row < 0 || !routesTable_->item(row, 0)) return;
     const QString routeId = routesTable_->item(row, 0)->data(Qt::UserRole).toString();
     if (routeDirty_ && routeId != currentRouteId_) {
-      setMessage(QStringLiteral("当前路线有未保存修改；请先保存或新建路线"), true);
-      return;
+      if(!confirmDraftDiscard()) {
+        const QSignalBlocker block(routesTable_);
+        for(int i=0;i<routesTable_->rowCount();++i)
+          if(routesTable_->item(i,0)->data(Qt::UserRole).toString()==currentRouteId_) routesTable_->selectRow(i);
+        return;
+      }
     }
     const auto route = routeById(routeId);
     if (!route.routeId.isEmpty()) loadRouteIntoEditor(route);
@@ -348,6 +492,80 @@ void PatrolPage::buildUi() {
   });
   connect(routeNameEdit_, &QLineEdit::textChanged, this, [this] {
     if (!loadingRoute_) { routeDirty_ = true; updateActionStates(); }
+  });
+  connect(navigationMode_,QOverload<int>::of(&QComboBox::currentIndexChanged),this,[this]{
+    if(!loadingRoute_) {routeDirty_=true;planDigest_.clear();} updateActionStates();
+  });
+  connect(routeNetwork_,QOverload<int>::of(&QComboBox::currentIndexChanged),this,[this]{
+    if(!loadingRoute_) {routeDirty_=true;planDigest_.clear();} updateActionStates();
+  });
+  connect(loopCount_,QOverload<int>::of(&QSpinBox::valueChanged),this,[this]{planDigest_.clear();updateActionStates();});
+  connect(previewRecorded_,&QPushButton::clicked,this,[this]{
+    if(routeDirty_ || currentRouteId_.isEmpty()) {setMessage("请先保存路线再预览",true);return;}
+    planDigest_.clear();client_->roadCommand("PLAN",{{"route_id",currentRouteId_},{"loop_count",loopCount_->value()}});
+  });
+  connect(client_,&PatrolClient::roadNetworksChanged,this,[this]{
+    const auto oldId=routeNetwork_->currentData();
+    const auto oldRevision=routeNetwork_->currentData(Qt::UserRole+1).toULongLong();
+    const bool previousLoading=loadingRoute_;loadingRoute_=true;
+    routeNetwork_->clear();
+    for(auto value:client_->roadNetworks()) {auto n=value.toObject();if(!n["published"].toBool()) continue;
+      routeNetwork_->addItem(n["name"].toString()+QString(" · v%1").arg(n["revision"].toInt()),n["network_id"].toString());
+      routeNetwork_->setItemData(routeNetwork_->count()-1,n["revision"].toVariant(),Qt::UserRole+1);
+    }
+    int index=routeNetwork_->findData(oldId);if(index>=0) routeNetwork_->setCurrentIndex(index);
+    loadingRoute_=previousLoading;
+    if(navigationMode_->currentData()=="RECORDED_NETWORK" &&
+       (routeNetwork_->currentData()!=oldId || routeNetwork_->currentData(Qt::UserRole+1).toULongLong()!=oldRevision)) {
+      routeDirty_=true;planDigest_.clear();
+    }
+    updateActionStates();
+  });
+  connect(client_,&PatrolClient::roadReply,this,[this](const QString &op,bool ok,const QString &message,const QJsonObject &data){
+    const QMap<QString,QString> phases{{"READY","准备跟踪"},{"FOLLOWING_REFERENCE","沿录制道路行驶"},
+      {"FOLLOWING_DETOUR","低速绕障"},{"WAITING_OBSTACLE","停车等待障碍解除或可行绕行路径"},
+      {"PLANNING_DETOUR","停车规划受限绕行"},{"STOPPING","确认停稳 / 换向"},{"REJOINING","回到原道路，确认重入位姿"},
+      {"COMPLETED","本段道路完成"},{"FAILED","道路执行失败"},{"STOPPED","已停止"},{"STOP_UNCONFIRMED","停止未确认"}};
+    if(op=="STATUS" && ok) {
+      const bool draft=data["state"].toString("IDLE")!="IDLE";
+      if(draft!=recordingDraft_) {recordingDraft_=draft;if(draft) planDigest_.clear();updateActionStates();}
+      const auto progress=data["progress"].toObject();const QString state=progress["state"].toString();
+      QString line;
+      if(client_->status().active && !state.isEmpty()) {
+        line=QString("道路执行：%1 · 运动段 %2 · 参考采样 %3")
+          .arg(phases.value(state,state)).arg(progress["block"].toInt()+1).arg(progress["reference_index"].toInt());
+        const auto reason=progress["error"].toString().isEmpty()?progress["waiting_reason"].toString():progress["error"].toString();
+        if(!reason.isEmpty()) line+=" · "+reason;
+      }
+      auto *roadProgress = findChild<QLabel*>("patrolRoadProgress");
+      roadProgress->setText(line);
+      roadProgress->setVisible(!line.isEmpty());
+      return;
+    }
+    if(op=="EVENTS") {
+      if(!ok) {setMessage(message,true);return;}
+      QStringList lines;
+      for(auto item:data["events"].toArray()) {auto event=item.toObject();
+        QString line=QString("%1 · 段 %2 · 参考采样 %3").arg(phases.value(event["state"].toString(),event["state"].toString()))
+          .arg(event["block"].toInt()+1).arg(event["reference_index"].toInt());
+        if(event.contains("timestamp_ns")) line=QDateTime::fromMSecsSinceEpoch(event["timestamp_ns"].toVariant().toLongLong()/1000000).toString("yyyy-MM-dd hh:mm:ss")+" · "+line;
+        if(!event["error"].toString().isEmpty()) line+=" · "+event["error"].toString();
+        if(!event["waiting_reason"].toString().isEmpty()) line+=" · "+event["waiting_reason"].toString();
+        lines<<line;
+      }
+      auto *dialog=new QDialog(this);dialog->setAttribute(Qt::WA_DeleteOnClose);dialog->setWindowTitle("道路执行事件");dialog->resize(820,480);
+      auto *layout=new QVBoxLayout(dialog);auto *text=new QPlainTextEdit(dialog);text->setReadOnly(true);
+      text->setPlainText(lines.isEmpty()?"此任务没有录制道路执行事件。":lines.join('\n'));layout->addWidget(text);dialog->show();return;
+    }
+    if(op!="PLAN") return;
+    if(!ok) {planDigest_.clear();setMessage(message,true);updateActionStates();return;}
+    if(data["route_id"].toString()!=currentRouteId_ || data["route_revision"].toVariant().toULongLong()!=currentRouteRevision_ ||
+       data["loop_count"].toInt()!=loopCount_->value() || routeDirty_) return;
+    planDigest_=data["digest"].toString();roadsPage_->showPlan(data);
+    QStringList parts;
+    for(auto leg:data["legs"].toArray()) {auto l=leg.toObject();parts<<QString("%1 段录制道路").arg(l["edge_ids"].toArray().size());}
+    setMessage("已验证实际行驶路线："+parts.join(" → ")+"。绿色轨迹可在“录制路网”页查看；启动后仅遇障允许受限绕行。",false);
+    updateActionStates();
   });
   connect(stepsTable_, &QTableWidget::itemSelectionChanged, this, [this] {
     const int row = stepsTable_->currentRow();
@@ -374,6 +592,7 @@ void PatrolPage::setActiveMap() {
   const int index = mapsCombo_->currentIndex();
   if (index < 0) { setMessage(QStringLiteral("请选择已登记地图"), true); return; }
   const QString mapId = mapsCombo_->itemData(index).toString();
+  if(mapId!=activeMapId_ && !confirmDraftDiscard()) return;
   quint64 revision = 0;
   for (const auto &item : client_->maps()) if (item.mapId == mapId) revision = item.revision;
   if (!mapId.isEmpty()) client_->setActiveMap(mapId, revision);
@@ -409,6 +628,11 @@ void PatrolPage::onMapsChanged() {
     pointsTable_->setRowCount(0);
     routesTable_->setRowCount(0);
     runsTable_->setRowCount(0);
+    updateEmptyTable(pointsTable_);
+    updateEmptyTable(routesTable_);
+    updateEmptyTable(runsTable_);
+    pointsCountLabel_->setText(QStringLiteral("0 个点位"));
+    routesCountLabel_->setText(QStringLiteral("0 条"));
     pointCombo_->clear();
     homePointLabel_->setText(QStringLiteral("待命返航点：未设置"));
   }
@@ -428,7 +652,8 @@ void PatrolPage::populateMaps() {
   const auto map = activeMap();
   activeMapLabel_->setText(map.mapId.isEmpty()
                                ? QStringLiteral("活跃地图：未设置")
-                               : QStringLiteral("活跃地图：%1 rev=%2").arg(map.name).arg(map.revision));
+                               : QStringLiteral("当前地图：%1").arg(map.name));
+  activeMapLabel_->setToolTip(QStringLiteral("地图版本：%1\n%2").arg(map.revision).arg(map.navigationYaml));
 }
 
 void PatrolPage::onPointsChanged() {
@@ -452,10 +677,10 @@ void PatrolPage::onHomePointChanged() {
   if (home.mapId != activeMapId_ || !home.exists) {
     homePointLabel_->setText(QStringLiteral("待命返航点：未设置或已失效"));
   } else {
-    homePointLabel_->setText(QStringLiteral("待命返航点：X %1 m · Y %2 m · 朝向 %3° · map rev %4")
+    homePointLabel_->setText(QStringLiteral("返航点：X %1 m · Y %2 m · 朝向 %3°")
                                  .arg(home.x, 0, 'f', 2).arg(home.y, 0, 'f', 2)
-                                 .arg(home.yaw * 180.0 / kPi, 0, 'f', 1)
-                                 .arg(home.mapRevision));
+                                 .arg(home.yaw * 180.0 / kPi, 0, 'f', 1));
+    homePointLabel_->setToolTip(QStringLiteral("返航点地图版本：%1").arg(home.mapRevision));
   }
   updateActionStates();
 }
@@ -499,6 +724,7 @@ void PatrolPage::populatePoints() {
   const int selectedRow = pointsTable_->currentRow();
   pointsTable_->setRowCount(0);
   const auto list = client_->points();
+  pointsCountLabel_->setText(QStringLiteral("%1 个点位").arg(list.size()));
   for (const auto &point : list) {
     const int row = pointsTable_->rowCount();
     pointsTable_->insertRow(row);
@@ -512,6 +738,7 @@ void PatrolPage::populatePoints() {
     pointsTable_->setItem(row, 4, readOnlyItem(QString::number(point.revision)));
   }
   if (selectedRow >= 0 && selectedRow < pointsTable_->rowCount()) pointsTable_->selectRow(selectedRow);
+  updateEmptyTable(pointsTable_);
   populateAvailablePoints();
 }
 
@@ -526,6 +753,7 @@ void PatrolPage::populateAvailablePoints() {
 void PatrolPage::populateRoutes() {
   const int selectedRow = routesTable_->currentRow();
   routesTable_->setRowCount(0);
+  routesCountLabel_->setText(QStringLiteral("%1 条").arg(client_->routes().size()));
   for (const auto &route : client_->routes()) {
     const int row = routesTable_->rowCount();
     routesTable_->insertRow(row);
@@ -544,6 +772,7 @@ void PatrolPage::populateRoutes() {
   }
   if (routesTable_->currentRow() < 0 && selectedRow >= 0 && selectedRow < routesTable_->rowCount())
     routesTable_->selectRow(selectedRow);
+  updateEmptyTable(routesTable_);
 }
 
 void PatrolPage::populateRuns() {
@@ -559,12 +788,21 @@ void PatrolPage::populateRuns() {
     runsTable_->setItem(row, 5, readOnlyItem(run.success ? QStringLiteral("成功") : QStringLiteral("未成功")));
     runsTable_->setItem(row, 6, readOnlyItem(run.message));
   }
+  updateEmptyTable(runsTable_);
 }
 
 void PatrolPage::loadRouteIntoEditor(const PatrolRouteInfo &route) {
   loadingRoute_ = true;
   currentRouteId_ = route.routeId;
   currentRouteRevision_ = route.revision;
+  planDigest_.clear();
+  navigationMode_->setCurrentIndex(route.navigationMode=="RECORDED_NETWORK"?1:0);
+  int networkIndex=routeNetwork_->findData(route.networkId);
+  if(networkIndex<0 && !route.networkId.isEmpty()) {
+    routeNetwork_->addItem("已保存路网（待刷新）",route.networkId);networkIndex=routeNetwork_->count()-1;
+    routeNetwork_->setItemData(networkIndex,route.networkRevision,Qt::UserRole+1);
+  }
+  if(networkIndex>=0) routeNetwork_->setCurrentIndex(networkIndex);
   routeNameEdit_->setText(route.name);
   currentSteps_ = route.steps;
   syncStepTable();
@@ -577,6 +815,7 @@ void PatrolPage::clearRouteEditor() {
   loadingRoute_ = true;
   currentRouteId_.clear();
   currentRouteRevision_ = 0;
+  planDigest_.clear();navigationMode_->setCurrentIndex(0);
   currentSteps_.clear();
   routeNameEdit_->setText(QStringLiteral("新路线"));
   syncStepTable();
@@ -595,6 +834,7 @@ void PatrolPage::syncStepTable() {
     stepsTable_->setItem(row, 2, readOnlyItem(QString::number(step.y, 'f', 3)));
     stepsTable_->setItem(row, 3, readOnlyItem(QString::number(step.dwellSeconds, 'f', 1)));
   }
+  updateEmptyTable(stepsTable_);
 }
 
 void PatrolPage::updatePointFormFromSelection() {
@@ -699,9 +939,30 @@ void PatrolPage::updateStepDwell() {
 
 void PatrolPage::newRoute() {
   if (activeMapId_.isEmpty()) { setMessage(QStringLiteral("请先设置活跃地图"), true); return; }
+  if(!confirmDraftDiscard()) return;
   clearRouteEditor();
   routesTable_->clearSelection();
   setMessage(QStringLiteral("已新建路线草稿，请添加点位后保存"), false);
+}
+
+bool PatrolPage::confirmDraftDiscard() {
+  if(!routeDirty_) return true;
+  const auto choice=QMessageBox::question(this,"未保存路线","当前路线有未保存修改。保存后留在本页，或放弃修改继续？",
+                                         QMessageBox::Save|QMessageBox::Discard|QMessageBox::Cancel,QMessageBox::Cancel);
+  if(choice==QMessageBox::Save) {saveRoute();return false;}
+  if(choice==QMessageBox::Discard) {routeDirty_=false;planDigest_.clear();return true;}
+  return false;
+}
+
+void PatrolPage::closeEvent(QCloseEvent *event) {
+  if(!confirmDraftDiscard()) {event->ignore();return;}
+  if(roadsPage_ && roadsPage_->hasDraft()) {
+    const auto choice=QMessageBox::question(this,"录制草稿","关闭前暂停录制并保留草稿，稍后可在“录制路网”中恢复。是否关闭？",
+                                           QMessageBox::Yes|QMessageBox::No,QMessageBox::No);
+    if(choice!=QMessageBox::Yes) {event->ignore();return;}
+    roadsPage_->pauseForClose();
+  }
+  QWidget::closeEvent(event);
 }
 
 void PatrolPage::saveRoute() {
@@ -709,7 +970,11 @@ void PatrolPage::saveRoute() {
   const QString name = routeNameEdit_->text().trimmed();
   if (name.isEmpty()) { setMessage(QStringLiteral("请填写路线名称"), true); return; }
   if (currentSteps_.isEmpty()) { setMessage(QStringLiteral("路线至少需要一个点位"), true); return; }
-  client_->upsertRoute(currentRouteId_, activeMapId_, name, currentSteps_, currentRouteRevision_);
+  const bool fixed=navigationMode_->currentData()=="RECORDED_NETWORK";
+  if(fixed && routeNetwork_->currentData().toString().isEmpty()) {setMessage("请先在录制路网页发布路网",true);return;}
+  client_->upsertRoute(currentRouteId_, activeMapId_, name, currentSteps_, currentRouteRevision_,
+                      navigationMode_->currentData().toString(),fixed?routeNetwork_->currentData().toString():QString(),
+                      fixed?routeNetwork_->currentData(Qt::UserRole+1).toULongLong():0);
 }
 
 void PatrolPage::deleteSelectedRoute() {
@@ -734,7 +999,7 @@ void PatrolPage::startRun() {
   }
   const auto map = activeMap();
   client_->runRoute(currentRouteId_, activeMapId_, currentRouteRevision_, map.revision,
-                    static_cast<quint32>(loopCount_->value()));
+                    static_cast<quint32>(loopCount_->value()),planDigest_);
 }
 
 void PatrolPage::pauseRun() {
@@ -772,13 +1037,13 @@ void PatrolPage::onStatusChanged() {
   statusLabel_->setText(QStringLiteral("状态：%1%2")
                             .arg(PatrolClient::stateName(status.state),
                                  status.message.isEmpty() ? QString() : QStringLiteral(" · ") + status.message));
-  progressLabel_->setText(QStringLiteral("Run：%1 · 路线：%2 · 圈 %3/%4 · 点 %5/%6 · 停留 %7 s")
-                              .arg(status.runId.isEmpty() ? QStringLiteral("—") : status.runId,
-                                   status.routeId.isEmpty() ? QStringLiteral("—") : status.routeId)
+  progressLabel_->setText(status.runId.isEmpty() ? QStringLiteral("尚未执行路线")
+                         : QStringLiteral("进度：第 %1 / %2 圈 · 第 %3 / %4 个点位 · 剩余停留 %5 s")
                               .arg(status.loopIndex).arg(status.totalLoops == 0 ? QStringLiteral("∞")
                                                                               : QString::number(status.totalLoops))
                               .arg(status.stepIndex).arg(status.stepCount)
                               .arg(QString::number(status.dwellRemaining, 'f', 1)));
+  progressLabel_->setToolTip(QStringLiteral("任务：%1\n路线：%2").arg(status.runId, status.routeId));
   updateActionStates();
 }
 
@@ -796,8 +1061,7 @@ void PatrolPage::showError(const QString &message) { setMessage(message, true); 
 
 void PatrolPage::setMessage(const QString &message, bool error) {
   messageLabel_->setText(message);
-  messageLabel_->setStyleSheet(error ? QStringLiteral("color:#b42318;font-weight:600;")
-                                     : QStringLiteral("color:#475467;"));
+  patrolui::tone(messageLabel_, error ? "danger" : "info");
 }
 
 QString PatrolPage::activeMapName() const { return activeMap().name; }
@@ -819,6 +1083,16 @@ void PatrolPage::updateActionStates() {
   const bool activeRun = status.active;
   const bool routeRun = activeRun && !status.runId.startsWith(QStringLiteral("return_"));
   const bool paused = status.state == 7 && routeRun;
+  serviceLabel_->setText(offline_ ? QStringLiteral("离线编辑")
+                        : !available ? QStringLiteral("巡航接口不可用")
+                        : client_->routeServerReady() ? QStringLiteral("巡航服务已连接")
+                                                    : QStringLiteral("巡航服务未就绪"));
+  patrolui::tone(serviceLabel_, !offline_ && available && client_->routeServerReady() ? "good" : "warning");
+  if (routeDraftLabel_) {
+    routeDraftLabel_->setText(routeDirty_ ? QStringLiteral("未保存修改")
+                           : currentRouteId_.isEmpty() ? QStringLiteral("新路线") : QStringLiteral("已保存"));
+    patrolui::tone(routeDraftLabel_, routeDirty_ ? "warning" : "info");
+  }
   registerMapButton_->setEnabled(available);
   setActiveButton_->setEnabled(available && mapsCombo_->currentIndex() >= 0);
   refreshAllButton_->setEnabled(available);
@@ -839,6 +1113,7 @@ void PatrolPage::updateActionStates() {
                               startPermission_(&startPermissionReason);
   const QString startPermissionTip = startPermitted ? QString() : startPermissionReason;
   QStringList startBlockers;
+  if(recordingDraft_) startBlockers << QStringLiteral("录制草稿尚未处理，请先保存道路或放弃草稿");
   if (offline_) startBlockers << QStringLiteral("当前为离线模式，不能执行巡航");
   if (!available) {
     startBlockers << QStringLiteral("巡航接口未构建，请先构建巡航模块");
@@ -849,6 +1124,11 @@ void PatrolPage::updateActionStates() {
   if (currentRouteId_.isEmpty())
     startBlockers << QStringLiteral("未选择已保存路线，请选择路线，或新建后点击“保存路线”");
   if (routeDirty_) startBlockers << QStringLiteral("路线有未保存修改，请点击“保存路线”");
+  const bool fixed=navigationMode_->currentData()=="RECORDED_NETWORK";
+  routeNetwork_->setVisible(fixed);previewRecorded_->setVisible(fixed);
+  previewRecorded_->setEnabled(!offline_ && !recordingDraft_ && !routeDirty_ && !activeRun && !currentRouteId_.isEmpty() && client_->roadServerReady());
+  if(fixed && planDigest_.isEmpty()) startBlockers << "固定路线尚未验证，请点击“预览实际路线”；缺路时需补录";
+  if(roadsPage_ && roadsPage_->hasDraft()) startBlockers << "录制草稿尚未保存或放弃";
   if (activeRun) {
     startBlockers << (paused ? QStringLiteral("当前任务已暂停，请使用“继续”，或取消后再开始新任务")
                             : QStringLiteral("已有巡航或返航任务正在执行，请先取消并等待任务结束"));

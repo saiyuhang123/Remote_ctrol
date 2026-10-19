@@ -7,6 +7,9 @@ from typing import Any, Iterable
 import json
 import sqlite3
 import threading
+import time
+
+from .recorded_routes.storage import RoadStorage
 
 from .models import (
     HomePoint,
@@ -23,10 +26,10 @@ from .models import (
     validate_route_steps,
 )
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 
-class PatrolStore:
+class PatrolStore(RoadStorage):
     def __init__(self, database_path: str | Path):
         self.path = str(Path(database_path).expanduser())
         Path(self.path).parent.mkdir(parents=True, exist_ok=True)
@@ -36,6 +39,17 @@ class PatrolStore:
         self._conn.execute("PRAGMA foreign_keys = ON")
         self._conn.execute("PRAGMA busy_timeout = 5000")
         self._conn.execute("PRAGMA journal_mode = WAL")
+        if self._conn.execute("SELECT 1 FROM sqlite_master WHERE name='schema_version'").fetchone():
+            previous = self._conn.execute('SELECT version FROM schema_version LIMIT 1').fetchone()
+            if previous and int(previous[0]) > SCHEMA_VERSION:
+                self._conn.close()
+                raise RuntimeError('Database schema is newer than supported')
+            if previous and int(previous[0]) < SCHEMA_VERSION:
+                backup = sqlite3.connect(self.path + f'.pre_v3.{time.time_ns()}.bak')
+                try:
+                    self._conn.backup(backup)
+                finally:
+                    backup.close()
         self._initialize()
 
     def close(self) -> None:
@@ -203,10 +217,13 @@ class PatrolStore:
                 raise RuntimeError(
                     f"robot_patrol database schema {version} is newer than supported {SCHEMA_VERSION}")
             if version < SCHEMA_VERSION:
+                self.initialize_roads()
                 self._conn.execute("DELETE FROM schema_version")
                 self._conn.execute("INSERT INTO schema_version(version) VALUES(?)",
                                    (SCHEMA_VERSION,))
                 self._conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+            else:
+                self.initialize_roads()
 
     @staticmethod
     def _map_from_row(row: sqlite3.Row) -> MapBinding:
@@ -464,6 +481,8 @@ class PatrolStore:
             route_id=row["route_id"], map_id=row["map_id"], name=row["name"],
             steps=self._steps_for_route(conn, row["route_id"]), revision=row["revision"],
             created_at_ns=row["created_at"], updated_at_ns=row["updated_at"],
+            navigation_mode=row['navigation_mode'], network_id=row['network_id'],
+            network_revision=row['network_revision'],
         )
 
     def list_routes(self, map_id: str) -> list[Route]:
@@ -486,12 +505,29 @@ class PatrolStore:
             return self._route_from_row(self._conn, row)
 
     def upsert_route(self, route_id: str, map_id: str, name: str,
-                     steps: Iterable[Any], expected_revision: int = 0) -> Route:
+                     steps: Iterable[Any], expected_revision: int = 0,
+                     navigation_mode: str = '', network_id: str = '', network_revision: int = 0) -> Route:
         self.get_map(map_id)
         name = validate_name(name, "路线名称")
         normalized = validate_route_steps(steps)
         point_ids = {point_id for point_id, _ in normalized}
         with self._transaction() as conn:
+            previous = conn.execute('SELECT * FROM routes WHERE route_id=?', (route_id,)).fetchone() if route_id else None
+            if previous and previous['navigation_mode'] == 'RECORDED_NETWORK' and not navigation_mode:
+                raise PatrolError('UNSUPPORTED_MODE', '固定路线需要支持此模式的客户端，禁止降级成自由导航')
+            mode = navigation_mode or 'FREE_NAV'
+            if mode not in ('FREE_NAV', 'RECORDED_NETWORK'):
+                raise PatrolError('INVALID_DATA', '不支持的路线导航模式')
+            if mode == 'RECORDED_NETWORK':
+                net = self.get_network(network_id)
+                mapping = self.get_map(map_id)
+                if not net['published'] or net['map_id'] != map_id or net['map_revision'] != mapping.revision or net['revision'] != int(network_revision):
+                    raise PatrolError('STALE_DATA', '路网未发布、地图不符或版本已变化')
+                for point_id in point_ids:
+                    if point_id not in net['document'].get('bindings', {}):
+                        raise PatrolError('POINT_NOT_BOUND', f'点位未绑定路网：{point_id}')
+            else:
+                network_id, network_revision = '', 0
             for point_id in point_ids:
                 row = conn.execute("SELECT map_id FROM points WHERE point_id=?", (point_id,)).fetchone()
                 if not row or row["map_id"] != map_id:
@@ -503,15 +539,17 @@ class PatrolStore:
                     raise PatrolError("STALE_DATA", "路线已被其他会话修改，请刷新后重试")
                 chosen_id = route_id
                 revision = int(row["revision"]) + 1
-                conn.execute("UPDATE routes SET name=?,revision=?,updated_at=? WHERE route_id=?",
-                             (name, revision, now, chosen_id))
+                if row['map_id'] != map_id:
+                    raise PatrolError('MAP_MISMATCH', '不能将已有路线移动到其他地图')
+                conn.execute("UPDATE routes SET name=?,revision=?,updated_at=?,navigation_mode=?,network_id=?,network_revision=? WHERE route_id=?",
+                             (name, revision, now, mode, network_id, network_revision, chosen_id))
                 conn.execute("DELETE FROM route_steps WHERE route_id=?", (chosen_id,))
             else:
                 chosen_id = route_id or new_id("route")
                 revision = 1
                 conn.execute(
-                    "INSERT INTO routes(route_id,map_id,name,revision,created_at,updated_at)"
-                    " VALUES(?,?,?,?,?,?)", (chosen_id, map_id, name, revision, now, now)
+                    "INSERT INTO routes(route_id,map_id,name,revision,created_at,updated_at,navigation_mode,network_id,network_revision)"
+                    " VALUES(?,?,?,?,?,?,?,?,?)", (chosen_id, map_id, name, revision, now, now, mode, network_id, network_revision)
                 )
             for order, (point_id, dwell) in enumerate(normalized):
                 conn.execute(

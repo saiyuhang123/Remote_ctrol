@@ -407,7 +407,8 @@ void MainWindow::openPatrolPage() {
   dialog->setObjectName("patrolWindow");
   dialog->setWindowTitle("路线巡航");
   dialog->setAttribute(Qt::WA_DeleteOnClose);
-  dialog->resize(1180, 760);
+  const QSize available = screen() ? screen()->availableGeometry().size() : QSize(1280, 840);
+  dialog->resize(qMin(1180, available.width() - 40), qMin(760, available.height() - 40));
   auto *layout = new QVBoxLayout(dialog);
   layout->setContentsMargins(0, 0, 0, 0);
   auto basePermission = [this](QString *reason) {

@@ -171,13 +171,15 @@ class Nav2Driver:
         pose.pose.position.z = 0.0
         pose.pose.orientation = yaw_to_quaternion(float(step.yaw))
         goal.pose = pose
+        send_options = self.prepare_goal(step, goal, flags)
 
         def feedback_callback(message):
-            status_cb(state=3, current_point_name=step.point_name,
+            status_cb(state=3, current_point_name=getattr(step,'point_name','待命返航点'),
                       current_goal_id=self.last_goal_id,
                       message="导航中")
 
-        send_future = self.client.send_goal_async(goal, feedback_callback=feedback_callback)
+        send_future = self.client.send_goal_async(goal, feedback_callback=feedback_callback,
+                                                  **send_options)
         goal_handle = self._wait_future(
             send_future, min(15.0, self.point_timeout), flags, status_cb,
             cancel_timeout=self.cancel_confirm_timeout)
@@ -237,6 +239,10 @@ class Nav2Driver:
                 with self._handle_lock:
                     self._current_handle = None
                 self._notify_goal_changed()
+
+    def prepare_goal(self, step, goal, flags):
+        """Extension point; ordinary patrol keeps Nav2's default behavior tree."""
+        return {}
 
     def _current_pose(self) -> tuple[float, float, float, int] | None:
         try:

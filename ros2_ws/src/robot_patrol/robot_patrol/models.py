@@ -101,6 +101,9 @@ class Route:
     revision: int = 1
     created_at_ns: int = 0
     updated_at_ns: int = 0
+    navigation_mode: str = "FREE_NAV"
+    network_id: str = ""
+    network_revision: int = 0
 
 
 @dataclass
@@ -127,6 +130,8 @@ class RouteSnapshot:
     name: str
     revision: int
     steps: list[RouteStep]
+    navigation_mode: str = "FREE_NAV"
+    recorded_plan: dict = field(default_factory=dict)
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -134,6 +139,8 @@ class RouteSnapshot:
             "map_id": self.map_id,
             "name": self.name,
             "revision": self.revision,
+            "navigation_mode": self.navigation_mode,
+            "recorded_plan": self.recorded_plan,
             "steps": [
                 {
                     "point_id": step.point_id,

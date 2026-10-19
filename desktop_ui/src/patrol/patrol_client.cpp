@@ -1,6 +1,7 @@
 #include "patrol/patrol_client.h"
 
 #include <QUuid>
+#include <QJsonDocument>
 #include <algorithm>
 #include <atomic>
 #include <chrono>
@@ -35,6 +36,7 @@
 #include <patrol_interfaces/srv/set_home_point.hpp>
 #include <patrol_interfaces/srv/upsert_point.hpp>
 #include <patrol_interfaces/srv/upsert_route.hpp>
+#include <patrol_interfaces/srv/road_command.hpp>
 
 namespace {
 PatrolMapInfo mapInfo(const patrol_interfaces::msg::MapBinding &message) {
@@ -72,6 +74,9 @@ PatrolRouteInfo routeInfo(const patrol_interfaces::msg::PatrolRoute &message) {
   info.mapId = QString::fromStdString(message.map_id);
   info.name = QString::fromStdString(message.name);
   info.revision = message.revision;
+  info.navigationMode = QString::fromStdString(message.navigation_mode.empty()?"FREE_NAV":message.navigation_mode);
+  info.networkId = QString::fromStdString(message.network_id);
+  info.networkRevision = message.network_revision;
   for (const auto &stepMessage : message.steps) {
     PatrolRouteStepInfo step;
     step.stepId = QString::fromStdString(stepMessage.step_id);
@@ -143,6 +148,8 @@ struct PatrolClient::Impl {
   rclcpp::Client<patrol_interfaces::srv::GetHomePoint>::SharedPtr getHomePoint;
   rclcpp::Client<patrol_interfaces::srv::SetHomePoint>::SharedPtr setHomePoint;
   rclcpp::Client<patrol_interfaces::srv::ControlRun>::SharedPtr controlRun;
+  rclcpp::Client<patrol_interfaces::srv::RoadCommand>::SharedPtr road;
+  QJsonArray networksData;
   rclcpp_action::Client<patrol_interfaces::action::RunRoute>::SharedPtr runRoute;
   rclcpp_action::Client<patrol_interfaces::action::ReturnHome>::SharedPtr returnHome;
   rclcpp::Subscription<patrol_interfaces::msg::PatrolStatus>::SharedPtr statusSubscription;
@@ -202,6 +209,7 @@ struct PatrolClient::Impl {
           operatorHeartbeat->publish(message);
         });
     executor.add_node(node);
+    road = node->create_client<patrol_interfaces::srv::RoadCommand>("/patrol/road_command");
     thread = std::thread([this] {
       try { executor.spin(); } catch (const std::exception &error) {
         QMetaObject::invokeMethod(owner, [this, text = QString::fromUtf8(error.what())] {
@@ -245,6 +253,7 @@ struct PatrolClient::Impl {
     else if constexpr (std::is_same_v<Service, patrol_interfaces::srv::GetHomePoint>) client = getHomePoint;
     else if constexpr (std::is_same_v<Service, patrol_interfaces::srv::SetHomePoint>) client = setHomePoint;
     else if constexpr (std::is_same_v<Service, patrol_interfaces::srv::ControlRun>) client = controlRun;
+    else if constexpr (std::is_same_v<Service, patrol_interfaces::srv::RoadCommand>) client = road;
     if (!ready(client, QString::fromStdString(name))) return;
     client->async_send_request(request, [this, operation, callback](
         typename rclcpp::Client<Service>::SharedFuture future) {
@@ -538,11 +547,14 @@ void PatrolClient::refreshRoutes(const QString &mapId) {
 }
 
 void PatrolClient::upsertRoute(const QString &routeId, const QString &mapId, const QString &name,
-                               const QVector<PatrolRouteStepInfo> &steps, quint64 expectedRevision) {
+                               const QVector<PatrolRouteStepInfo> &steps, quint64 expectedRevision,
+                               const QString &navigationMode, const QString &networkId, quint64 networkRevision) {
 #ifdef DESKTOP_HAS_PATROL_INTERFACES
   auto request = std::make_shared<patrol_interfaces::srv::UpsertRoute::Request>();
   request->route_id = routeId.toStdString(); request->map_id = mapId.toStdString();
   request->name = name.toStdString(); request->expected_revision = expectedRevision;
+  request->navigation_mode = navigationMode.toStdString(); request->network_id = networkId.toStdString();
+  request->network_revision = networkRevision;
   for (const auto &stepInfo : steps) {
     patrol_interfaces::msg::RouteStep step;
     step.point_id = stepInfo.pointId.toStdString();
@@ -558,6 +570,7 @@ void PatrolClient::upsertRoute(const QString &routeId, const QString &mapId, con
       });
 #else
   Q_UNUSED(routeId); Q_UNUSED(mapId); Q_UNUSED(name); Q_UNUSED(steps); Q_UNUSED(expectedRevision);
+  Q_UNUSED(navigationMode); Q_UNUSED(networkId); Q_UNUSED(networkRevision);
   PATROL_UNAVAILABLE(QStringLiteral("保存路线"));
 #endif
 }
@@ -769,7 +782,7 @@ void PatrolClient::cancelActiveTask() {
 }
 
 void PatrolClient::runRoute(const QString &routeId, const QString &mapId,
-                            quint64 routeRevision, quint64 mapRevision, quint32 loopCount) {
+                            quint64 routeRevision, quint64 mapRevision, quint32 loopCount, const QString &planDigest) {
 #ifdef DESKTOP_HAS_PATROL_INTERFACES
   if (!impl_->runRoute->action_server_is_ready()) {
     emit errorOccurred(QStringLiteral("巡航 Action 未就绪；请先启动 robot_patrol"));
@@ -781,6 +794,7 @@ void PatrolClient::runRoute(const QString &routeId, const QString &mapId,
   goal.route_id = routeId.toStdString(); goal.map_id = mapId.toStdString();
   goal.route_revision = routeRevision; goal.map_revision = mapRevision;
   goal.loop_count = loopCount;
+  goal.plan_digest = planDigest.toStdString();
   {
     std::lock_guard<std::mutex> lock(impl_->mutex);
     impl_->goalPending = true;
@@ -819,7 +833,7 @@ void PatrolClient::runRoute(const QString &routeId, const QString &mapId,
   };
   impl_->runRoute->async_send_goal(goal, options);
 #else
-  Q_UNUSED(routeId); Q_UNUSED(mapId); Q_UNUSED(routeRevision); Q_UNUSED(mapRevision); Q_UNUSED(loopCount);
+  Q_UNUSED(routeId); Q_UNUSED(mapId); Q_UNUSED(routeRevision); Q_UNUSED(mapRevision); Q_UNUSED(loopCount); Q_UNUSED(planDigest);
   PATROL_UNAVAILABLE(QStringLiteral("启动巡航"));
 #endif
 }
@@ -887,5 +901,48 @@ void PatrolClient::controlRun(quint8 command, const QString &runId) {
 #else
   Q_UNUSED(command); Q_UNUSED(runId);
   PATROL_UNAVAILABLE(QStringLiteral("巡航控制"));
+#endif
+}
+
+bool PatrolClient::roadServerReady() const {
+#ifdef DESKTOP_HAS_PATROL_INTERFACES
+  return impl_->road->service_is_ready();
+#else
+  return false;
+#endif
+}
+
+QJsonArray PatrolClient::roadNetworks() const {
+#ifdef DESKTOP_HAS_PATROL_INTERFACES
+  std::lock_guard<std::mutex> lock(impl_->mutex);
+  return impl_->networksData;
+#else
+  return {};
+#endif
+}
+
+void PatrolClient::roadCommand(const QString &operation, QJsonObject payload) {
+#ifdef DESKTOP_HAS_PATROL_INTERFACES
+  if (!roadServerReady()) {
+    emit roadReply(operation, false, QStringLiteral("道路服务未就绪；请启动带巡航功能的定位导航"), {});
+    return;
+  }
+  payload["owner_session_id"] = impl_->ownerSessionId;
+  payload["command_id"] = QUuid::createUuid().toString(QUuid::WithoutBraces);
+  auto request = std::make_shared<patrol_interfaces::srv::RoadCommand::Request>();
+  request->operation = operation.toStdString();
+  request->payload_json = QJsonDocument(payload).toJson(QJsonDocument::Compact).toStdString();
+  impl_->call<patrol_interfaces::srv::RoadCommand>("/patrol/road_command", operation, request,
+      [this, operation](const patrol_interfaces::srv::RoadCommand::Response &response) {
+        QJsonObject data = QJsonDocument::fromJson(QByteArray::fromStdString(response.data_json)).object();
+        if (response.success && operation == "LIST") {
+          { std::lock_guard<std::mutex> lock(impl_->mutex); impl_->networksData = data["networks"].toArray(); }
+          emit roadNetworksChanged();
+        }
+        emit roadReply(operation, response.success, QString::fromStdString(response.message), data);
+      });
+#else
+  Q_UNUSED(payload);
+  emit roadReply(operation, false, QStringLiteral("未构建本地道路接口"), {});
 #endif
 }

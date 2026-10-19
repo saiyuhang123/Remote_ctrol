@@ -1,0 +1,9 @@
+# Versioned local road-library protocol. Operations and JSON schemas are documented
+# in robot_patrol/recorded_routes/README.md; payload size and fields are validated.
+string operation
+string payload_json
+---
+bool success
+string error_code
+string message
+string data_json

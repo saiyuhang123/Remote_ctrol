@@ -24,6 +24,34 @@ SRC = Path(__file__).resolve().parents[2]
 ROOT = SRC.parents[1]
 
 
+def test_recorded_routes_are_opt_in_and_have_independent_plugins():
+    from chassis_nav2.recorded_routes import validate_options,nav2_overlay
+    assert not validate_options({})
+    for args in ({'enable_recorded_routes':'true'}, {'enable_recorded_routes':'true','enable_patrol':'false'}):
+        with __import__('pytest').raises(ValueError):validate_options(args)
+    assert validate_options({'enable_recorded_routes':'true','enable_patrol':'true'})
+    hw=yaml.safe_load((SRC/'chassis_nav2/config/hardware.yaml').read_text())
+    for name in ('nav2.yaml','nav2_2d_localization.yaml','nav2_carto_localization.yaml'):
+        path=SRC/'chassis_nav2/config'/name
+        original=yaml.safe_load(path.read_text())
+        assert original['controller_server']['ros__parameters']['controller_plugins']==['FollowPath']
+        controller=nav2_overlay('controller_server',path,hw)
+        assert controller['controller_plugins']==['FollowPath','RecordedRoute']
+        assert controller['RecordedRoute.allow_reversing'] and not controller['RecordedRoute.use_rotate_to_heading']
+        assert nav2_overlay('planner_server',path,hw)['planner_plugins']==['GridBased','RecordedDetour']
+
+
+def test_desktop_recorded_markers_preserve_all_navigation_displays():
+    for name in ('navigation','navigation_fastlio','navigation_amcl'):
+        document=yaml.safe_load((ROOT/'desktop_ui/config/rviz'/f'{name}.rviz').read_text())
+        manager=document['Visualization Manager'];assert manager['Enabled']
+        displays={display['Name']:display for display in manager['Displays']}
+        assert displays['栅格地图']['Enabled']
+        assert displays['录制路网']['Topic']['Durability Policy']=='Transient Local'
+        assert displays['固定路线计划']['Enabled'] and displays['局部绕行']['Enabled']
+        if name=='navigation_fastlio':assert displays['全局点云地图']['Enabled']
+
+
 def load(path):
     spec = importlib.util.spec_from_file_location(path.stem, path)
     module = importlib.util.module_from_spec(spec)
@@ -355,26 +383,24 @@ class IntegrationTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     bringup.configure_chassis_odometry(SimpleNamespace(launch_configurations=args))
 
-    def test_gateway_rejects_unlocalized_goals_and_cancels_late_accept_on_stop(self):
+    def test_gateway_estop_gate_and_cancels_late_owned_task_acceptance(self):
+        # The gateway now routes through robot_patrol instead of the removed
+        # send_nav_goal API. Test its current ownership/cancellation boundary.
         cls = load(SRC/'robot_gateway/robot_gateway/gateway_node.py').GatewayNode
         node = cls.__new__(cls)
         node._lock, node._estopped = threading.Lock(), True
-        node.get_logger = lambda: SimpleNamespace(warn=lambda *a: None, info=lambda *a: None)
-        node.send_nav_goal(1., 2., 0.)
-        self.assertEqual(node._nav_status, 'estopped')
+        node._estop_time, node._estop_timeout = time.monotonic(), 2.0
+        self.assertEqual(node._estop_check()[1], 'ESTOPPED')
+        node._estopped = None
+        self.assertEqual(node._estop_check()[1], 'ESTOP_UNKNOWN')
         node._estopped = False
-        def missing(*args):
-            raise LookupError('No successful map localization yet')
-        node._tf_buffer = SimpleNamespace(lookup_transform=missing)
-        node.send_nav_goal(1., 2., 0.)
-        self.assertEqual(node._nav_status, 'unlocalized')
+        self.assertTrue(node._estop_check()[0])
+        node._task_lock = threading.Lock()
+        node._task_kind, node._task_request_id = '', ''
         canceled = []
-        node._estopped = True
-        handle = SimpleNamespace(accepted=True, cancel_goal_async=lambda: canceled.append(True),
-                                 get_result_async=lambda: SimpleNamespace(add_done_callback=lambda cb: None))
-        node._on_nav_response(SimpleNamespace(result=lambda: handle))
-        self.assertTrue(canceled)
-        self.assertEqual(node._nav_status, 'canceling')
+        handle = SimpleNamespace(accepted=True, cancel_goal_async=lambda: canceled.append(True))
+        node._on_task_goal_response('route', 'old-request', None, SimpleNamespace(result=lambda: handle))
+        self.assertEqual(canceled, [True])
 
     def test_fusion_waits_for_icp_and_corrects_imu_offset(self):
         cls = load(SRC/'FAST_LIO_LOCALIZATION_ROS2/scripts/transform_fusion.py').TransformFusionNode
@@ -430,16 +456,16 @@ class IntegrationTests(unittest.TestCase):
             Image.new('L', (3, 2), 205).save(p/'actual.pgm')
             cfg = {'image':'actual.pgm', 'resolution':.07, 'origin':[-2., 3., 0.]}
             (p/'map.yaml').write_text(yaml.safe_dump(cfg))
-            result = exporter.export(p/'map.yaml', p/'web')
+            result = exporter.export_web_map(p/'map.yaml', p/'web')
             self.assertEqual((result['width'], result['height']), (3, 2))
             self.assertEqual(result['origin'], cfg['origin'])
             self.assertEqual(result['resolution'], .07)
-            with Image.open(p/'web/site.png') as img:
+            with Image.open(p/'web/active.png') as img:
                 self.assertEqual(img.size, (3, 2))
             cfg['origin'][2] = .1
             (p/'map.yaml').write_text(yaml.safe_dump(cfg))
-            with self.assertRaises(ValueError):
-                exporter.export(p/'map.yaml', p/'web')
+            rotated = exporter.export_web_map(p/'map.yaml', p/'web')
+            self.assertEqual(rotated['origin'], cfg['origin'])
 
     def test_imu_requires_new_samples_and_keeps_reception_time(self):
         module = load(SRC/'wit_ros2_imu/wit_ros2_imu/wit_ros2_imu.py')

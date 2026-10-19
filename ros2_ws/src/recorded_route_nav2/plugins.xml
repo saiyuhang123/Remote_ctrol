@@ -1,0 +1,8 @@
+<library path="recorded_route_controller">
+  <class type="recorded_route_nav2::RecordedController" base_class_type="nav2_core::Controller">
+    <description>Ordered progress and live motion permission around RPP.</description>
+  </class>
+  <class type="recorded_route_nav2::RecordedGoalChecker" base_class_type="nav2_core::GoalChecker">
+    <description>Requires ordered path completion before position acceptance.</description>
+  </class>
+</library>

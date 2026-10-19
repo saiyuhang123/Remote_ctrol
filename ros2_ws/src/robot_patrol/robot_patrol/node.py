@@ -55,6 +55,7 @@ from .map_metadata import expected_occupancy_sha256, read_map_binding
 from .models import PatrolError, Point, RouteSnapshot, new_id, now_ns, require_finite
 from .nav2_client import Nav2Driver, quaternion_to_yaw
 from .store import PatrolStore
+from .recorded_routes.component import RoadComponent
 
 
 def stamp_from_ns(value: int) -> TimeMsg:
@@ -98,6 +99,13 @@ class PatrolNode(Node):
         self.declare_parameter("teleop_topic", "/cmd_vel_teleop")
         self.declare_parameter("return_cancel_timeout_sec", 15.0)
         self.declare_parameter("web_map_dir", str(default_web_map_dir()))
+        self.declare_parameter('enable_recorded_routes', False)
+        self.declare_parameter('recorded_min_turning_radius', 0.69)
+        self.declare_parameter('recorded_footprint', '[[0.4475,0.28],[0.4475,-0.28],[-0.4475,-0.28],[-0.4475,0.28]]')
+        self.declare_parameter('recorded_detour_max_offset', 0.8)
+        self.declare_parameter('recorded_detour_max_skip', 4.0)
+        self.declare_parameter('recorded_detour_max_length', 10.0)
+        self.declare_parameter('recorded_obstacle_wait_timeout', 120.0)
 
         self._callback_group = ReentrantCallbackGroup()
         self._instance_id = "patrol_" + uuid.uuid4().hex
@@ -218,6 +226,7 @@ class PatrolNode(Node):
         self.get_logger().info(f"robot_patrol started, instance={self._instance_id}")
         self._publish_last_status()
         self._publish_executor_heartbeat()
+        self.roads = RoadComponent(self)
 
     # ------------------------------------------------------------- conversions
     def _to_ros_map(self, entry) -> MapBinding:
@@ -250,6 +259,9 @@ class PatrolNode(Node):
         message.map_id = route.map_id
         message.name = route.name
         message.revision = int(route.revision)
+        message.navigation_mode = route.navigation_mode
+        message.network_id = route.network_id
+        message.network_revision = int(route.network_revision)
         message.steps = []
         for step in route.steps:
             item = RouteStep()
@@ -465,7 +477,8 @@ class PatrolNode(Node):
                 dispatch_allowed = True
                 run_id = ""
             hazard = self._hazard_driver
-            stop_unconfirmed = hazard is not None and not hazard.stop_safe()
+            stop_unconfirmed = (hazard is not None and not hazard.stop_safe()) or bool(
+                driver is not None and driver.stop_unconfirmed)
         heartbeat = ExecutorHeartbeat()
         heartbeat.instance_id = self._instance_id
         heartbeat.owner_session_id = owner_session_id
@@ -595,6 +608,8 @@ class PatrolNode(Node):
 
     def _on_set_active_map(self, request, response):
         try:
+            if self.roads.busy_recording():
+                raise PatrolError('BUSY', '录制草稿活动期间禁止切换地图，请先保存或放弃')
             with self._run_lock:
                 if self._active_engine is not None or self._run_reserved:
                     raise PatrolError("BUSY", "巡航任务活动期间禁止切换活跃地图")
@@ -812,6 +827,7 @@ class PatrolNode(Node):
             route = self._store.upsert_route(
                 request.route_id, request.map_id, request.name,
                 request.steps, request.expected_revision,
+                request.navigation_mode, request.network_id, request.network_revision,
             )
             response.route = self._to_ros_route(route)
             response.success = True
@@ -957,6 +973,8 @@ class PatrolNode(Node):
         return result
 
     def _goal_callback(self, goal_request):
+        if self.roads.busy_recording():
+            return GoalResponse.REJECT
         with self._run_lock:
             hazard = self._hazard_driver
             if hazard is not None:
@@ -990,7 +1008,14 @@ class PatrolNode(Node):
     def _execute_run(self, goal_handle):
         result = RunRoute.Result()
         result.run_id = ""
-        with self._run_lock:
+        # Match the road service lock order so a passive recording cannot
+        # start between goal acceptance and reserving the execution slot.
+        with self.roads.lock, self._run_lock:
+            if self.roads.recorder is not None:
+                result.error_code, result.message = 'BUSY', '请先保存或放弃当前录制草稿'
+                result.final_state = STATE_FAILED
+                goal_handle.abort()
+                return result
             hazard = self._hazard_driver
             if hazard is not None:
                 if not hazard.stop_safe():
@@ -1057,16 +1082,28 @@ class PatrolNode(Node):
             snapshot = RouteSnapshot(
                 route_id=route.route_id, map_id=route.map_id, name=route.name,
                 revision=route.revision, steps=route.steps,
+                navigation_mode=route.navigation_mode,
             )
             loops = int(goal_handle.request.loop_count)
             if loops < 0:
                 raise PatrolError("INVALID_DATA", "loop_count 不能为负数")
+            if route.navigation_mode == 'RECORDED_NETWORK':
+                snapshot.recorded_plan = self.roads.take_plan(route, goal_handle.request.plan_digest, loops)
+            self._store.set_navigation_context(map_entry.map_id, route.navigation_mode,
+                                               route.network_id, route.network_revision)
             run_id = new_id("run")
             self._store.create_run(run_id, route.route_id, map_entry.map_id,
                                    route.revision, map_entry.revision,
                                    snapshot.as_dict(), loops, STATE_VALIDATING, now_ns())
-            driver = Nav2Driver(
+            driver_type = Nav2Driver
+            driver_extra = {}
+            if route.navigation_mode == 'RECORDED_NETWORK':
+                from .recorded_routes.driver import RecordedDriver
+                driver_type = RecordedDriver
+                driver_extra = dict(roads=self.roads, plan=snapshot.recorded_plan, run_id=run_id)
+            driver = driver_type(
                 self,
+                **driver_extra,
                 map_frame=self.get_parameter("map_frame").value,
                 base_frame=self.get_parameter("base_frame").value,
                 point_timeout=float(self.get_parameter("point_timeout_sec").value),
@@ -1200,12 +1237,16 @@ class PatrolNode(Node):
                     if self._hazard_driver is None:
                         self._run_reserved = False
                 self._pending_cancel = False
+        if driver is not None and driver.stop_safe() and hasattr(driver, 'close'):
+            driver.close()
         if engine is not None:
             self._publish_status_dict(engine.status)
         return result
 
     # ----------------------------------------------------------- return home
     def _return_goal_callback(self, goal_request):
+        if self.roads.busy_recording():
+            return GoalResponse.REJECT
         with self._run_lock:
             if self._return_active or self._return_goal_handle is not None:
                 return GoalResponse.REJECT
@@ -1279,7 +1320,12 @@ class PatrolNode(Node):
         request = goal_handle.request
         driver = None
         flags = None
-        with self._run_lock:
+        with self.roads.lock, self._run_lock:
+            if self.roads.recorder is not None:
+                result.error_code, result.message = 'BUSY', '请先保存或放弃当前录制草稿'
+                result.final_state = STATE_FAILED
+                goal_handle.abort()
+                return result
             self._return_active = True
             self._return_goal_handle = goal_handle
             self._return_owner_session_id = str(request.owner_session_id or "").strip()
@@ -1377,8 +1423,15 @@ class PatrolNode(Node):
             self._verify_runtime_map(map_entry)
 
             flags = ControlFlags()
-            driver = Nav2Driver(
+            return_plan = self.roads.plan_home(home)
+            return_type, return_extra = Nav2Driver, {}
+            if return_plan is not None:
+                from .recorded_routes.driver import RecordedDriver
+                return_type = RecordedDriver
+                return_extra = dict(roads=self.roads, plan=return_plan, run_id=self._return_status['run_id'])
+            driver = return_type(
                 self,
+                **return_extra,
                 map_frame=self.get_parameter("map_frame").value,
                 base_frame=self.get_parameter("base_frame").value,
                 point_timeout=float(self.get_parameter("point_timeout_sec").value),
@@ -1462,6 +1515,9 @@ class PatrolNode(Node):
                 elif self._hazard_driver is None:
                     self._run_reserved = False
             self._publish_executor_heartbeat()
+
+            if driver is not None and driver.stop_safe() and hasattr(driver, 'close'):
+                driver.close()
 
     def _on_control(self, request, response):
         with self._run_lock:

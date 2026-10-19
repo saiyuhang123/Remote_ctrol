@@ -14,6 +14,8 @@ class QPushButton;
 class QSpinBox;
 class QTableWidget;
 class QTabWidget;
+class RecordedRoadPage;
+class QCloseEvent;
 
 class PatrolPage : public QWidget {
   Q_OBJECT
@@ -27,6 +29,8 @@ public:
   PatrolClient *client() const { return client_; }
   QString activeMapId() const { return activeMapId_; }
   void setResumePermission(std::function<bool(QString *)> permission);
+protected:
+  void closeEvent(QCloseEvent *event) override;
 
 private slots:
   void onMapsChanged();
@@ -73,6 +77,7 @@ private:
   void updatePointFormFromSelection();
   void updateActionStates();
   void setMessage(const QString &message, bool error = false);
+  bool confirmDraftDiscard();
   QString activeMapName() const;
   PatrolMapInfo activeMap() const;
   PatrolRouteInfo routeById(const QString &routeId) const;
@@ -104,6 +109,9 @@ private:
   QPushButton *clearHomeButton_ = nullptr;
   QPushButton *returnHomeButton_ = nullptr;
   QLabel *messageLabel_ = nullptr;
+  QLabel *pointsCountLabel_ = nullptr;
+  QLabel *routesCountLabel_ = nullptr;
+  QLabel *routeDraftLabel_ = nullptr;
   QTabWidget *tabs_ = nullptr;
 
   QTableWidget *pointsTable_ = nullptr;
@@ -118,6 +126,12 @@ private:
   QTableWidget *routesTable_ = nullptr;
   QLineEdit *routeNameEdit_ = nullptr;
   QComboBox *pointCombo_ = nullptr;
+  QComboBox *navigationMode_ = nullptr;
+  QComboBox *routeNetwork_ = nullptr;
+  QPushButton *previewRecorded_ = nullptr;
+  RecordedRoadPage *roadsPage_ = nullptr;
+  QString planDigest_;
+  bool recordingDraft_=false;
   QDoubleSpinBox *addStepDwell_ = nullptr;
   QPushButton *addStepButton_ = nullptr;
   QTableWidget *stepsTable_ = nullptr;

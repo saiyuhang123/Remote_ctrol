@@ -43,6 +43,7 @@ add_library(desktop_app STATIC
   src/adapters/ros_adapter.cpp src/adapters/local_controller.cpp
   src/runtime/process_manager.cpp src/runtime/map_saver.cpp
   src/patrol/patrol_client.cpp src/patrol/patrol_page.cpp
+  src/patrol/recorded_road_page.cpp
   src/vision/vision_client.cpp src/vision/vision_panel.cpp
   src/devices/device_client.cpp src/devices/device_panel.cpp
   src/devices/gas_readout.cpp

@@ -31,6 +31,7 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "srv/ResetInterlock.srv"
   "srv/GetHomePoint.srv"
   "srv/SetHomePoint.srv"
+  "srv/RoadCommand.srv"
   "action/RunRoute.action"
   "action/ReturnHome.action"
   DEPENDENCIES builtin_interfaces geometry_msgs std_msgs

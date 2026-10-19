@@ -3,7 +3,7 @@ from pathlib import Path
 import pytest
 
 from robot_patrol.models import PatrolError
-from robot_patrol.store import PatrolStore
+from robot_patrol.store import PatrolStore, SCHEMA_VERSION
 
 
 @pytest.fixture()
@@ -114,7 +114,7 @@ def test_schema_v2_home_point_round_trip_and_revision_invalidation(store):
     assert (loaded.x, loaded.y, loaded.yaw) == (1.25, -2.5, 0.75)
     with store._conn:
         version = store._conn.execute("SELECT version FROM schema_version").fetchone()[0]
-    assert version == 2
+    assert version == SCHEMA_VERSION
     # Any map revision change invalidates coordinates from the old map.
     store.upsert_map(map_data())
     assert store.get_home_point(mapping.map_id) is None
@@ -162,7 +162,7 @@ def test_v1_database_is_migrated_without_losing_maps(tmp_path):
         assert migrated.get_map(mapping.map_id).name == "map"
         with migrated._conn:
             assert migrated._conn.execute(
-                "SELECT version FROM schema_version").fetchone()[0] == 2
+                "SELECT version FROM schema_version").fetchone()[0] == SCHEMA_VERSION
             names = {row[0] for row in migrated._conn.execute(
                 "SELECT name FROM sqlite_master WHERE type='table'")}
         assert {"home_points", "inspection_summary", "active_map_state"} <= names

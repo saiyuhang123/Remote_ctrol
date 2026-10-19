@@ -2,6 +2,8 @@
 
 #include <QObject>
 #include <QString>
+#include <QJsonObject>
+#include <QJsonArray>
 #include <QVector>
 #include <cstdint>
 #include <memory>
@@ -29,6 +31,8 @@ struct PatrolRouteInfo {
   QString routeId, mapId, name;
   QVector<PatrolRouteStepInfo> steps;
   quint64 revision = 0;
+  QString navigationMode = "FREE_NAV", networkId;
+  quint64 networkRevision = 0;
 };
 
 struct PatrolHomeInfo {
@@ -76,7 +80,9 @@ public:
   void saveCurrentPoint(const QString &mapId, const QString &name);
   void refreshRoutes(const QString &mapId = QString());
   void upsertRoute(const QString &routeId, const QString &mapId, const QString &name,
-                   const QVector<PatrolRouteStepInfo> &steps, quint64 expectedRevision);
+                   const QVector<PatrolRouteStepInfo> &steps, quint64 expectedRevision,
+                   const QString &navigationMode = QString(), const QString &networkId = QString(),
+                   quint64 networkRevision = 0);
   void deleteRoute(const QString &routeId, quint64 expectedRevision);
   void refreshRuns(const QString &mapId = QString(), const QString &routeId = QString());
   void refreshHomePoint(const QString &mapId = QString());
@@ -86,7 +92,11 @@ public:
   void cancelReturnHome();
   void cancelActiveTask();
   void runRoute(const QString &routeId, const QString &mapId,
-                quint64 routeRevision, quint64 mapRevision, quint32 loopCount);
+                quint64 routeRevision, quint64 mapRevision, quint32 loopCount,
+                const QString &planDigest = QString());
+  bool roadServerReady() const;
+  void roadCommand(const QString &operation, QJsonObject payload = {});
+  QJsonArray roadNetworks() const;
   void cancelRunRoute();
   bool hasActiveOrPendingRun() const;
   void setOperatorAuthorized(bool enabled);
@@ -111,6 +121,8 @@ signals:
   void statusChanged();
   void operationFinished(const QString &operation, bool success, const QString &message);
   void errorOccurred(const QString &message);
+  void roadReply(const QString &operation, bool success, const QString &message, const QJsonObject &data);
+  void roadNetworksChanged();
 
 private:
   struct Impl;

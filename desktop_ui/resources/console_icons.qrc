@@ -5,5 +5,7 @@
     <file alias="layers.svg">console/layers.svg</file>
     <file alias="edit.svg">console/edit.svg</file>
     <file alias="route.svg">console/route.svg</file>
+    <file alias="chevron-down.svg">console/chevron-down.svg</file>
+    <file alias="chevron-up.svg">console/chevron-up.svg</file>
   </qresource>
 </RCC>

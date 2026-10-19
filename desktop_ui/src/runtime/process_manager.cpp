@@ -68,7 +68,7 @@ QStringList ProcessManager::launchArguments(const DesktopConfig &, const Profile
   // The patrol interlock changes twist_mux behavior and starts two companion
   // nodes. Only opt in explicitly; ordinary single-point/manual navigation
   // must not silently depend on a separately launched patrol service.
-  if (enablePatrol && p.navigation && !p.mapping) args << "enable_patrol:=true";
+  if (enablePatrol && p.navigation && !p.mapping) args << "enable_patrol:=true" << "enable_recorded_routes:=true";
   if (p.backend == "fastlio") {
     args << "pcd_map:=" + prefix + ".pcd";
     args << "odom_source:=" + (p.mapping ? QString("lio") : odom);

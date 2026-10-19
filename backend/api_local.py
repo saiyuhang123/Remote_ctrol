@@ -145,11 +145,16 @@ def _routes_for(map_id: str, map_revision: int, map_sync_ok: bool) -> list[dict[
                       p.name AS point_name, p.x, p.y, p.yaw
                FROM route_steps s JOIN points p ON p.point_id = s.point_id
                WHERE s.route_id = ? ORDER BY s.step_order""", (route["route_id"],))
-        valid = map_sync_ok and bool(steps)
+        mode = route.get('navigation_mode', 'FREE_NAV')
+        fixed = mode == 'RECORDED_NETWORK'
+        valid = map_sync_ok and bool(steps) and not fixed
         result.append({
             "route_id": route["route_id"],
             "map_id": route["map_id"],
             "name": route["name"],
+            "navigation_mode": mode,
+            "network_id": route.get('network_id', ''),
+            "network_revision": route.get('network_revision', 0),
             "revision": route["revision"],
             "map_revision": map_revision,
             "updated_at": route["updated_at"] / 1_000_000_000.0,
@@ -162,7 +167,7 @@ def _routes_for(map_id: str, map_revision: int, map_sync_ok: bool) -> list[dict[
                 "dwell_seconds": row["dwell_seconds"],
             } for row in steps],
             "valid": valid,
-            "invalid_reason": "" if valid else (
+            "invalid_reason": "固定路线请在本地客户端预览并启动；网页暂仅查看" if fixed else "" if valid else (
                 "网页地图与本地地图版本不一致" if not map_sync_ok else "路线没有可执行步骤"),
         })
     return result

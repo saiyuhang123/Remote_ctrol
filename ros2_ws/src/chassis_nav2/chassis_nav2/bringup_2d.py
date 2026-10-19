@@ -49,6 +49,8 @@ BACKENDS = {'slam_toolbox': slam_nodes, 'cartographer': cartographer_nodes}
 
 
 def assemble(args, mapping, backend):
+    from .recorded_routes import validate_options
+    recorded = validate_options(args, mapping)
     if backend not in BACKENDS:
         raise ValueError(f'未知 2D 后端 {backend!r}，可选：{sorted(BACKENDS)}')
     hw = yaml.safe_load(Path(args['hardware_file']).expanduser().read_text())
@@ -79,7 +81,7 @@ def assemble(args, mapping, backend):
     if enable_patrol:
         # The guard owns the positive-timeout mux lock. Never select the
         # patrol mux configuration without starting its executor and guard.
-        nodes.append(bringup.patrol_launch())
+        nodes.append(bringup.patrol_launch(True, hw) if recorded else bringup.patrol_launch())
     description = (bringup.share('chassis_description')/'urdf/chassis.urdf').read_text()
     nodes.append(Node(package='robot_state_publisher', executable='robot_state_publisher',
                       parameters=[{'robot_description': description, 'use_sim_time': False}], output='screen'))
@@ -96,7 +98,8 @@ def assemble(args, mapping, backend):
         nav2_params = bringup.existing_file(args['nav2_params'], 'Nav2 参数')
         nodes.extend(bringup.navigation_nodes(bringup.existing_file(args['map'], 'Nav2 栅格地图'),
                                               hw, nav2_params, use_map_server=True,
-                                              localization_names=('amcl',) if backend == 'slam_toolbox' else ()))
+                                              localization_names=('amcl',) if backend == 'slam_toolbox' else (),
+                                              enable_recorded_routes=recorded))
         rviz_config = str(nav_share/('config/amcl_nav.rviz' if backend == 'slam_toolbox' else 'config/localization_nav.rviz'))
     if args['rviz'].lower() == 'true':
         nodes.append(Node(package='rviz2', executable='rviz2',

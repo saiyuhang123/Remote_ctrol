@@ -16,10 +16,15 @@ def share(package):
     return Path(get_package_share_directory(package))
 
 
-def patrol_launch():
+def patrol_launch(enable_recorded_routes=False, hw=None):
     """Start the executor and independent guard together with the mux."""
+    from .recorded_routes import hardware_radius
     return IncludeLaunchDescription(PythonLaunchDescriptionSource(
-        str(share('robot_patrol') / 'launch' / 'patrol.launch.py')))
+        str(share('robot_patrol') / 'launch' / 'patrol.launch.py')),
+        launch_arguments={'enable_recorded_routes': str(enable_recorded_routes).lower(),
+                          'recorded_min_turning_radius': str(hardware_radius(hw) if hw else 0.69),
+                          'recorded_footprint': json.dumps((hw or {}).get('robot_geometry', {}).get('footprint',
+                              [[0.4475,0.28],[0.4475,-0.28],[-0.4475,-0.28],[-0.4475,0.28]]))}.items())
 
 
 def vector(value, size, label):
@@ -173,7 +178,7 @@ def scan_nodes(hw):
                  remappings=[('cloud_in', '/velodyne_points_cropped'), ('scan', '/scan')], output='screen')]
 
 
-def navigation_nodes(map_yaml, hw, params_file, use_map_server=True, localization_names=()):
+def navigation_nodes(map_yaml, hw, params_file, use_map_server=True, localization_names=(), enable_recorded_routes=False):
     from nav2_common.launch import ReplaceString, RewrittenYaml
     base, angle, footprint = geometry(hw)
     # 优先使用实测最小转弯半径（hardware.yaml chassis.min_turning_radius）。
@@ -183,12 +188,14 @@ def navigation_nodes(map_yaml, hw, params_file, use_map_server=True, localizatio
     else:
         halves = 2. if hw['chassis'].get('four_wheel_steering', False) else 1.
         turning_radius = base / (halves * math.tan(math.radians(angle)))
+    rewrites={'footprint':json.dumps(footprint),'minimum_turning_radius':str(turning_radius),'use_sim_time':'false'}
+    if enable_recorded_routes:
+        from .recorded_routes import clearance_rewrites
+        rewrites.update(clearance_rewrites())
     params = RewrittenYaml(
         source_file=ReplaceString(source_file=params_file,
                                   replacements={'@CHASSIS_NAV2_SHARE@': str(share('chassis_nav2'))}),
-        root_key='', param_rewrites={'footprint': json.dumps(footprint),
-                                     'minimum_turning_radius': str(turning_radius),
-                                     'use_sim_time': 'false'}, convert_types=True)
+        root_key='', param_rewrites=rewrites, convert_types=True)
     nodes = []
     if use_map_server:
         nodes.append(Node(package='nav2_map_server', executable='map_server', name='map_server',
@@ -206,8 +213,12 @@ def navigation_nodes(map_yaml, hw, params_file, use_map_server=True, localizatio
             remaps = [('cmd_vel', '/cmd_vel_nav')]
         if executable == 'velocity_smoother':
             remaps = [('cmd_vel', '/cmd_vel_nav'), ('cmd_vel_smoothed', '/cmd_vel_auto')]
+        extras = {}
+        if enable_recorded_routes:
+            from .recorded_routes import nav2_overlay
+            extras = nav2_overlay(executable, params_file, hw)
         nodes.append(Node(package=package, executable=executable, name=executable,
-                          parameters=[params], remappings=remaps, output='screen'))
+                          parameters=[params, extras] if extras else [params], remappings=remaps, output='screen'))
         names.append(executable)
     if use_map_server:
         nodes.append(Node(package='nav2_lifecycle_manager', executable='lifecycle_manager',
@@ -226,6 +237,8 @@ def navigation_nodes(map_yaml, hw, params_file, use_map_server=True, localizatio
 def configure(context):
     args = context.launch_configurations
     mode = args['mode']
+    from .recorded_routes import validate_options
+    recorded = validate_options(args, mapping=mode != 'navigation')
     hw = yaml.safe_load(Path(args['hardware_file']).expanduser().read_text())
     nodes = []
     active = mode != 'drivers'
@@ -266,7 +279,7 @@ def configure(context):
             # A positive-timeout mux lock without a live guard would block
             # every velocity source. Starting the companion pair here makes
             # enable_patrol one complete, self-contained option.
-            nodes.append(patrol_launch())
+            nodes.append(patrol_launch(True, hw) if recorded else patrol_launch())
     if not active:
         return nodes
     description = (share('chassis_description')/'urdf/chassis.urdf').read_text()
@@ -327,7 +340,7 @@ def configure(context):
                        'autostart': True, 'node_names': ['map_server']}], output='screen')]
     if mode == 'navigation':
         nodes.extend(navigation_nodes(existing_file(args['map'], 'Nav2 栅格地图'), hw,
-                                      existing_file(args['nav2_params'], 'Nav2 参数')))
+                                      existing_file(args['nav2_params'], 'Nav2 参数'), enable_recorded_routes=recorded))
     if args['rviz'].lower() == 'true':
         if mode == 'mapping':
             rviz_config = str(share('fast_lio_localization')/'rviz/fastlio.rviz')

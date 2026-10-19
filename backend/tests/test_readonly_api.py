@@ -61,7 +61,8 @@ def test_read_only_local_state_and_old_write_routes_absent(tmp_path, monkeypatch
     health = client.get("/api/health")
     assert health.status_code == 200
     assert health.json()["database_ok"] is True
-    assert health.json()["schema_version"] == 2
+    from robot_patrol.store import SCHEMA_VERSION
+    assert health.json()["schema_version"] == SCHEMA_VERSION
 
     state = client.get("/api/local/state")
     assert state.status_code == 200
@@ -112,3 +113,26 @@ def test_read_only_local_state_and_old_write_routes_absent(tmp_path, monkeypatch
     assert client.post("/api/routes", json={"name": "x", "point_ids": []}).status_code in (404, 405)
     assert client.post("/api/plans", json={}).status_code in (404, 405)
     assert client.get("/api/audio").status_code in (404, 405)
+
+
+def test_fixed_routes_are_typed_and_cannot_be_started_as_free_web_routes(tmp_path, monkeypatch):
+    client, mapping, _ = _build_fixture(tmp_path, monkeypatch)
+    from robot_patrol.store import PatrolStore
+    from robot_patrol.recorded_routes.geometry import motion_blocks
+    from types import SimpleNamespace
+    store=PatrolStore(tmp_path/'patrol.sqlite3')
+    point=store.list_points(mapping.map_id)[0]
+    a=dict(id='a',name='A',x=point.x,y=point.y,yaw=.1)
+    b=dict(id='b',name='B',x=point.x+1.,y=point.y+.1,yaw=.1)
+    samples=[dict(x=a['x']+i/50,y=a['y']+.1*i/50,yaw=.1) for i in range(51)]
+    doc=dict(schema_version=1,nodes={'a':a,'b':b},edges={'e':dict(id='e',name='路',**{'from':'a','to':'b'},speed=.2,blocks=motion_blocks(samples))},bindings={point.point_id:['a']})
+    net=store.save_network(mapping.map_id,'道路',doc,published=True)
+    fixed=store.upsert_route('',mapping.map_id,'固定', [SimpleNamespace(point_id=point.point_id,dwell_seconds=0)],
+        navigation_mode='RECORDED_NETWORK',network_id=net['network_id'],network_revision=1)
+    store.close()
+    items=client.get('/api/local/state').json()['routes']
+    value=next(item for item in items if item['route_id']==fixed.route_id)
+    assert value['navigation_mode']=='RECORDED_NETWORK'
+    assert value['network_id']==net['network_id']
+    assert value['valid'] is False
+    assert '本地客户端' in value['invalid_reason']
