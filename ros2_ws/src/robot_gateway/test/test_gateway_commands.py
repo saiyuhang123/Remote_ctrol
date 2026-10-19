@@ -126,3 +126,24 @@ def test_ptz_requires_hold_renewal_and_pressed_estop_is_known(gateway, monkeypat
     node._on_estop(Bool(data=True))
     snapshot = node._control_snapshot()
     assert snapshot['estop_known'] and snapshot['estopped']
+
+
+@pytest.mark.parametrize('enabled', [True, False])
+def test_face_command_changes_host_parameter_without_sdk_service(gateway, enabled):
+    from rcl_interfaces.srv import SetParameters
+    from rcl_interfaces.msg import SetParametersResult, ParameterType
+    node, ws, data, results = gateway
+    class Parameters:
+        requests = []
+        def service_is_ready(self): return True
+        def call_async(self, request):
+            self.requests.append(request)
+            future = Future()
+            future.set_result(SetParameters.Response(results=[SetParametersResult(successful=True)]))
+            return future
+    parameters = Parameters(); node._params_client = parameters
+    asyncio.run(node.handle_command(ws, dict(data, type='vision_face_capture', enabled=enabled)))
+    parameter = parameters.requests[0].parameters[0]
+    assert parameter.name == 'enable_face'
+    assert parameter.value.type == ParameterType.PARAMETER_BOOL and parameter.value.bool_value is enabled
+    assert results[-1]['ok'] and results[-1]['command'] == 'vision_face_capture'

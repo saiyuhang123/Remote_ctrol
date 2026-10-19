@@ -46,6 +46,7 @@ class RobotFixture:
         self.map_available = True
         self.revision = 1
         self.gas_mode = 'fresh'
+        self.vision = {}
         self.loop = asyncio.new_event_loop()
         self.stop = threading.Event()
         self.ready = threading.Event()
@@ -122,7 +123,7 @@ class RobotFixture:
                                 loop_index=1, total_loops=1, step_index=1, step_count=1,
                                 current_point_name='P', message='模拟巡航'),
                     nav={'active_goal_count': 1 if self.task['running'] else 0}, gas=self.gas(),
-                    vision={}, ptz=dict(patrol={'active': False, 'enabled': False, 'state': 'stopped'},
+                    vision=self.vision, ptz=dict(patrol={'active': False, 'enabled': False, 'state': 'stopped'},
                                         patrol_age=.1, service_ready=True, manual_locked=False))
 
     async def send(self, ws, data):
@@ -178,6 +179,11 @@ class RobotFixture:
                     self.mode = 'return'
                     await self.send(ws, dict(result, code='ACCEPTED'))
                 elif command in ('route_pause', 'route_resume', 'ptz_jog', 'ptz_stop', 'ptz_read'):
+                    await self.send(ws, result)
+                elif command in ('vision_face_capture', 'vision_person', 'vision_plate'):
+                    feature = {'vision_face_capture': 'face', 'vision_person': 'person', 'vision_plate': 'plate'}[command]
+                    self.vision['detector'][feature] = data['enabled']
+                    self.vision['detector'][feature+'_requested'] = data['enabled']
                     await self.send(ws, result)
         finally:
             self.closed += 1
@@ -294,6 +300,26 @@ def test_gas_stops_expires_and_recovers(web):
         assert view.locator('#gasState').inner_text() == '未知'
         robot.gas_mode = 'fresh'
         view.locator('#gasValue').get_by_text('12.3', exact=True).wait_for()
+
+
+def test_host_vision_toggles_need_no_sdk_and_remain_usable_after_model_error(web):
+    robot, page, _ = web
+    robot.vision = dict(detector=dict(ready=True, face=False, person=False, plate=False),
+                        detector_age=.1, detector_service_ready=True,
+                        camera=dict(online=True), camera_age=.1)
+    view = open_view(robot, page, 'monitor')
+    view.locator('#btnClaim').click()
+    view.locator('#toggleFace:enabled').wait_for()
+    view.locator('#toggleFace').check()
+    wait_for(lambda: any(item['type'] == 'vision_face_capture' and item['enabled']
+                         for item in robot.messages))
+    robot.vision['detector'].update(ready=False, face=False, face_requested=True, last_error='测试模型异常')
+    view.locator('#visionError').get_by_text('测试模型异常', exact=True).wait_for()
+    view.locator('#toggleFace').uncheck()
+    wait_for(lambda: any(item['type'] == 'vision_face_capture' and not item['enabled']
+                         for item in robot.messages))
+    view.locator('#togglePerson').check()
+    wait_for(lambda: robot.vision['detector']['person'])
 
 
 def test_map_appears_late_and_revision_updates_without_reconnect(web):

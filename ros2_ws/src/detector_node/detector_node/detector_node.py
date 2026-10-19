@@ -14,7 +14,7 @@ from rcl_interfaces.msg import SetParametersResult
 from sensor_msgs.msg import Image
 from std_msgs.msg import String
 from ament_index_python.packages import get_package_share_directory
-from .detection_pipeline import Pipeline, YoloCpu, YunetCpu
+from .detection_pipeline import Pipeline, YoloCpu, YunetCpu, LpdYunetCpu, PlateTextCpu
 
 
 class DetectorNode(Node):
@@ -26,7 +26,8 @@ class DetectorNode(Node):
                         enable_plate=True, enable_face=True, max_inference_hz=4., cpu_threads=2,
                         staging_dir=str(project/'data/vision/staging'), conf_threshold=.45,
                         track_ttl_sec=2., plate_confirmations=2,
-                        face_conf_threshold=.8, face_input_width=960, face_capture_interval_sec=2.)
+                        face_conf_threshold=.8, face_input_width=960, face_capture_interval_sec=2.,
+                        plate_conf_threshold=.8, plate_input_width=640)
         for key, value in defaults.items():
             self.declare_parameter(key, value)
         if self.get_parameter('input_mode').value not in ('ros', 'video'):
@@ -43,6 +44,10 @@ class DetectorNode(Node):
             raise ValueError('face_input_width must be 320..1920')
         if not .25 <= self.get_parameter('face_capture_interval_sec').value <= 3600.:
             raise ValueError('face_capture_interval_sec must be 0.25..3600')
+        if not .1 <= self.get_parameter('plate_conf_threshold').value <= 1.:
+            raise ValueError('plate_conf_threshold must be 0.1..1')
+        if not 320 <= self.get_parameter('plate_input_width').value <= 1920:
+            raise ValueError('plate_input_width must be 320..1920')
         cv2.setNumThreads(self.get_parameter('cpu_threads').value)
         self.lock = threading.Lock()
         self.latest = None
@@ -59,7 +64,8 @@ class DetectorNode(Node):
         self.model_errors = []
         self.state = dict(component='detector', ready=False, frames=0, events=0,
                           last_error='', input_ready=False, face=False, person=False, plate=False,
-                          face_backend='opencv_yunet', recognition_mode='host')
+                          face_backend='opencv_yunet', person_backend='yolo26n_openvino',
+                          plate_backend='lpd_yunet+hyperlpr3_rec', recognition_mode='host')
         self.outgoing = []
         self.pub = self.create_publisher(String, '/vision/raw_detections', 100)
         self.status_pub = self.create_publisher(String, '/vision/detector_status', 5)
@@ -111,14 +117,14 @@ class DetectorNode(Node):
             self.pipeline = Pipeline(track_ttl=self.get_parameter('track_ttl_sec').value,
                                      plate_confirmations=self.get_parameter('plate_confirmations').value,
                                      face_capture_interval=self.get_parameter('face_capture_interval_sec').value)
-        if (need_person or need_plate) and self.pipeline.detector is None:
+        if need_person and self.pipeline.detector is None:
             try:
-                self.pipeline.detector = YoloCpu(share/'models/yolov8n_openvino_model/yolov8n.xml',
+                self.pipeline.detector = YoloCpu(share/'models/yolo26n_openvino_model/yolo26n.xml',
                                                 self.get_parameter('cpu_threads').value,
                                                 self.get_parameter('conf_threshold').value)
             except Exception as error:
-                self.model_errors.append('person/vehicle model: ' + str(error))
-        elif not need_person and not need_plate:
+                self.model_errors.append('YOLO26n person model: ' + str(error))
+        elif not need_person:
             self.pipeline.detector = None
         if need_face and self.pipeline.face is None:
             try:
@@ -129,12 +135,21 @@ class DetectorNode(Node):
                 self.model_errors.append('face model: ' + str(error))
         elif not need_face:
             self.pipeline.face = None
+        if need_plate and self.pipeline.plate_detector is None:
+            try:
+                self.pipeline.plate_detector = LpdYunetCpu(share/'models/license_plate_detection_lpd_yunet_2023mar.onnx',
+                                                         self.get_parameter('plate_conf_threshold').value,
+                                                         self.get_parameter('plate_input_width').value)
+            except Exception as error:
+                self.model_errors.append('LPD-YuNet plate model: ' + str(error))
+        elif not need_plate:
+            self.pipeline.plate_detector = None
         if need_plate and self.pipeline.plate is None:
             try:
-                import hyperlpr3
-                self.pipeline.plate = hyperlpr3.LicensePlateCatcher()
+                self.pipeline.plate = PlateTextCpu(share/'models/plate_recognition_hyperlpr3.onnx',
+                                                   self.get_parameter('cpu_threads').value)
             except Exception as error:
-                self.model_errors.append('plate model: ' + str(error))
+                self.model_errors.append('plate text model: ' + str(error))
         elif not need_plate:
             self.pipeline.plate = None
         return self.pipeline
@@ -148,7 +163,8 @@ class DetectorNode(Node):
             if not cv2.imwrite(str(temp), image):
                 raise RuntimeError('cannot write detection image')
             os.replace(temp, path)
-            result.update(source='host_yunet' if result['event_type'] == 'face_capture' else 'host_yolo_plate',
+            source = {'face_capture': 'host_yunet', 'person': 'host_yolo26n', 'vehicle_plate': 'host_lpd_yunet_ocr'}
+            result.update(source=source[result['event_type']],
                           source_instance_id=self.instance,
                           source_event_key=self.instance+'/'+key, event_time_ns=stamp,
                           received_time_ns=time.time_ns(), time_basis=time_basis, image_path=str(path))
@@ -171,6 +187,9 @@ class DetectorNode(Node):
                 person, plate, face = (self.get_parameter(key).value for key in ('enable_person', 'enable_plate', 'enable_face'))
                 if not person and not plate and not face:
                     self.pipeline = None
+                    if cap is not None:
+                        cap.release()
+                        cap = None
                     with self.lock:
                         self.state.update(ready=True, person=False, plate=False, face=False, last_error='')
                         self.latest = None
@@ -181,6 +200,12 @@ class DetectorNode(Node):
                 next_frame = time.monotonic() + 1./self.get_parameter('max_inference_hz').value
                 try:
                     pipeline = self.load_pipeline(person, plate, face)
+                    with self.lock:
+                        self.state.update(ready=not self.model_errors,
+                                          face=face and pipeline.face is not None,
+                                          person=person and pipeline.detector is not None,
+                                          plate=plate and pipeline.plate is not None and pipeline.plate_detector is not None,
+                                          last_error='; '.join(self.model_errors))
                     if video:
                         if cap is None or not cap.isOpened():
                             if cap:
@@ -214,7 +239,7 @@ class DetectorNode(Node):
                         self.state.update(ready=not self.model_errors,
                                           face=face and pipeline.face is not None,
                                           person=person and pipeline.detector is not None,
-                                          plate=plate and pipeline.plate is not None and pipeline.detector is not None,
+                                          plate=plate and pipeline.plate is not None and pipeline.plate_detector is not None,
                                           inference_ms=(time.monotonic()-start)*1000)
                         self.state['last_error'] = '; '.join(self.model_errors)
                         self.state['frames'] += 1

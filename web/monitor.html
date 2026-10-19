@@ -275,11 +275,7 @@ function updateOwnership() {
 
 function visionNodeAvailable(id) {
   const vis = (app.telemetry && app.telemetry.vision) || {};
-  if (id === 'toggleFace') return Boolean(vis.face && vis.face.logged_in &&
-                                           vis.face_service_ready &&
-                                           vis.face_age !== null &&
-                                           vis.face_age !== undefined && vis.face_age <= 3);
-  return Boolean(vis.detector && vis.detector.ready && vis.detector_service_ready &&
+  return Boolean(vis.detector && vis.detector_service_ready &&
                  vis.detector_age !== null && vis.detector_age !== undefined &&
                  vis.detector_age <= 3);
 }

@@ -23,10 +23,10 @@ struct VisionFixture {
   std::thread thread;
   std::atomic_int faceStarts{0}, faceStops{0}, queries{0};
   std::vector<rclcpp::ServiceBase::SharedPtr> services;
-  VisionFixture() {
+  VisionFixture(bool withSdk = true) {
     node->declare_parameter("enable_face", false);
     node->declare_parameter("enable_person", false); node->declare_parameter("enable_plate", false);
-    services.push_back(node->create_service<std_srvs::srv::SetBool>("/hk_camera/set_face_capture",
+    if (withSdk) services.push_back(node->create_service<std_srvs::srv::SetBool>("/hk_camera/set_face_capture",
       [this](std_srvs::srv::SetBool::Request::SharedPtr req, std_srvs::srv::SetBool::Response::SharedPtr res) {
         if (req->data) ++faceStarts; else ++faceStops;
         if (req->data) std::this_thread::sleep_for(std::chrono::milliseconds(200));
@@ -98,6 +98,15 @@ private slots:
     VisionPanel panel(config(), true);
     QVERIFY(!panel.findChild<QPushButton *>("visionStartFace")->isEnabled());
     QVERIFY(!panel.findChild<QPushButton *>("visionStartDetector")->isEnabled());
+  }
+  void hostFaceWorksWhenCameraHasNoFaceCaptureService() {
+    VisionFixture fixture(false);
+    VisionPanel panel(config(), false); panel.show();
+    QTest::mouseClick(panel.findChild<QPushButton *>("visionStartFace"), Qt::LeftButton);
+    QTRY_VERIFY_WITH_TIMEOUT(fixture.node->get_parameter("enable_face").as_bool(), 5000);
+    QCOMPARE(fixture.faceStarts.load(), 0); QCOMPARE(fixture.faceStops.load(), 0);
+    QTest::mouseClick(panel.findChild<QPushButton *>("visionStopFace"), Qt::LeftButton);
+    QTRY_VERIFY(!fixture.node->get_parameter("enable_face").as_bool());
   }
 };
 QTEST_MAIN(VisionPanelTest)

@@ -38,7 +38,6 @@ from rclpy.qos import (DurabilityPolicy, QoSProfile, ReliabilityPolicy,
 from rclpy.time import Time
 from sensor_msgs.msg import LaserScan
 from std_msgs.msg import Bool, String
-from std_srvs.srv import SetBool
 import tf2_ros
 
 from patrol_interfaces.action import ReturnHome, RunRoute
@@ -169,8 +168,6 @@ class GatewayNode(Node):
         self._patrol_status: dict = {}
         self._detector_status: dict = {}
         self._detector_time = 0.0
-        self._face_status: dict = {}
-        self._face_time = 0.0
         self._camera_status: dict = {}
         self._camera_time = 0.0
         self._recorder_status: dict = {}
@@ -330,9 +327,6 @@ class GatewayNode(Node):
 
     def _on_detector_status(self, message):
         self._status_callback("_detector_status", "_detector_time", message)
-
-    def _on_face_status(self, message):
-        self._status_callback("_face_status", "_face_time", message)
 
     def _on_camera_status(self, message):
         raw = str(message.data or "")

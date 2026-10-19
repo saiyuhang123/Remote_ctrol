@@ -4,7 +4,6 @@
 #include <QJsonDocument>
 #include <QMap>
 #include <QTimer>
-#include <QThread>
 #include <rclcpp/rclcpp.hpp>
 #include <rcl_interfaces/srv/set_parameters_atomically.hpp>
 #include <std_msgs/msg/string.hpp>
@@ -90,7 +89,7 @@ struct VisionClient::Impl {
     if (sdkDisableSent || !cameraFace->service_is_ready()) return;
     sdkDisableSent = true;
     auto request = std::make_shared<std_srvs::srv::SetBool::Request>(); request->data = false;
-    const auto pending = cameraFace->async_send_request(request, [this](auto future) {
+    const auto pending = cameraFace->async_send_request(request, [this](rclcpp::Client<std_srvs::srv::SetBool>::SharedFuture future) {
       const auto result = future.get();
       if (!result->success) emit owner->message("上位机检测已选用；关闭旧海康人脸接收失败：" + QString::fromStdString(result->message));
     });
@@ -103,7 +102,7 @@ struct VisionClient::Impl {
       request->parameters.push_back(rclcpp::Parameter(it.key().toStdString(), it.value()).to_parameter_msg());
     pendingFeatures.clear(); parametersBusy = true;
     const auto generation = ++parameterGeneration;
-    const auto pending = parameters->async_send_request(request, [this, generation](auto future) {
+    const auto pending = parameters->async_send_request(request, [this, generation](rclcpp::Client<Parameters>::SharedFuture future) {
       if (generation != parameterGeneration) return;
       parametersBusy = false;
       const auto result = future.get()->result;

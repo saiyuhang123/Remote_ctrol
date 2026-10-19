@@ -14,13 +14,16 @@ setup(
         ('share/' + package_name + '/models', glob('models/*.onnx') + glob('models/*.pt')),
         ('share/' + package_name + '/models/yolov8n_openvino_model',
          glob('models/yolov8n_openvino_model/*')),
+        ('share/' + package_name + '/models/yolo26n_openvino_model',
+         glob('models/yolo26n_openvino_model/*')),
+        ('share/' + package_name + '/models', glob('models/*.json') + glob('models/*.md') + glob('models/LICENSE*')),
         ('share/' + package_name + '/config', glob('config/*.yaml')),
     ],
     install_requires=['setuptools'],
     zip_safe=True,
     maintainer='ubuntu',
     maintainer_email='dev@example.com',
-    description='Independent CPU face/person/plate detection and local crops',
+    description='Independent CPU YuNet / YOLO26n / LPD-YuNet and plate text records',
     license='Proprietary',
     entry_points={
         'console_scripts': [

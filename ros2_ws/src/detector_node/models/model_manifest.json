@@ -1,0 +1,26 @@
+{
+  "schema_version": 1,
+  "runtime": "CPU: OpenCV 4.10.0, OpenVINO 2024.6.0, ONNX Runtime 1.23.2",
+  "files": {
+    "face_detection_yunet.onnx": {
+      "bytes": 232589,
+      "sha256": "8f2383e4dd3cfbb4553ea8718107fc0423210dc964f9f4280604804ed2552fa4"
+    },
+    "license_plate_detection_lpd_yunet_2023mar.onnx": {
+      "bytes": 4146213,
+      "sha256": "6d4978a7b6d25514d5e24811b82bfb511d166bdd8ca3b03aa63c1623d4d039c7"
+    },
+    "plate_recognition_hyperlpr3.onnx": {
+      "bytes": 10254693,
+      "sha256": "428fe3332e064b17e740dfef17c7c46aa8076e90ee6ed93cfee722c82282a457"
+    },
+    "yolo26n_openvino_model/yolo26n.xml": {
+      "bytes": 484145,
+      "sha256": "a844b00ff8e94e53ea6b844fb16c74d663c86622f2813ef6af9aad17bc7fde3d"
+    },
+    "yolo26n_openvino_model/yolo26n.bin": {
+      "bytes": 4868634,
+      "sha256": "dc1abd81f4116aa857fce53e108c39caa831c6014fe1303de5642e79f9779491"
+    }
+  }
+}

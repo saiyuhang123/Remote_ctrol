@@ -19,7 +19,7 @@
 - 浏览器虚拟摇杆、W/S/A/D 和急停；网关只在网页取得控制权后创建 `/cmd_vel_teleop`。
 - 本地已有路线立即执行、暂停/继续/取消；一键返回当前地图待命点。
 - MediaMTX + FFmpeg 视频链路：RTSP 推流，浏览器 WebRTC 播放。
-- 海康相机原生人脸检测/抓拍；上位机使用 OpenVINO YOLO 检测行人、HyperLPR3 识别车牌。
+- 全上位机视觉：YuNet 人脸抓拍、OpenVINO YOLO26n 行人检测、LPD-YuNet 车牌检测 + 字符识别，三类独立启停。
 - 网页只开关已运行时的人脸抓拍、行人、车牌检测，不启动视觉进程。
 - 云台方向/变倍按住控制，气体检测实时只读显示。
 - 地图激活时自动导出网页 PNG/meta，支持 Nav2 地图 `origin` 的任意朝向。
@@ -57,7 +57,7 @@ Remote_ctrol/
 │   ├── robot_gateway/       # WebSocket 控制权、任务代理和只读遥测网关
 │   ├── robot_patrol/        # 本地点位/路线执行、返航、guard 和巡检摘要
 │   ├── robot_common/        # HTTP 上报器和断网缓存
-│   ├── detector_node/       # 上位机行人/车辆检测、车牌识别
+│   ├── detector_node/       # 上位机人脸/行人/车牌检测与号码识别
 │   ├── vision_events/       # 独立视觉执勤、本地图片与小车位姿记录
 │   ├── vision_interfaces/   # 历史查询和可选地图标记接口
 │   ├── gas_detector/        # 独立气体检测与设备执勤 UI 接口（只读采集）
@@ -79,7 +79,7 @@ Remote_ctrol/
 - Nav2、Open3D、RViz2、twist_mux（联调定位/导航时需要）
 - Python 3、pip、FFmpeg、V4L2
 - MediaMTX 可执行文件：放置在 `bin/mediamtx`
-- 识别节点依赖：OpenCV、NumPy、OpenVINO、HyperLPR3、ONNX Runtime（CPU）
+- 识别节点依赖：OpenCV、NumPy、OpenVINO、ONNX Runtime（CPU；模型随包安装）
 
 安装基础工具及 ROS 接口依赖。仅运行网页和网关时，仍需 `nav2_msgs` 等消息包；完整实机导航依赖可用 `scripts/install_navigation_deps.sh` 安装：
 
@@ -106,7 +106,7 @@ NumPy 1.26.4 需要配套 `transforms3d==0.4.2`。Ubuntu 自带的 transforms3d 
 ./scripts/install_vision_deps.sh
 ```
 
-已有模型资源位于 `ros2_ws/src/detector_node/models/`。当前独立视觉链路使用 YOLO OpenVINO 导出物和 HyperLPR3，不加载历史 YuNet/SFace 资源或人脸底库。CPU 依赖安装使用 `./scripts/install_vision_deps.sh`；独立启动、Qt 按钮、记录及验证见 [视觉执勤说明](ros2_ws/src/vision_events/README.md)。
+已有模型资源位于 `ros2_ws/src/detector_node/models/`。当前使用 YuNet、YOLO26n OpenVINO、LPD-YuNet 和独立车牌字符模型，不加载历史 SFace 或人脸身份库；运行时无需 PyTorch 和 HyperLPR3 Python 包。模型来源、校验和导出复现见 [模型清单](ros2_ws/src/detector_node/models/README.md)。CPU 依赖安装使用 `./scripts/install_vision_deps.sh`；独立启动、Qt 按钮、记录及验证见 [视觉执勤说明](ros2_ws/src/vision_events/README.md)。
 
 ## 首次构建
 
@@ -351,8 +351,8 @@ ros2 launch chassis_nav2 cartographer_2d_localization.launch.py enable_control:=
 | `/patrol/run_route` | `patrol_interfaces/action/RunRoute` | 路线执行 Action |
 | `/patrol/return_home` | `patrol_interfaces/action/ReturnHome` | 一键返回 Action |
 | `/patrol/operator_heartbeat` | `patrol_interfaces/OperatorHeartbeat` | 操作端心跳（本地/网页） |
-| `/vision/detector_status` | `std_msgs/String` | 行人/车牌识别状态 |
-| `/hk_camera/face_status` | `std_msgs/String` | 人脸抓拍状态 |
+| `/vision/detector_status` | `std_msgs/String` | 上位机人脸/行人/车牌模型、视频与开关状态 |
+| `/detector_node/set_parameters` | `rcl_interfaces/SetParameters` | 三类检测独立开关；Qt 使用原子参数服务 |
 | `/gas_detector/data` | `std_msgs/String` | 气体实时只读数据 |
 | `/gas_detector/status` | `std_msgs/String` | 气体采集连接状态 |
 | `/ptz_patrol/status` | `std_msgs/String` | 云台自动巡航状态 |
@@ -413,7 +413,7 @@ $HOME/.local/share/robot_patrol/patrol.sqlite3   # 默认主库，可由 ROBOT_P
 ~/Remote_ctrol/web/maps/meta.json                # map_id/revision/origin/sha256
 ~/Remote_ctrol/data/vision/events.sqlite3        # 视觉模块内部媒体/事件索引
 ~/Remote_ctrol/data/vision/media/                # 视觉事件图片
-~/Remote_ctrol/captures/hk_faces/                # 海康人脸抓拍
+~/Remote_ctrol/captures/hk_faces/                # 旧海康原生人脸文件（当前默认不补扫）
 ```
 
 - 网页、网关和 `robot_patrol` 必须设置同一个 `ROBOT_PATROL_DB`。
@@ -448,7 +448,7 @@ video:
 4. 电池反馈尚未接入，页面显示“未接入”和空值。
 5. 统一使用 `base_link`；外参、轴距、转角与 footprint 已确认（`hardware.yaml` 各段 `confirmed: true`）。
 6. 地图在本地激活时自动导出网页 PNG/meta，支持非零 `origin_yaw`。地图版本不一致时网页任务页禁止执行。说明见 [地图说明](web/maps/README.md)。
-7. 上位机行人/车牌使用 CPU 推理，性能取决于处理器、视频分辨率与限帧配置；人脸由海康抓拍留档，不做身份判断。
+7. 人脸/行人/车牌均在上位机 CPU 推理，性能取决于处理器、视频分辨率和限帧配置；人脸只检测并保存小图，不做身份判断。
 8. `bin/mediamtx` 不在 Git 中，需要准备实际运行平台的版本。
 
 ## 常见排查

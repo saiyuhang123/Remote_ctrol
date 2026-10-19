@@ -24,7 +24,7 @@ VisionPanel::VisionPanel(const DesktopConfig &config, bool offline, QWidget *par
   setObjectName("visionPanel");
   client_ = new VisionClient(config, offline, this);
   auto *layout = new QVBoxLayout(this); layout->setContentsMargins(0, 0, 0, 0);
-  auto *hint = new QLabel("全部由上位机检测：人脸 / 行人 / 车牌。无需导航，未定位也保存图片；相机只提供视频。"); hint->setWordWrap(true); layout->addWidget(hint);
+  auto *hint = new QLabel("上位机方案：YuNet 人脸、YOLO26n 行人、LPD-YuNet 车牌 + 号码识别。无需导航，未定位也保存图片；相机只提供视频。"); hint->setWordWrap(true); layout->addWidget(hint);
   auto *buttons = new QGridLayout;
   auto button = [&](const QString &text, const char *name, int row, int column) {
     auto *b = new QPushButton(text); b->setObjectName(name); b->setEnabled(!offline && client_->supported()); buttons->addWidget(b, row, column); return b;
