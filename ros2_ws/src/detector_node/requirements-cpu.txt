@@ -1,4 +1,7 @@
 numpy==1.26.4
+# Humble's apt transforms3d 0.3.1 uses np.float, removed by NumPy >= 1.24.
+# Keep tf_transformations / FAST-LIO ICP importable after installing vision.
+transforms3d==0.4.2
 opencv-python==4.10.0.84
 openvino==2024.6.0
 hyperlpr3==0.1.3

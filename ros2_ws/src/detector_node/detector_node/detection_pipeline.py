@@ -1,4 +1,4 @@
-"""CPU YOLO + plates. No Torch, face model, identity database or HTTP."""
+"""CPU YuNet face crops, shared YOLO and plates; no identity matching or HTTP."""
 import time
 from collections import Counter
 import cv2
@@ -52,25 +52,65 @@ class YoloCpu:
         return result
 
 
+class YunetCpu:
+    """Detect faces in the video frame without running identity recognition."""
+    def __init__(self, model_path, confidence=.8, input_width=960):
+        self.input_width = input_width
+        self.model = cv2.FaceDetectorYN.create(
+            str(model_path), '', (320, 320), confidence, .3, 5000,
+            cv2.dnn.DNN_BACKEND_OPENCV, cv2.dnn.DNN_TARGET_CPU)
+
+    def __call__(self, image):
+        h, w = image.shape[:2]
+        ratio = min(1., self.input_width / max(w, h))
+        rw, rh = max(1, round(w*ratio)), max(1, round(h*ratio))
+        resized = cv2.resize(image, (rw, rh)) if ratio < 1. else image
+        # Pad to stride boundaries without stretching the source geometry.
+        canvas = cv2.copyMakeBorder(resized, 0, (-rh) % 32, 0, (-rw) % 32,
+                                    cv2.BORDER_CONSTANT, value=(0, 0, 0))
+        self.model.setInputSize((canvas.shape[1], canvas.shape[0]))
+        _status, faces = self.model.detect(canvas)
+        result = []
+        for row in faces if faces is not None else []:
+            if not np.isfinite(row).all():
+                continue
+            x, y, width, height = row[:4]
+            box = [max(0, int(x/ratio)), max(0, int(y/ratio)),
+                   min(w, int((x+width)/ratio)), min(h, int((y+height)/ratio))]
+            if box[2]-box[0] >= 20 and box[3]-box[1] >= 20:
+                result.append((-1, float(row[-1]), box))
+        return result
+
+
 class Pipeline:
     """One shared detector, lightweight IoU tracks, per-track records."""
-    def __init__(self, detector, plate=None, track_ttl=2., plate_confirmations=2):
+    def __init__(self, detector=None, plate=None, track_ttl=2., plate_confirmations=2,
+                 face=None, face_capture_interval=2.):
         self.detector, self.plate = detector, plate
+        self.face, self.face_capture_interval = face, face_capture_interval
         self.track_ttl, self.plate_confirmations = track_ttl, plate_confirmations
         self.tracks, self.next_id = {}, 0
 
     def reset(self):
         self.tracks.clear()
 
-    def process(self, frame, person=True, plate=True, now=None):
-        if not person and not plate:
+    def process(self, frame, person=True, plate=True, now=None, face=False):
+        if not person and not plate and not face:
             return []
         now = time.monotonic() if now is None else now
         self.tracks = {key: tr for key, tr in self.tracks.items() if now-tr['last'] <= self.track_ttl}
         available = set(self.tracks)
         events = []
-        for cls, score, box in self.detector(frame):
-            if (cls == 0 and not person) or (cls != 0 and not plate):
+        detections = []
+        if (person or plate) and self.detector is not None:
+            detections.extend(self.detector(frame))
+        if face and self.face is not None:
+            detections.extend(self.face(frame))
+        if not face:
+            self.tracks = {key: tr for key, tr in self.tracks.items() if tr['cls'] != -1}
+            available.intersection_update(self.tracks)
+        for cls, score, box in detections:
+            if (cls == -1 and not face) or (cls == 0 and not person) or (cls > 0 and not plate):
                 continue
             candidates = [(iou(box, self.tracks[key]['box']), key) for key in available
                           if self.tracks[key]['cls'] == cls]
@@ -86,7 +126,14 @@ class Pipeline:
             crop = frame[max(0, y1):max(0, y2), max(0, x1):max(0, x2)]
             if crop.size == 0:
                 continue
-            if cls == 0:
+            if cls == -1:
+                last = tr.get('face_last')
+                if last is not None and now-last < self.face_capture_interval:
+                    continue
+                tr['face_last'] = now
+                events.append(dict(event_type='face_capture', label='人脸抓拍', track_id=key,
+                                   confidence=score, bbox=box, image=crop.copy()))
+            elif cls == 0:
                 if tr['person_reported'] or crop.shape[0] < 40:
                     continue
                 tr['person_reported'] = True

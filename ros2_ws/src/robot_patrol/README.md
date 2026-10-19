@@ -89,6 +89,28 @@ ros2 run robot_patrol patrol_cli create-route <map_id> 路线A --steps <点A_id>
 ros2 run robot_patrol patrol_cli run-route <路线_id> <map_id> --loops 1
 ```
 
+## 保存导航点的速度容差
+
+“保存当前位置为导航点”使用独立的速度豁免阈值，允许停稳后的轻微里程计抖动：
+
+| 参数 | 默认值 | 条件 |
+| --- | --- | --- |
+| `record_point_linear_threshold` | `0.08` m/s | `/odom` 线速度绝对值不超过此值 |
+| `record_point_angular_threshold` | `0.10` rad/s | `/odom` 角速度绝对值不超过此值 |
+
+两个条件需要同时满足，等于边界也可以保存。超限提示包含当前速度和配置阈值；里程计缺失、过期、非有限值或 TF / 地图无效时仍拒绝采点。
+
+默认值在 [config/patrol.yaml](config/patrol.yaml)。更新代码并重启巡航节点后，可随时调整当前运行节点的参数，下次录点立即采用新值：
+
+```bash
+source /opt/ros/humble/setup.bash
+source /home/jkbot/Remote_ctrol/ros2_ws/install/setup.bash
+ros2 param set /robot_patrol record_point_linear_threshold 0.08
+ros2 param set /robot_patrol record_point_angular_threshold 0.10
+```
+
+运行时参数调整不会自动写回 YAML；需要重启后保留时也修改 YAML。阈值应为非负有限数值。仅 `/patrol/save_current_point` 使用这组容差，巡航到点停稳、待命返航点采集、解除急停和独立 guard 的停车阈值不变。
+
 ## 测试
 
 ```bash

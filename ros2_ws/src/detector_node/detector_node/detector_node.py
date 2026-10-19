@@ -1,4 +1,4 @@
-"""Standalone person/plate detection; human-face work belongs to Hikvision."""
+"""Standalone CPU face/person/plate detection with local event records."""
 import json
 import os
 from pathlib import Path
@@ -14,7 +14,7 @@ from rcl_interfaces.msg import SetParametersResult
 from sensor_msgs.msg import Image
 from std_msgs.msg import String
 from ament_index_python.packages import get_package_share_directory
-from .detection_pipeline import Pipeline, YoloCpu
+from .detection_pipeline import Pipeline, YoloCpu, YunetCpu
 
 
 class DetectorNode(Node):
@@ -23,9 +23,10 @@ class DetectorNode(Node):
         project = Path(os.environ.get('ROBOT_PROJECT_ROOT', Path.home() / 'Remote_ctrol'))
         defaults = dict(input_mode='ros', image_topic='/hk_camera/image_raw',
                         video_source='rtsp://127.0.0.1:8554/cam', enable_person=True,
-                        enable_plate=True, max_inference_hz=4., cpu_threads=2,
+                        enable_plate=True, enable_face=True, max_inference_hz=4., cpu_threads=2,
                         staging_dir=str(project/'data/vision/staging'), conf_threshold=.45,
-                        track_ttl_sec=2., plate_confirmations=2)
+                        track_ttl_sec=2., plate_confirmations=2,
+                        face_conf_threshold=.8, face_input_width=960, face_capture_interval_sec=2.)
         for key, value in defaults.items():
             self.declare_parameter(key, value)
         if self.get_parameter('input_mode').value not in ('ros', 'video'):
@@ -36,6 +37,12 @@ class DetectorNode(Node):
             raise ValueError('cpu_threads must be 1..16')
         if not 1 <= self.get_parameter('plate_confirmations').value <= 10 or self.get_parameter('track_ttl_sec').value <= 0:
             raise ValueError('plate_confirmations must be 1..10 and track_ttl_sec must be positive')
+        if not .1 <= self.get_parameter('face_conf_threshold').value <= 1.:
+            raise ValueError('face_conf_threshold must be 0.1..1')
+        if not 320 <= self.get_parameter('face_input_width').value <= 1920:
+            raise ValueError('face_input_width must be 320..1920')
+        if not .25 <= self.get_parameter('face_capture_interval_sec').value <= 3600.:
+            raise ValueError('face_capture_interval_sec must be 0.25..3600')
         cv2.setNumThreads(self.get_parameter('cpu_threads').value)
         self.lock = threading.Lock()
         self.latest = None
@@ -49,8 +56,10 @@ class DetectorNode(Node):
         except BlockingIOError:
             raise RuntimeError('another detector owns this staging directory') from None
         self.pipeline = None
+        self.model_errors = []
         self.state = dict(component='detector', ready=False, frames=0, events=0,
-                          last_error='', input_ready=False, person=False, plate=False)
+                          last_error='', input_ready=False, face=False, person=False, plate=False,
+                          face_backend='opencv_yunet', recognition_mode='host')
         self.outgoing = []
         self.pub = self.create_publisher(String, '/vision/raw_detections', 100)
         self.status_pub = self.create_publisher(String, '/vision/detector_status', 5)
@@ -67,11 +76,11 @@ class DetectorNode(Node):
 
     def parameters_changed(self, parameters):
         for parameter in parameters:
-            if parameter.name in ('enable_person', 'enable_plate') and not isinstance(parameter.value, bool):
+            if parameter.name in ('enable_face', 'enable_person', 'enable_plate') and not isinstance(parameter.value, bool):
                 return SetParametersResult(successful=False, reason='feature switches must be bool')
             if parameter.name == 'max_inference_hz' and (not isinstance(parameter.value, (float, int)) or not .1 <= parameter.value <= 30):
                 return SetParametersResult(successful=False, reason='inference rate must be 0.1..30')
-            if parameter.name not in ('enable_person', 'enable_plate', 'max_inference_hz'):
+            if parameter.name not in ('enable_face', 'enable_person', 'enable_plate', 'max_inference_hz'):
                 return SetParametersResult(successful=False, reason='restart detector to change input/model configuration')
         return SetParametersResult(successful=True)
 
@@ -84,6 +93,9 @@ class DetectorNode(Node):
         with self.lock:
             state = dict(self.state)
         state['input_ready'] = time.monotonic()-self.last_frame_mono < 3.
+        for feature in ('face', 'person', 'plate'):
+            state[feature + '_requested'] = self.get_parameter('enable_' + feature).value
+            state[feature] = bool(state[feature] and state[feature + '_requested'])
         self.status_pub.publish(String(data=json.dumps(state, ensure_ascii=False)))
 
     def publish_events(self):
@@ -92,21 +104,39 @@ class DetectorNode(Node):
         for event in events:
             self.pub.publish(String(data=json.dumps(event, ensure_ascii=False)))
 
-    def load_pipeline(self, need_plate):
+    def load_pipeline(self, need_person, need_plate, need_face):
+        self.model_errors = []
+        share = Path(get_package_share_directory('detector_node'))
         if self.pipeline is None:
-            share = Path(get_package_share_directory('detector_node'))
-            self.pipeline = Pipeline(YoloCpu(share/'models/yolov8n_openvino_model/yolov8n.xml',
-                                            self.get_parameter('cpu_threads').value,
-                                            self.get_parameter('conf_threshold').value),
-                                     track_ttl=self.get_parameter('track_ttl_sec').value,
-                                     plate_confirmations=self.get_parameter('plate_confirmations').value)
+            self.pipeline = Pipeline(track_ttl=self.get_parameter('track_ttl_sec').value,
+                                     plate_confirmations=self.get_parameter('plate_confirmations').value,
+                                     face_capture_interval=self.get_parameter('face_capture_interval_sec').value)
+        if (need_person or need_plate) and self.pipeline.detector is None:
+            try:
+                self.pipeline.detector = YoloCpu(share/'models/yolov8n_openvino_model/yolov8n.xml',
+                                                self.get_parameter('cpu_threads').value,
+                                                self.get_parameter('conf_threshold').value)
+            except Exception as error:
+                self.model_errors.append('person/vehicle model: ' + str(error))
+        elif not need_person and not need_plate:
+            self.pipeline.detector = None
+        if need_face and self.pipeline.face is None:
+            try:
+                self.pipeline.face = YunetCpu(share/'models/face_detection_yunet.onnx',
+                                             self.get_parameter('face_conf_threshold').value,
+                                             self.get_parameter('face_input_width').value)
+            except Exception as error:
+                self.model_errors.append('face model: ' + str(error))
+        elif not need_face:
+            self.pipeline.face = None
         if need_plate and self.pipeline.plate is None:
             try:
                 import hyperlpr3
                 self.pipeline.plate = hyperlpr3.LicensePlateCatcher()
             except Exception as error:
-                with self.lock:
-                    self.state['last_error'] = 'plate model: ' + str(error)
+                self.model_errors.append('plate model: ' + str(error))
+        elif not need_plate:
+            self.pipeline.plate = None
         return self.pipeline
 
     def save_events(self, events, stamp, time_basis):
@@ -118,7 +148,8 @@ class DetectorNode(Node):
             if not cv2.imwrite(str(temp), image):
                 raise RuntimeError('cannot write detection image')
             os.replace(temp, path)
-            result.update(source='host_yolo_plate', source_instance_id=self.instance,
+            result.update(source='host_yunet' if result['event_type'] == 'face_capture' else 'host_yolo_plate',
+                          source_instance_id=self.instance,
                           source_event_key=self.instance+'/'+key, event_time_ns=stamp,
                           received_time_ns=time.time_ns(), time_basis=time_basis, image_path=str(path))
             metadata = self.staging / (key + '.json')
@@ -137,11 +168,11 @@ class DetectorNode(Node):
         next_frame = time.monotonic()
         try:
             while not self.stop_event.is_set():
-                person, plate = (self.get_parameter(key).value for key in ('enable_person', 'enable_plate'))
-                if not person and not plate:
+                person, plate, face = (self.get_parameter(key).value for key in ('enable_person', 'enable_plate', 'enable_face'))
+                if not person and not plate and not face:
                     self.pipeline = None
                     with self.lock:
-                        self.state.update(ready=True, person=False, plate=False)
+                        self.state.update(ready=True, person=False, plate=False, face=False, last_error='')
                         self.latest = None
                     self.stop_event.wait(.1)
                     continue
@@ -149,9 +180,7 @@ class DetectorNode(Node):
                     break
                 next_frame = time.monotonic() + 1./self.get_parameter('max_inference_hz').value
                 try:
-                    pipeline = self.load_pipeline(plate)
-                    if not plate:
-                        pipeline.plate = None
+                    pipeline = self.load_pipeline(person, plate, face)
                     if video:
                         if cap is None or not cap.isOpened():
                             if cap:
@@ -180,12 +209,14 @@ class DetectorNode(Node):
                         basis = 'ros_image_stamp' if stamp else 'host_image_receipt'
                         stamp = stamp or time.time_ns()
                     start = time.monotonic()
-                    self.save_events(pipeline.process(frame, person, plate), stamp, basis)
+                    self.save_events(pipeline.process(frame, person, plate, face=face), stamp, basis)
                     with self.lock:
-                        self.state.update(ready=True, person=person, plate=plate and pipeline.plate is not None,
+                        self.state.update(ready=not self.model_errors,
+                                          face=face and pipeline.face is not None,
+                                          person=person and pipeline.detector is not None,
+                                          plate=plate and pipeline.plate is not None and pipeline.detector is not None,
                                           inference_ms=(time.monotonic()-start)*1000)
-                        if not plate or pipeline.plate is not None:
-                            self.state['last_error'] = ''
+                        self.state['last_error'] = '; '.join(self.model_errors)
                         self.state['frames'] += 1
                 except Exception as error:
                     with self.lock:

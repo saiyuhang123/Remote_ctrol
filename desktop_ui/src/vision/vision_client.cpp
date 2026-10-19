@@ -2,15 +2,16 @@
 #include "runtime/process_manager.h"
 #include <QElapsedTimer>
 #include <QJsonDocument>
+#include <QMap>
 #include <QTimer>
 #include <QThread>
 #include <rclcpp/rclcpp.hpp>
+#include <rcl_interfaces/srv/set_parameters_atomically.hpp>
 #include <std_msgs/msg/string.hpp>
 #include <std_srvs/srv/set_bool.hpp>
 #ifdef DESKTOP_HAS_VISION_INTERFACES
 #include <vision_interfaces/srv/query_events.hpp>
 #include <vision_interfaces/srv/set_recording_context.hpp>
-#include <rclcpp/parameter_client.hpp>
 #endif
 
 struct VisionClient::Impl {
@@ -22,31 +23,31 @@ struct VisionClient::Impl {
   rclcpp::Node::SharedPtr node;
   rclcpp::executors::SingleThreadedExecutor executor;
   std::vector<rclcpp::Subscription<std_msgs::msg::String>::SharedPtr> subscriptions;
-  rclcpp::Client<std_srvs::srv::SetBool>::SharedPtr face;
-  bool waitingFace = false, waitingDetector = false, faceBusy = false, enabledFaceHere = false;
-  bool desiredFace = false, desiredDetector = false;
-  bool person = true, plate = true;
+  rclcpp::Client<std_srvs::srv::SetBool>::SharedPtr cameraFace;
+  using Parameters = rcl_interfaces::srv::SetParametersAtomically;
+  rclcpp::Client<Parameters>::SharedPtr parameters;
+  QMap<QString, bool> wantedFeatures, pendingFeatures;
+  bool waitingDetector = false, parametersBusy = false, sdkDisableSent = false;
   QElapsedTimer startup;
   QElapsedTimer recorderAttempt;
-  quint64 faceGeneration = 0;
+  quint64 parameterGeneration = 0;
   bool queryBusy = false;
   quint64 queryGeneration = 0;
 #ifdef DESKTOP_HAS_VISION_INTERFACES
   rclcpp::Client<vision_interfaces::srv::QueryEvents>::SharedPtr queries;
   rclcpp::Client<vision_interfaces::srv::SetRecordingContext>::SharedPtr context;
-  std::shared_ptr<rclcpp::AsyncParametersClient> parameters;
 #endif
   Impl(VisionClient *o, const DesktopConfig &c, bool isolated)
     : owner(o), config(c), offline(isolated), recorder(new ProcessManager(c, o)), detector(new ProcessManager(c, o)), timer(new QTimer(o)) {
     node = std::make_shared<rclcpp::Node>("desktop_vision_client");
     executor.add_node(node);
-    face = node->create_client<std_srvs::srv::SetBool>("/hk_camera/set_face_capture");
+    cameraFace = node->create_client<std_srvs::srv::SetBool>("/hk_camera/set_face_capture");
+    parameters = node->create_client<Parameters>("/detector_node/set_parameters_atomically");
 #ifdef DESKTOP_HAS_VISION_INTERFACES
     queries = node->create_client<vision_interfaces::srv::QueryEvents>("/vision/query_events");
     context = node->create_client<vision_interfaces::srv::SetRecordingContext>("/vision/set_recording_context");
-    parameters = std::make_shared<rclcpp::AsyncParametersClient>(node, "/detector_node");
 #endif
-    for (const auto &topic : {"/vision/status", "/vision/detector_status", "/hk_camera/face_status"}) {
+    for (const auto &topic : {"/vision/status", "/vision/detector_status"}) {
       subscriptions.push_back(node->create_subscription<std_msgs::msg::String>(topic, 10,
         [this](const std_msgs::msg::String::SharedPtr message) {
           const auto value = QJsonDocument::fromJson(QByteArray::fromStdString(message->data)).object();
@@ -71,67 +72,77 @@ struct VisionClient::Impl {
 #endif
     return false;
   }
-  void requestFace(bool enabled) {
-    desiredFace = enabled;
-    if (faceBusy || !face->service_is_ready()) return;
-    faceBusy = true;
-    if (enabled) enabledFaceHere = true;  // a timeout may still have enabled SDK reception
-    const auto generation = ++faceGeneration;
-    auto request = std::make_shared<std_srvs::srv::SetBool::Request>(); request->data = enabled;
-    const auto pending = face->async_send_request(request, [this, enabled, generation](rclcpp::Client<std_srvs::srv::SetBool>::SharedFuture future) {
-      if (generation != faceGeneration) return;
-      faceBusy = false;
+  bool detectorPresent() const {
+    for (const auto &name : node->get_node_names())
+      if (QString::fromStdString(name).section('/', -1) == "detector_node") return true;
+    return false;
+  }
+  void queueFeatures(const QMap<QString, bool> &features) {
+    bool enabling = false;
+    for (auto it = features.cbegin(); it != features.cend(); ++it) {
+      wantedFeatures[it.key()] = pendingFeatures[it.key()] = it.value();
+      enabling |= it.value();
+    }
+    waitingDetector = true; startup.restart();
+    if (enabling) { ensureRecorder(); emit owner->cameraRequested(); }
+  }
+  void disableSdkFaces() {
+    if (sdkDisableSent || !cameraFace->service_is_ready()) return;
+    sdkDisableSent = true;
+    auto request = std::make_shared<std_srvs::srv::SetBool::Request>(); request->data = false;
+    const auto pending = cameraFace->async_send_request(request, [this](auto future) {
       const auto result = future.get();
-      if (result->success) enabledFaceHere = enabled;
-      emit owner->message((result->success ? "人脸抓拍：" : "人脸抓拍失败：") + QString::fromStdString(result->message));
-      if (desiredFace != enabled) requestFace(desiredFace);
+      if (!result->success) emit owner->message("上位机检测已选用；关闭旧海康人脸接收失败：" + QString::fromStdString(result->message));
+    });
+    QTimer::singleShot(8000, owner, [this, id = pending.request_id] { cameraFace->remove_pending_request(id); });
+  }
+  void requestFeatures() {
+    if (parametersBusy || pendingFeatures.isEmpty()) return;
+    auto request = std::make_shared<Parameters::Request>();
+    for (auto it = pendingFeatures.cbegin(); it != pendingFeatures.cend(); ++it)
+      request->parameters.push_back(rclcpp::Parameter(it.key().toStdString(), it.value()).to_parameter_msg());
+    pendingFeatures.clear(); parametersBusy = true;
+    const auto generation = ++parameterGeneration;
+    const auto pending = parameters->async_send_request(request, [this, generation](auto future) {
+      if (generation != parameterGeneration) return;
+      parametersBusy = false;
+      const auto result = future.get()->result;
+      emit owner->message(result.successful ? "上位机检测开关已更新，等待检测状态反馈"
+        : "上位机检测设置失败：" + QString::fromStdString(result.reason) + "；请确认检测节点已更新");
+      waitingDetector = !pendingFeatures.isEmpty();
     });
     QTimer::singleShot(8000, owner, [this, generation, id = pending.request_id] {
-      if (generation != faceGeneration || !faceBusy) return;
-      face->remove_pending_request(id); faceBusy = false; ++faceGeneration;
-      emit owner->message("人脸接收服务请求超时，请检查设备和相机节点");
+      if (generation != parameterGeneration || !parametersBusy) return;
+      parameters->remove_pending_request(id); parametersBusy = false; ++parameterGeneration;
+      waitingDetector = !pendingFeatures.isEmpty();
+      emit owner->message("上位机检测设置超时，请核对检测节点状态后重试");
     });
   }
   void tick() {
     executor.spin_some(std::chrono::milliseconds(3));
-    if (detector->running() && !desiredDetector) detector->stop();
-    if (!waitingFace && !waitingDetector) return;
+    if (!waitingDetector || parametersBusy) return;
     if (startup.elapsed() > 30000) {
-      waitingFace = waitingDetector = false;
+      waitingDetector = false; pendingFeatures.clear();
       emit owner->message("视觉启动超时：请检查相机连接、模块构建和组件日志");
       return;
     }
-    if (!ensureRecorder()) return;
-    if (waitingFace && face->service_is_ready()) { waitingFace = false; requestFace(true); }
-#ifdef DESKTOP_HAS_VISION_INTERFACES
-    if (waitingDetector) {
-      waitingDetector = false;
-      if (parameters->service_is_ready()) {
-        parameters->set_parameters_atomically({rclcpp::Parameter("enable_person", person), rclcpp::Parameter("enable_plate", plate)},
-          [this](auto future) { if (!future.get().successful) emit owner->message("上位机检测开关修改失败"); });
-      } else if (!detector->running()) {
-        detector->start({"ros2", "run", "detector_node", "detector", "--ros-args", "-p", "input_mode:=ros",
-          "-p", "image_topic:=" + config.imageTopic, "-p", "enable_person:=" + QString(person ? "true" : "false"),
-          "-p", "enable_plate:=" + QString(plate ? "true" : "false"), "-p", "staging_dir:=" + config.projectRoot + "/data/vision/staging"});
-      }
+    bool enabling = false;
+    for (auto value : pendingFeatures) enabling |= value;
+    if (enabling) {
+      disableSdkFaces();
+      if (!ensureRecorder()) return;
     }
-#endif
+    if (parameters->service_is_ready()) { requestFeatures(); return; }
+    if (detector->running() || detectorPresent()) return;
+    if (!enabling) { waitingDetector = false; pendingFeatures.clear(); return; }
+    auto flag = [this](const char *name) { return QString(name) + ":=" + (wantedFeatures.value(name, false) ? "true" : "false"); };
+    detector->start({"ros2", "run", "detector_node", "detector", "--ros-args", "-p", "input_mode:=ros",
+      "-p", "image_topic:=" + config.imageTopic, "-p", flag("enable_face"),
+      "-p", flag("enable_person"), "-p", flag("enable_plate"), "-p", "staging_dir:=" + config.projectRoot + "/data/vision/staging"});
   }
   ~Impl() {
     timer->stop();
     delete detector;
-    // Only close SDK reception enabled by this client; never kill external nodes.
-    if (enabledFaceHere && face->service_is_ready()) {
-      auto request = std::make_shared<std_srvs::srv::SetBool::Request>(); request->data = false;
-      auto result = face->async_send_request(request);
-      QElapsedTimer age; age.start();
-      while (rclcpp::ok() && age.elapsed() < 1500 && result.wait_for(std::chrono::milliseconds(0)) != std::future_status::ready) {
-        executor.spin_some(); QThread::msleep(10);
-      }
-      // Give accepted camera events time to drain before closing our recorder.
-      QElapsedTimer drain; drain.start();
-      while (rclcpp::ok() && drain.elapsed() < 1100) { executor.spin_some(); QThread::msleep(10); }
-    }
     delete recorder;
     executor.remove_node(node);
   }
@@ -149,32 +160,20 @@ bool VisionClient::supported() const {
 }
 void VisionClient::startFace() {
   if (impl_->offline || !supported()) return;
-  impl_->desiredFace = true; impl_->waitingFace = true; impl_->startup.restart(); impl_->ensureRecorder(); emit cameraRequested();
+  impl_->queueFeatures({{"enable_face", true}});
 }
 void VisionClient::stopFace() {
   if (impl_->offline) return;
-  impl_->waitingFace = false;
-  impl_->desiredFace = false;
-  if (!impl_->face->service_is_ready()) { emit message("相机未就绪，无法停止人脸接收"); return; }
-  impl_->requestFace(false);
+  impl_->queueFeatures({{"enable_face", false}});
 }
 void VisionClient::startDetector(bool person, bool plate) {
   if (impl_->offline || !supported()) return;
   if (!person && !plate) { emit message("请至少选择行人或车牌检测"); return; }
-  impl_->person = person; impl_->plate = plate; impl_->waitingDetector = true;
-  impl_->desiredDetector = true;
-  impl_->startup.restart(); impl_->ensureRecorder(); emit cameraRequested();
+  impl_->queueFeatures({{"enable_person", person}, {"enable_plate", plate}});
 }
 void VisionClient::stopDetector() {
   if (impl_->offline) return;
-  impl_->waitingDetector = false;
-  impl_->desiredDetector = false;
-  if (impl_->detector->running()) impl_->detector->stop();
-#ifdef DESKTOP_HAS_VISION_INTERFACES
-  else if (impl_->parameters->service_is_ready()) {
-    impl_->parameters->set_parameters_atomically({rclcpp::Parameter("enable_person", false), rclcpp::Parameter("enable_plate", false)});
-  }
-#endif
+  impl_->queueFeatures({{"enable_face", false}, {"enable_person", false}, {"enable_plate", false}});
 }
 void VisionClient::query(const QString &type, const QString &cursor) {
 #ifdef DESKTOP_HAS_VISION_INTERFACES

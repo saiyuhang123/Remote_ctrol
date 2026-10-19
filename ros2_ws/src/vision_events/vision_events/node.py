@@ -24,6 +24,7 @@ class Recorder(Node):
         self.declare_parameter('data_dir', str(project / 'data/vision'))
         self.declare_parameter('face_dirs', [str(project / 'captures/hk_faces'),
                                              str(project / 'data/vision/native/hk_faces')])
+        self.declare_parameter('accept_hikvision_faces', False)
         self.declare_parameter('max_pose_age_sec', .3)
         self.declare_parameter('map_id', '')
         self.declare_parameter('map_revision', '')
@@ -41,6 +42,7 @@ class Recorder(Node):
         self.staging = self.directory / 'staging'
         self.staging.mkdir(exist_ok=True)
         self.roots = self.face_dirs + [self.staging]
+        self.accept_hikvision_faces = self.get_parameter('accept_hikvision_faces').value
         self.store = Store(self.directory, self.get_parameter('upload_enabled').value)
         self.pose = PoseHistory(self.get_parameter('max_pose_age_sec').value)
         self.pose.context(self.get_parameter('map_id').value, self.get_parameter('map_revision').value)
@@ -59,10 +61,11 @@ class Recorder(Node):
         self.raw_sub = self.create_subscription(String, '/vision/raw_detections', self.on_raw, 100)
         self.face_sub = None
         try:
-            from hk_camera.msg import FaceCapture
-            qos = QoSProfile(depth=10, reliability=ReliabilityPolicy.RELIABLE,
-                             durability=DurabilityPolicy.TRANSIENT_LOCAL)
-            self.face_sub = self.create_subscription(FaceCapture, '/hk_camera/face_capture', self.on_face, qos)
+            if self.accept_hikvision_faces:
+                from hk_camera.msg import FaceCapture
+                qos = QoSProfile(depth=10, reliability=ReliabilityPolicy.RELIABLE,
+                                 durability=DurabilityPolicy.TRANSIENT_LOCAL)
+                self.face_sub = self.create_subscription(FaceCapture, '/hk_camera/face_capture', self.on_face, qos)
         except ImportError:
             self.last_error = 'hk_camera messages unavailable; directory recovery and host detections remain available'
         self.query_srv = self.create_service(QueryEvents, '/vision/query_events', self.query)
@@ -118,6 +121,8 @@ class Recorder(Node):
     def on_raw(self, message):
         try:
             raw = json.loads(message.data)
+            if not self.accept_hikvision_faces and raw.get('source') in ('hikvision_sdk', 'hikvision_sdk_face_capture'):
+                return
             if raw.get('event_type') in ('person', 'vehicle_plate'):
                 self.enqueue(raw)
             elif raw.get('metadata_path'):
@@ -132,6 +137,8 @@ class Recorder(Node):
             path = approved_file(path, self.roots)
             raw = json.loads(path.read_text())
             if raw.get('source') == 'hikvision_sdk_face_capture':
+                if not self.accept_hikvision_faces:
+                    return
                 raw = dict(event_type='face_capture', source='hikvision_sdk',
                            source_event_key=str(path), event_time_ns=int(raw['received_ns']),
                            time_basis='host_alarm_receipt', camera_time_raw=raw.get('camera_time_raw'),
@@ -139,7 +146,7 @@ class Recorder(Node):
                            quality_score=None if raw.get('score') == 255 else raw.get('score'),
                            face_id=raw.get('face_id'), target_id=raw.get('target_id'),
                            label='人脸抓拍', confidence=None)
-            elif path.parent != self.staging or raw.get('event_type') not in ('person', 'vehicle_plate'):
+            elif path.parent != self.staging or raw.get('event_type') not in ('face_capture', 'person', 'vehicle_plate'):
                 return
             else:
                 raw['metadata_path'] = str(path)
@@ -168,7 +175,8 @@ class Recorder(Node):
         if self.work.qsize() > 128:
             return
         if self.scan is None:
-            self.scan = (p for root in self.roots if root.is_dir() for p in root.glob('*.json'))
+            scan_roots = self.roots if self.accept_hikvision_faces else [self.staging]
+            self.scan = (p for root in scan_roots if root.is_dir() for p in root.glob('*.json'))
         for _ in range(40):
             try:
                 self.load_file(next(self.scan))

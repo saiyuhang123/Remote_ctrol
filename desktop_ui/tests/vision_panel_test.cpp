@@ -24,6 +24,7 @@ struct VisionFixture {
   std::atomic_int faceStarts{0}, faceStops{0}, queries{0};
   std::vector<rclcpp::ServiceBase::SharedPtr> services;
   VisionFixture() {
+    node->declare_parameter("enable_face", false);
     node->declare_parameter("enable_person", false); node->declare_parameter("enable_plate", false);
     services.push_back(node->create_service<std_srvs::srv::SetBool>("/hk_camera/set_face_capture",
       [this](std_srvs::srv::SetBool::Request::SharedPtr req, std_srvs::srv::SetBool::Response::SharedPtr res) {
@@ -61,15 +62,31 @@ private slots:
     auto button = [&](const char *name) { return panel.findChild<QPushButton *>(name); };
     QVERIFY(button("visionStartFace")->isEnabled());
     QTest::mouseClick(button("visionStartFace"), Qt::LeftButton);
-    QTRY_COMPARE_WITH_TIMEOUT(fixture.faceStarts.load(), 1, 5000);
-    panel.hide(); QTest::qWait(150); QCOMPARE(fixture.faceStops.load(), 0); panel.show();
-    QTest::mouseClick(button("visionStopFace"), Qt::LeftButton); QTRY_COMPARE(fixture.faceStops.load(), 1);
+    QTRY_VERIFY_WITH_TIMEOUT(fixture.node->get_parameter("enable_face").as_bool(), 5000);
+    QCOMPARE(fixture.faceStarts.load(), 0); // Never enable Hikvision facesnap.
+    QTRY_VERIFY(fixture.faceStops.load() >= 1); // Shut down an old SDK reception.
+    QVERIFY(!fixture.node->get_parameter("enable_person").as_bool());
+    QVERIFY(!fixture.node->get_parameter("enable_plate").as_bool());
+    panel.hide(); QTest::qWait(150);
+    QVERIFY(fixture.node->get_parameter("enable_face").as_bool()); panel.show();
     panel.findChild<QCheckBox *>("visionPlate")->setChecked(false);
     QTest::mouseClick(button("visionStartDetector"), Qt::LeftButton);
     QTRY_VERIFY_WITH_TIMEOUT(fixture.node->get_parameter("enable_person").as_bool(), 5000);
     QVERIFY(!fixture.node->get_parameter("enable_plate").as_bool());
+    QVERIFY(fixture.node->get_parameter("enable_face").as_bool());
+    QTest::mouseClick(button("visionStopFace"), Qt::LeftButton);
+    QTRY_VERIFY(!fixture.node->get_parameter("enable_face").as_bool());
+    QVERIFY(fixture.node->get_parameter("enable_person").as_bool());
+    // Rapid start/stop converges to the last requested face state.
+    QTest::mouseClick(button("visionStartFace"), Qt::LeftButton);
+    QTest::mouseClick(button("visionStopFace"), Qt::LeftButton);
+    QTest::qWait(300);
+    QVERIFY(!fixture.node->get_parameter("enable_face").as_bool());
+    QTest::mouseClick(button("visionStartFace"), Qt::LeftButton);
+    QTRY_VERIFY(fixture.node->get_parameter("enable_face").as_bool());
     QTest::mouseClick(button("visionStopDetector"), Qt::LeftButton);
     QTRY_VERIFY(!fixture.node->get_parameter("enable_person").as_bool());
+    QTRY_VERIFY(!fixture.node->get_parameter("enable_face").as_bool());
     QTest::mouseClick(button("visionHistory"), Qt::LeftButton);
     auto *dialog = panel.findChild<QDialog *>("visionHistoryDialog"); QVERIFY(dialog && dialog->isVisible());
     auto *table = dialog->findChild<QTableWidget *>(); QVERIFY(table);

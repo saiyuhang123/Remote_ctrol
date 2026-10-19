@@ -12,5 +12,5 @@ def generate_launch_description():
         Node(package='vision_events', executable='recorder', output='screen'),
         Node(package='detector_node', executable='detector', output='screen',
              condition=IfCondition(LaunchConfiguration('start_detector')),
-             parameters=[{'input_mode': 'ros', 'enable_person': True, 'enable_plate': True}]),
+             parameters=[{'input_mode': 'ros', 'enable_face': True, 'enable_person': True, 'enable_plate': True}]),
     ])

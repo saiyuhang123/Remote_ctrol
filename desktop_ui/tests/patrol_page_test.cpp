@@ -6,9 +6,12 @@
 #include <QLabel>
 #include <QLineEdit>
 #include <QPushButton>
+#include <QStringList>
+#include <QTableWidget>
 #include <QTabWidget>
 #include <QTemporaryDir>
 #include <QTest>
+#include <QTimer>
 #include <atomic>
 #include <chrono>
 #include <thread>
@@ -18,6 +21,8 @@
 #include <patrol_interfaces/action/run_route.hpp>
 #include <patrol_interfaces/msg/patrol_status.hpp>
 #include <patrol_interfaces/srv/control_run.hpp>
+#include <patrol_interfaces/srv/list_maps.hpp>
+#include <patrol_interfaces/srv/list_routes.hpp>
 
 class PatrolPageTest : public QObject {
   Q_OBJECT
@@ -166,7 +171,105 @@ private slots:
     QVERIFY(registerMap->isEnabled());
     QVERIFY(!saveCurrent->isEnabled()); // no active map yet
     QVERIFY(!start->isEnabled());
+    auto *readiness = page.findChild<QLabel *>(QStringLiteral("patrolStartReadiness"));
+    QVERIFY(readiness);
+    QVERIFY(readiness->text().contains(QStringLiteral("未设置活跃地图")));
+    QVERIFY(readiness->text().contains(QStringLiteral("未选择已保存路线")));
+    QVERIFY(readiness->text().contains(QStringLiteral("巡航后台未就绪")));
     QTest::qWait(300);
+    page.close();
+  }
+
+  void startReadinessTracksPermissionsBackendAndUnsavedRoute() {
+    using RunRoute = patrol_interfaces::action::RunRoute;
+    auto node = std::make_shared<rclcpp::Node>("patrol_readiness_fixture");
+    patrol_interfaces::msg::MapBinding map;
+    map.map_id = "readiness-map"; map.name = "测试地图"; map.revision = 1;
+    patrol_interfaces::msg::PatrolRoute route;
+    route.route_id = "readiness-route"; route.map_id = map.map_id;
+    route.name = "测试路线"; route.revision = 1;
+    route.steps.resize(1); route.steps.front().point_name = "测试点";
+    auto maps = node->create_service<patrol_interfaces::srv::ListMaps>(
+        "/patrol/list_maps",
+        [map](const std::shared_ptr<patrol_interfaces::srv::ListMaps::Request>,
+              std::shared_ptr<patrol_interfaces::srv::ListMaps::Response> response) {
+          response->success = true; response->maps.push_back(map); response->active_map = map;
+        });
+    auto routes = node->create_service<patrol_interfaces::srv::ListRoutes>(
+        "/patrol/list_routes",
+        [route](const std::shared_ptr<patrol_interfaces::srv::ListRoutes::Request>,
+                std::shared_ptr<patrol_interfaces::srv::ListRoutes::Response> response) {
+          response->success = true; response->routes.push_back(route);
+        });
+    Q_UNUSED(maps); Q_UNUSED(routes);
+    int goalsReceived = 0;
+    auto createServer = [&] {
+      return rclcpp_action::create_server<RunRoute>(
+          node, "/patrol/run_route",
+          [&](const rclcpp_action::GoalUUID &, std::shared_ptr<const RunRoute::Goal>) {
+            ++goalsReceived;
+            return rclcpp_action::GoalResponse::REJECT;
+          },
+          [](const std::shared_ptr<rclcpp_action::ServerGoalHandle<RunRoute>>) {
+            return rclcpp_action::CancelResponse::REJECT;
+          },
+          [](const std::shared_ptr<rclcpp_action::ServerGoalHandle<RunRoute>>) {});
+    };
+    auto server = createServer();
+    QTimer spin;
+    connect(&spin, &QTimer::timeout, this, [node] { rclcpp::spin_some(node); });
+    spin.start(10);
+    PatrolClient client;
+    if (!client.available()) QSKIP("patrol_interfaces/robot_patrol is not built");
+    QStringList missing{
+        QStringLiteral("尚未启用操作，请勾选主窗口顶部“启用操作”"),
+        QStringLiteral("急停保持中，请明确解除急停"),
+        QStringLiteral("巡航联锁尚未就绪，请检查心跳")};
+    PatrolPage page(&client, QString(), "amcl", QString(), "测试模式", false,
+                    [&missing](QString *reason) {
+                      if (reason) *reason = missing.join('\n');
+                      return missing.isEmpty();
+                    });
+    page.resize(1180, 760);
+    page.show();
+    auto *tabs = page.findChild<QTabWidget *>(QStringLiteral("patrolTabs"));
+    auto *table = page.findChild<QTableWidget *>(QStringLiteral("patrolRoutesTable"));
+    auto *start = page.findChild<QPushButton *>(QStringLiteral("patrolStart"));
+    auto *readiness = page.findChild<QLabel *>(QStringLiteral("patrolStartReadiness"));
+    auto *name = page.findChild<QLineEdit *>(QStringLiteral("patrolRouteName"));
+    QVERIFY(tabs && table && start && readiness && name);
+    tabs->setCurrentIndex(1);
+    QVERIFY(QTest::qWaitForWindowExposed(&page));
+    QTRY_VERIFY_WITH_TIMEOUT(client.routeServerReady(), 3000);
+    // Let the constructor's initial discovery failure recover explicitly,
+    // just as the operator's Refresh button does after backend startup.
+    client.refreshMaps();
+    QTRY_COMPARE_WITH_TIMEOUT(table->rowCount(), 1, 3000);
+    table->selectRow(0);
+    QTRY_VERIFY(readiness->text().contains(QStringLiteral("尚未启用操作")));
+    QVERIFY(readiness->text().contains(QStringLiteral("急停保持中")));
+    QVERIFY(readiness->text().contains(QStringLiteral("巡航联锁尚未就绪")));
+    QVERIFY(!start->isEnabled());
+    QVERIFY(readiness->isVisible());
+    const QRect visibleBar(readiness->mapTo(&page, QPoint()), readiness->size());
+    QVERIFY(page.rect().contains(visibleBar));
+
+    missing.clear();
+    QTRY_VERIFY(start->isEnabled());
+    QVERIFY(readiness->text().contains(QStringLiteral("启动条件：已就绪")));
+    QVERIFY(!readiness->text().contains(QStringLiteral("急停保持中")));
+
+    // Losing the real action endpoint must remove the ready indication.
+    server.reset();
+    QTRY_VERIFY_WITH_TIMEOUT(!client.routeServerReady(), 5000);
+    QTRY_VERIFY(!start->isEnabled());
+    QVERIFY(readiness->text().contains(QStringLiteral("巡航后台未就绪")));
+    server = createServer();
+    QTRY_VERIFY_WITH_TIMEOUT(start->isEnabled(), 5000);
+    name->setText(QStringLiteral("修改后的路线"));
+    QTRY_VERIFY(!start->isEnabled());
+    QVERIFY(readiness->text().contains(QStringLiteral("未保存修改")));
+    QCOMPARE(goalsReceived, 0); // Readiness display never starts a task.
     page.close();
   }
 };

@@ -20,7 +20,7 @@ setup(
     zip_safe=True,
     maintainer='ubuntu',
     maintainer_email='dev@example.com',
-    description='Independent CPU person/plate detection; faces handled by camera',
+    description='Independent CPU face/person/plate detection and local crops',
     license='Proprietary',
     entry_points={
         'console_scripts': [

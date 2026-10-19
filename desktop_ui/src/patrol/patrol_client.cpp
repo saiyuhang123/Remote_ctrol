@@ -298,6 +298,14 @@ QString PatrolClient::activeMapId() const {
 #endif
 }
 
+bool PatrolClient::routeServerReady() const {
+#ifdef DESKTOP_HAS_PATROL_INTERFACES
+  return impl_->runRoute->action_server_is_ready();
+#else
+  return false;
+#endif
+}
+
 QVector<PatrolPointInfo> PatrolClient::points() const {
 #ifdef DESKTOP_HAS_PATROL_INTERFACES
   std::lock_guard<std::mutex> lock(impl_->mutex);

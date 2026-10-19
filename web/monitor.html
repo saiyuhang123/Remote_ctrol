@@ -92,7 +92,7 @@
     </section>
     <section class="card">
       <h2><span class="section-title"><span class="icon" data-icon="scan"></span>视觉识别</span></h2>
-      <label class="toggleRow"><span>人脸抓拍 <small id="faceState" class="muted"></small></span><input type="checkbox" id="toggleFace" disabled></label>
+      <label class="toggleRow"><span>上位机人脸抓拍 <small id="faceState" class="muted"></small></span><input type="checkbox" id="toggleFace" disabled></label>
       <label class="toggleRow"><span>行人检测 <small id="personState" class="muted"></small></span><input type="checkbox" id="togglePerson" disabled></label>
       <label class="toggleRow"><span>车牌检测 <small id="plateState" class="muted"></small></span><input type="checkbox" id="togglePlate" disabled></label>
       <div class="row"><span>相机</span><b id="cameraState">未知</b></div>
@@ -345,27 +345,28 @@ function updateVision(v) {
   const face = v.face || {}, detector = v.detector || {}, camera = v.camera || {};
   const cameraFresh = v.camera_age !== null && v.camera_age !== undefined &&
                       v.camera_age <= 3;
-  const faceFresh = v.face_age !== null && v.face_age !== undefined &&
-                    v.face_age <= 3;
   const online = (cameraFresh && (camera.online === true ||
-                  camera.raw === 'streaming_active')) ||
-                 (faceFresh && Boolean(face.logged_in));
+                  camera.raw === 'streaming_active'));
   $('cameraState').textContent = online ? '已连接' : '本地未启动/离线';
   $('cameraState').className = online ? 'good' : 'muted';
   const detectorFresh = v.detector_age !== null && v.detector_age !== undefined &&
                         v.detector_age <= 3;
-  const ready = Boolean(detector.ready && v.detector_service_ready && detectorFresh);
-  $('detectorState').textContent = ready ? '已就绪' : '本地未启动/初始化中';
+  const controlReady = Boolean(v.detector_service_ready && detectorFresh);
+  const ready = Boolean(detector.ready && controlReady);
+  $('detectorState').textContent = ready ? '上位机已就绪' : (detector.last_error ? '模型异常' : '本地未启动/初始化中');
   $('detectorState').className = ready ? 'good' : 'muted';
-  $('faceState').textContent = face.logged_in ? (face.enabled ? '已启用' : '已关闭') : '本地未启动';
-  $('personState').textContent = ready ? (detector.person ? '已启用' : '已关闭') : '本地未启动';
-  $('plateState').textContent = ready ? (detector.plate ? '已启用' : '已关闭') : '本地未启动';
+  const faceEnabled = Boolean(detector.face_requested ?? detector.face);
+  const personEnabled = Boolean(detector.person_requested ?? detector.person);
+  const plateEnabled = Boolean(detector.plate_requested ?? detector.plate);
+  const featureText = (requested, running) => !controlReady ? '本地未启动' :
+    (running ? '已启用' : requested ? '准备中/模型异常' : '已关闭');
+  $('faceState').textContent = featureText(faceEnabled, detector.face);
+  $('personState').textContent = featureText(personEnabled, detector.person);
+  $('plateState').textContent = featureText(plateEnabled, detector.plate);
   const checkboxOwner = isOwner();
-  setCheckbox('toggleFace', Boolean(face.enabled),
-              checkboxOwner && Boolean(face.logged_in) && faceFresh &&
-              Boolean(v.face_service_ready));
-  setCheckbox('togglePerson', Boolean(detector.person), checkboxOwner && ready);
-  setCheckbox('togglePlate', Boolean(detector.plate), checkboxOwner && ready);
+  setCheckbox('toggleFace', faceEnabled, checkboxOwner && controlReady);
+  setCheckbox('togglePerson', personEnabled, checkboxOwner && controlReady);
+  setCheckbox('togglePlate', plateEnabled, checkboxOwner && controlReady);
   const recorder = v.recorder || {};
   const ages = [v.detector_age, v.face_age, v.camera_age]
     .filter(value => value !== null && value !== undefined);

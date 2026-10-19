@@ -291,13 +291,18 @@ void MainWindow::sendGoal(double x, double y, double yaw) {
 }
 void MainWindow::sendInitialPose(double x, double y, double yaw) {
   if (patrolClient_ && patrolClient_->hasActiveOrPendingRun()) {
-    log("初始位姿未发送：请先取消本地巡航任务并确认停车");
+    log("初始位姿未发送：请先取消本地巡航任务");
     return;
   }
-  if (!allowed() || !profile().navigation) { log("初始位姿未发送：请启用操作并选择定位导航模式"); return; }
+  if (!allowed()) { log("初始位姿未发送：请勾选主窗口顶部的“启用操作”"); return; }
+  if (!profile().navigation) { log("初始位姿未发送：当前界面为“" + profile().name + "”，请切换到定位导航模式"); return; }
   if (profile().backend == "cartographer") { log("当前 Cartographer 纯定位入口不支持 /initialpose，请按原流程在建图起点启动"); return; }
-  if (state_.navigationActive || (state_.speedValid && (std::abs(state_.speed) > .01 || std::abs(state_.yawRate) > .02))) { log("请先停止车辆并取消导航，再设置初始位姿"); return; }
-  if (ros_->setInitialPose(x, y, yaw)) log("初始位姿已发布到 /initialpose，等待定位结果；此操作不发送导航目标");
+  if (!std::isfinite(x) || !std::isfinite(y) || !std::isfinite(yaw)) { log("初始位姿未发送：坐标或朝向无效"); return; }
+  if (state_.navigationActive) { log("初始位姿未发送：仍有活动导航目标，请先取消导航"); return; }
+  // Initial localization only publishes a pose. It must not depend on odometry
+  // speed, stationary windows, map TF, or Nav2 having finished activation.
+  if (ros_->setInitialPose(x, y, yaw))
+    log("初始位姿已发布到 /initialpose，等待定位结果；此操作不发送导航目标");
 }
 void MainWindow::startSession() {
   if (offline_ || !manage_->isChecked() || process_->running()) return;
@@ -406,23 +411,25 @@ void MainWindow::openPatrolPage() {
   auto *layout = new QVBoxLayout(dialog);
   layout->setContentsMargins(0, 0, 0, 0);
   auto basePermission = [this](QString *reason) {
-    const auto deny = [reason](const QString &text) {
-      if (reason) *reason = text;
-      return false;
-    };
-    if (offline_) return deny(QStringLiteral("离线模式禁止发送巡航目标"));
-    if (!profile().navigation) return deny(QStringLiteral("请先切换到定位导航模式"));
-    if (!allowed()) return deny(QStringLiteral("请先启用操作"));
+    QStringList blockers;
+    if (offline_) blockers << QStringLiteral("当前为离线模式，不能执行巡航");
+    if (!profile().navigation) blockers << QStringLiteral("当前不是定位导航模式，请先切换模式并启动对应导航");
+    if (!allowed()) blockers << QStringLiteral("尚未启用操作，请勾选主窗口顶部“启用操作”");
     if (controller_ && controller_->manualReady())
-      return deny(QStringLiteral("请先结束手动接管并确认车辆停稳"));
+      blockers << QStringLiteral("仍在手动接管，请停稳后关闭再打开“启用操作”，退出手动就绪");
     if (!state_.poseValid || state_.frame != QStringLiteral("map"))
-      return deny(QStringLiteral("等待有效的 map 定位"));
-    if (!state_.navigationAvailable) return deny(QStringLiteral("Nav2 尚未就绪"));
-    if (!state_.estopValid) return deny(QStringLiteral("急停状态未知或已过期"));
-    if (state_.estopped) return deny(QStringLiteral("请先明确解除急停"));
-    if (!state_.guardValid) return deny(QStringLiteral("patrol guard 心跳未知或已过期"));
-    if (!state_.guardReady) return deny(QStringLiteral("patrol guard 联锁未就绪，请检查心跳或复位联锁"));
-    return true;
+      blockers << QStringLiteral("尚无有效的 map 定位，请先完成定位并确认车辆位置");
+    if (!state_.navigationAvailable) blockers << QStringLiteral("Nav2 尚未就绪，请等待导航启动完成或检查日志");
+    if (!state_.estopValid)
+      blockers << QStringLiteral("急停反馈缺失或过期，请在主窗口“手动”页明确解除急停并检查反馈");
+    else if (state_.estopped)
+      blockers << QStringLiteral("急停保持中，请在主窗口“手动”页点击“解除急停（保持静止）”");
+    if (!state_.guardValid)
+      blockers << QStringLiteral("巡航联锁心跳缺失或过期，请检查路线巡航联锁是否已启用及后台是否正常");
+    else if (!state_.guardReady)
+      blockers << QStringLiteral("巡航联锁尚未就绪，请检查心跳或按故障原因复位联锁");
+    if (reason) *reason = blockers.join('\n');
+    return blockers.isEmpty();
   };
   auto startPermission = [this, basePermission](QString *reason) {
     if (!basePermission(reason)) return false;

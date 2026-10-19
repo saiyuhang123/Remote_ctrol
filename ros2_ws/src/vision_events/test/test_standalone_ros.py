@@ -25,7 +25,8 @@ def test_recorder_without_navigation_and_native_replay(tmp_path):
     rclpy.init()
     native = tmp_path/'native'; native.mkdir()
     recorder = Recorder(parameter_overrides=[Parameter('data_dir', value=str(tmp_path/'records')),
-                                             Parameter('face_dirs', value=[str(native)])])
+                                             Parameter('face_dirs', value=[str(native)]),
+                                             Parameter('accept_hikvision_faces', value=True)])
     fixture = rclpy.create_node('standalone_vision_fixture')
     publisher = fixture.create_publisher(FaceCapture, '/hk_camera/face_capture', 10)
     query = fixture.create_client(QueryEvents, '/vision/query_events')
@@ -66,11 +67,12 @@ def test_detector_receives_ros_images_and_switches_off_without_navigation(tmp_pa
     from detector_node.detection_pipeline import Pipeline
     rclpy.init()
     node = DetectorNode(parameter_overrides=[Parameter('staging_dir', value=str(tmp_path)),
-                                             Parameter('enable_person', value=False), Parameter('enable_plate', value=False)])
+                                             Parameter('enable_person', value=False), Parameter('enable_plate', value=False),
+                                             Parameter('enable_face', value=False)])
     fixture = rclpy.create_node('standalone_detector_fixture')
     publisher = fixture.create_publisher(Image, '/hk_camera/image_raw', 10)
     pipeline = Pipeline(lambda frame: [(0, .91, [0, 0, 60, 100])])
-    node.load_pipeline = lambda plate: pipeline
+    node.load_pipeline = lambda person, plate, face: pipeline
     node.set_parameters([Parameter('enable_person', value=True)])
     executor = SingleThreadedExecutor(); executor.add_node(node); executor.add_node(fixture)
     try:

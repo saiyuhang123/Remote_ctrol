@@ -60,6 +60,9 @@ class FakeNav(Node):
         self.estop = False
         self.wrong_map = False
         self.tf_age_sec = 0.0
+        self.odom_linear_x = 0.0
+        self.odom_angular_z = 0.0
+        self.publish_odom = True
         self.server = ActionServer(
             self, NavigateToPose, "/navigate_to_pose", execute_callback=self.execute,
             goal_callback=self.goal_callback, cancel_callback=self.cancel_callback)
@@ -83,7 +86,10 @@ class FakeNav(Node):
         odom.header.stamp = stamp
         odom.header.frame_id = "odom"
         odom.child_frame_id = "base_link"
-        self.odom_pub.publish(odom)
+        odom.twist.twist.linear.x = self.odom_linear_x
+        odom.twist.twist.angular.z = self.odom_angular_z
+        if self.publish_odom:
+            self.odom_pub.publish(odom)
         if self.publish_guard_ready:
             guard = Bool(); guard.data = self.guard_ready; self.guard_pub.publish(guard)
         if self.publish_operator_heartbeat:
@@ -277,6 +283,153 @@ def test_real_services_and_nav2_action(tmp_path):
         response = wait_future(runs_service.call_async(GetRuns.Request()))
         assert response.success and response.runs
         assert response.runs[0].success
+    finally:
+        if executor is not None:
+            executor.shutdown()
+        if spin_thread is not None:
+            spin_thread.join(timeout=3.0)
+        if patrol is not None:
+            patrol.destroy_node()
+        if fake is not None:
+            fake.destroy_node()
+        rclpy.try_shutdown()
+
+
+def test_point_recording_speed_tolerances_do_not_relax_stopping(tmp_path):
+    rclpy.init()
+    executor = None
+    spin_thread = None
+    patrol = None
+    fake = None
+    try:
+        patrol = PatrolNode(parameter_overrides=[
+            Parameter("database_path", value=str(tmp_path / "patrol.sqlite3")),
+            Parameter("web_map_dir", value=str(tmp_path / "web_maps")),
+            Parameter("feedback_max_age_sec", value=0.5),
+        ])
+        fake = FakeNav()
+        executor = MultiThreadedExecutor(num_threads=6)
+        executor.add_node(patrol)
+        executor.add_node(fake)
+        spin_thread = threading.Thread(target=executor.spin, daemon=True)
+        spin_thread.start()
+        time.sleep(0.8)
+
+        register = patrol.create_client(RegisterMap, "/patrol/register_map")
+        assert register.wait_for_service(timeout_sec=5.0)
+        request = RegisterMap.Request()
+        request.navigation_yaml = str(make_map(tmp_path))
+        request.name = "recording tolerance map"
+        request.backend = "amcl"
+        response = wait_future(register.call_async(request))
+        assert response.success, response.message
+        mapping = response.map
+
+        active = patrol.create_client(SetActiveMap, "/patrol/set_active_map")
+        request = SetActiveMap.Request()
+        request.map_id = mapping.map_id
+        request.expected_revision = mapping.revision
+        response = wait_future(active.call_async(request))
+        assert response.success, response.message
+
+        save_point = patrol.create_client(SaveCurrentPoint, "/patrol/save_current_point")
+
+        def set_speed(linear, angular):
+            fake.odom_linear_x = linear
+            fake.odom_angular_z = angular
+            deadline = time.monotonic() + 3.0
+            while time.monotonic() < deadline:
+                odom, _received = patrol.latest_odom()
+                if odom is not None:
+                    values = (odom.twist.twist.linear.x, odom.twist.twist.angular.z)
+                    expected = (linear, angular)
+                    if all(a == b or (math.isnan(a) and math.isnan(b))
+                           for a, b in zip(values, expected)):
+                        return
+                time.sleep(0.01)
+            raise AssertionError("fake odometry was not received")
+
+        def save():
+            request = SaveCurrentPoint.Request()
+            request.map_id = mapping.map_id
+            request.name = "recording tolerance point"
+            return wait_future(save_point.call_async(request))
+
+        # Ordinary jitter and the exact inclusive boundaries pass, in either
+        # direction; values just above either limit remain rejected.
+        for linear, angular, allowed in (
+                (0.06, 0.08, True), (-0.08, -0.10, True), (0.08, 0.10, True),
+                (0.0801, 0.0, False), (-0.0801, 0.0, False),
+                (0.0, 0.1001, False), (0.0, -0.1001, False)):
+            set_speed(linear, angular)
+            response = save()
+            assert response.success == allowed, response.message
+            if not allowed:
+                assert "当前 |v|=" in response.message
+                assert "0.080 m/s" in response.message
+                assert "0.100 rad/s" in response.message
+
+        # The thresholds are evaluated per request, so a live parameter
+        # adjustment takes effect without restarting or changing stop limits.
+        results = patrol.set_parameters([
+            Parameter("record_point_linear_threshold", value=0.09),
+            Parameter("record_point_angular_threshold", value=0.12),
+        ])
+        assert all(result.successful for result in results)
+        set_speed(0.085, 0.11)
+        response = save()
+        assert response.success, response.message
+        patrol.set_parameters([
+            Parameter("record_point_linear_threshold", value=0.02),
+            Parameter("record_point_angular_threshold", value=0.03),
+        ])
+        set_speed(0.025, 0.04)
+        response = save()
+        assert not response.success, response.message
+
+        # Non-finite feedback and invalid tolerance settings must never
+        # silently exempt a sample from movement validation.
+        patrol.set_parameters([
+            Parameter("record_point_linear_threshold", value=0.08),
+            Parameter("record_point_angular_threshold", value=0.10),
+        ])
+        for linear, angular in ((math.nan, 0.0), (math.inf, 0.0),
+                                (0.0, math.nan), (0.0, math.inf)):
+            set_speed(linear, angular)
+            response = save()
+            assert not response.success and "有限数值" in response.message
+        set_speed(0.0, 0.0)
+        for name, invalid in (("record_point_linear_threshold", -0.01),
+                              ("record_point_linear_threshold", math.inf),
+                              ("record_point_angular_threshold", math.nan)):
+            patrol.set_parameters([Parameter(name, value=invalid)])
+            response = save()
+            assert not response.success and "阈值" in response.message
+            patrol.set_parameters([
+                Parameter("record_point_linear_threshold", value=0.08),
+                Parameter("record_point_angular_threshold", value=0.10),
+            ])
+
+        # Home-point capture and execution still use the original strict
+        # stopping thresholds, even when normal point recording is exempt.
+        set_speed(0.06, 0.08)
+        response = save()
+        assert response.success, response.message
+        home = patrol.create_client(SetHomePoint, "/patrol/set_home_point")
+        request = SetHomePoint.Request()
+        request.map_id = mapping.map_id
+        request.expected_map_revision = mapping.revision
+        response = wait_future(home.call_async(request))
+        assert not response.success and "仍在运动" in response.message
+        assert patrol.get_parameter("settle_linear_threshold").value == 0.03
+        assert patrol.get_parameter("settle_angular_threshold").value == 0.05
+
+        # Allowing jitter does not exempt missing or expired odometry.
+        fake.publish_odom = False
+        time.sleep(0.7)
+        response = save()
+        assert not response.success and "新鲜" in response.message
+        assert not fake.goals
     finally:
         if executor is not None:
             executor.shutdown()

@@ -134,6 +134,7 @@ private:
   QPushButton *pauseButton_ = nullptr;
   QPushButton *resumeButton_ = nullptr;
   QPushButton *cancelButton_ = nullptr;
+  QLabel *startReadinessLabel_ = nullptr;
   QLabel *statusLabel_ = nullptr;
   QLabel *progressLabel_ = nullptr;
 

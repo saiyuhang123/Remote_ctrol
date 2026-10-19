@@ -2,7 +2,7 @@
 <package format="3">
   <name>detector_node</name>
   <version>0.1.0</version>
-  <description>Independent CPU person and plate detection (OpenVINO YOLO / HyperLPR3), no face models.</description>
+  <description>Independent CPU face, person and plate detection (YuNet / OpenVINO YOLO / HyperLPR3), no identity matching.</description>
   <maintainer email="dev@example.com">ubuntu</maintainer>
   <license>Proprietary</license>
 

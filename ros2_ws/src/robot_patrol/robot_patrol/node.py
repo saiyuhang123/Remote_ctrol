@@ -52,7 +52,7 @@ from .engine import (
 )
 from .map_export import default_web_map_dir, export_web_map
 from .map_metadata import expected_occupancy_sha256, read_map_binding
-from .models import PatrolError, Point, RouteSnapshot, new_id, now_ns
+from .models import PatrolError, Point, RouteSnapshot, new_id, now_ns, require_finite
 from .nav2_client import Nav2Driver, quaternion_to_yaw
 from .store import PatrolStore
 
@@ -82,6 +82,8 @@ class PatrolNode(Node):
         self.declare_parameter("settle_timeout_sec", 10.0)
         self.declare_parameter("settle_linear_threshold", 0.03)
         self.declare_parameter("settle_angular_threshold", 0.05)
+        self.declare_parameter("record_point_linear_threshold", 0.08)
+        self.declare_parameter("record_point_angular_threshold", 0.10)
         self.declare_parameter("settle_duration_sec", 0.8)
         self.declare_parameter("feedback_max_age_sec", 1.5)
         self.declare_parameter("tf_max_age_sec", 1.5)
@@ -754,11 +756,25 @@ class PatrolNode(Node):
             if odom is None or (time.monotonic() - received) > float(
                     self.get_parameter("feedback_max_age_sec").value):
                 raise PatrolError("NAV_NOT_READY", "没有新鲜的 /odom 反馈")
-            if abs(float(odom.twist.twist.linear.x)) > float(
-                    self.get_parameter("settle_linear_threshold").value) or \
-                    abs(float(odom.twist.twist.angular.z)) > float(
-                    self.get_parameter("settle_angular_threshold").value):
-                raise PatrolError("INVALID_DATA", "车辆仍在运动，确认停稳后再保存点位")
+            linear = require_finite(odom.twist.twist.linear.x, "里程计线速度")
+            angular = require_finite(odom.twist.twist.angular.z, "里程计角速度")
+            # Recording tolerates odometry jitter independently of arrival,
+            # return-home and guard standstill checks. Read on every request
+            # so operators can tune these two parameters without restarting.
+            linear_limit = require_finite(
+                self.get_parameter("record_point_linear_threshold").value,
+                "录点线速度阈值")
+            angular_limit = require_finite(
+                self.get_parameter("record_point_angular_threshold").value,
+                "录点角速度阈值")
+            if linear_limit < 0.0 or angular_limit < 0.0:
+                raise PatrolError("INVALID_DATA", "录点速度阈值必须大于等于 0")
+            if abs(linear) > linear_limit or abs(angular) > angular_limit:
+                raise PatrolError(
+                    "INVALID_DATA",
+                    f"车辆仍在运动，确认停稳后再保存点位；当前 |v|={abs(linear):.3f} m/s，"
+                    f"|w|={abs(angular):.3f} rad/s；录点豁免阈值："
+                    f"|v|≤{linear_limit:.3f} m/s，|w|≤{angular_limit:.3f} rad/s")
             x, y, yaw, stamp_ns = self._current_pose()
             point = self._store.upsert_point(
                 "", map_entry.map_id, request.name, x, y, yaw, "current_pose",

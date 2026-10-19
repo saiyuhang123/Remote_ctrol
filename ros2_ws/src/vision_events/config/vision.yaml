@@ -1,5 +1,6 @@
 vision_events:
   ros__parameters:
+    accept_hikvision_faces: false
     max_pose_age_sec: 0.3
     map_id: ''
     map_revision: ''

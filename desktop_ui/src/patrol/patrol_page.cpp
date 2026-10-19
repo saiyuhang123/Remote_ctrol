@@ -11,6 +11,7 @@
 #include <QLineEdit>
 #include <QPushButton>
 #include <QSpinBox>
+#include <QStringList>
 #include <QSplitter>
 #include <QTableWidget>
 #include <QTabWidget>
@@ -254,6 +255,14 @@ void PatrolPage::buildUi() {
 
   auto *runGroup = new QGroupBox(QStringLiteral("执行"), routeEditor);
   auto *runLayout = new QVBoxLayout(runGroup);
+  startReadinessLabel_ = new QLabel(runGroup);
+  startReadinessLabel_->setObjectName(QStringLiteral("patrolStartReadiness"));
+  startReadinessLabel_->setWordWrap(true);
+  startReadinessLabel_->setTextFormat(Qt::PlainText);
+  startReadinessLabel_->setTextInteractionFlags(Qt::TextSelectableByMouse);
+  startReadinessLabel_->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
+  startReadinessLabel_->setMargin(8);
+  runLayout->addWidget(startReadinessLabel_);
   auto *runRow = new QHBoxLayout;
   runRow->addWidget(new QLabel(QStringLiteral("循环"), runGroup));
   loopCount_ = new QSpinBox(runGroup);
@@ -829,9 +838,44 @@ void PatrolPage::updateActionStates() {
   const bool startPermitted = !startPermission_ ||
                               startPermission_(&startPermissionReason);
   const QString startPermissionTip = startPermitted ? QString() : startPermissionReason;
-  startButton_->setEnabled(!offline_ && available && hasMap && !currentRouteId_.isEmpty() &&
-                           !routeDirty_ && !activeRun && startPermitted);
-  startButton_->setToolTip(startPermissionTip);
+  QStringList startBlockers;
+  if (offline_) startBlockers << QStringLiteral("当前为离线模式，不能执行巡航");
+  if (!available) {
+    startBlockers << QStringLiteral("巡航接口未构建，请先构建巡航模块");
+  } else if (!offline_ && !client_->routeServerReady()) {
+    startBlockers << QStringLiteral("巡航后台未就绪，请在启动导航前勾选“路线巡航联锁”，再启动流程");
+  }
+  if (!hasMap) startBlockers << QStringLiteral("未设置活跃地图，请登记地图并点击“设为活跃地图”");
+  if (currentRouteId_.isEmpty())
+    startBlockers << QStringLiteral("未选择已保存路线，请选择路线，或新建后点击“保存路线”");
+  if (routeDirty_) startBlockers << QStringLiteral("路线有未保存修改，请点击“保存路线”");
+  if (activeRun) {
+    startBlockers << (paused ? QStringLiteral("当前任务已暂停，请使用“继续”，或取消后再开始新任务")
+                            : QStringLiteral("已有巡航或返航任务正在执行，请先取消并等待任务结束"));
+  } else if (client_ && client_->hasActiveOrPendingRun()) {
+    startBlockers << QStringLiteral("巡航或返航请求正在处理，请等待结果");
+  }
+  if (!startPermitted) {
+    startBlockers.append(startPermissionReason.isEmpty()
+                            ? QStringList{QStringLiteral("当前操作条件未满足，暂不能开始巡航")}
+                            : startPermissionReason.split('\n', Qt::SkipEmptyParts));
+  }
+  startBlockers.removeDuplicates();
+  const bool canStart = startBlockers.isEmpty();
+  const QString startDisabledTip = startBlockers.join('\n');
+  startButton_->setEnabled(canStart);
+  startButton_->setToolTip(startDisabledTip);
+  startReadinessLabel_->setText(
+      canStart ? QStringLiteral("启动条件：已就绪，可以点击“开始”")
+               : QStringLiteral("启动条件：尚未就绪（%1 项）\n%2")
+                     .arg(startBlockers.size()).arg(startBlockers.join(QStringLiteral("；"))));
+  const QVariant previousReady = startReadinessLabel_->property("ready");
+  if (!previousReady.isValid() || previousReady.toBool() != canStart) {
+    startReadinessLabel_->setProperty("ready", canStart);
+    startReadinessLabel_->setStyleSheet(
+        canStart ? QStringLiteral("QLabel#patrolStartReadiness { color:#166534; background:#f0fdf4; border:1px solid #bbf7d0; border-radius:5px; }")
+                 : QStringLiteral("QLabel#patrolStartReadiness { color:#92400e; background:#fffbeb; border:1px solid #fde68a; border-radius:5px; }"));
+  }
 
   const auto &resumePermission = resumePermission_ ? resumePermission_ : startPermission_;
   QString resumePermissionReason;

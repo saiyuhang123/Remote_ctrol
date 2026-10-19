@@ -197,7 +197,6 @@ class GatewayNode(Node):
         self._route_client = ActionClient(self, RunRoute, "/patrol/run_route")
         self._return_client = ActionClient(self, ReturnHome, "/patrol/return_home")
         self._control_client = self.create_client(ControlRun, "/patrol/control")
-        self._face_client = self.create_client(SetBool, "/hk_camera/set_face_capture")
         self._params_client = self.create_client(SetParameters, "/detector_node/set_parameters")
         self._ptz_control_client = self.create_client(ControlPTZ, "/hk_camera/control_ptz")
         self._ptz_pose_client = self.create_client(GetPTZPose, "/hk_camera/get_ptz_pose")
@@ -222,7 +221,6 @@ class GatewayNode(Node):
             self._on_nav_status, qos_profile_action_status_default)
         for topic, callback in (
             ("/vision/detector_status", self._on_detector_status),
-            ("/hk_camera/face_status", self._on_face_status),
             ("/hk_camera/status", self._on_camera_status),
             ("/vision/status", self._on_recorder_status),
             ("/gas_detector/status", self._on_gas_status),
@@ -475,9 +473,10 @@ class GatewayNode(Node):
             detector = dict(self._detector_status)
             detector_age = (time.monotonic() - self._detector_time
                             if self._detector_time else None)
-            face = dict(self._face_status)
-            face_age = (time.monotonic() - self._face_time
-                        if self._face_time else None)
+            face = dict(enabled=bool(detector.get("face_requested", detector.get("face"))),
+                        ready=bool(detector.get("face")), source="host_yunet",
+                        last_error=detector.get("last_error", ""))
+            face_age = detector_age
             camera = dict(self._camera_status)
             camera_age = (time.monotonic() - self._camera_time
                           if self._camera_time else None)
@@ -529,7 +528,7 @@ class GatewayNode(Node):
                 "detector": detector,
                 "detector_age": round(detector_age, 2) if detector_age is not None else None,
                 "recorder": recorder,
-                "face_service_ready": bool(_safe_ready(self._face_client)),
+                "face_service_ready": bool(_safe_ready(self._params_client)),
                 "detector_service_ready": bool(_safe_ready(self._params_client)),
             },
             "ptz": {
@@ -1191,18 +1190,7 @@ class GatewayNode(Node):
 
     # ------------------------------------------------------------- face/vision
     def _call_set_face(self, websocket, data: dict):
-        enabled = bool(data.get("enabled"))
-        if not self._face_client.service_is_ready():
-            self._command_result(websocket, "vision_face_capture", False,
-                                 "VISION_NOT_RUNNING", "人脸抓拍服务未启动",
-                                 data.get("request_id", ""))
-            return
-        request = SetBool.Request()
-        request.data = enabled
-        future = self._face_client.call_async(request)
-        future.add_done_callback(
-            lambda done: self._vision_result(
-                websocket, "vision_face_capture", data.get("request_id", ""), done))
+        self._call_set_detector_param(websocket, data, "vision_face_capture", "enable_face")
 
     def _call_set_detector_param(self, websocket, data: dict,
                                  command_name: str, parameter_name: str):

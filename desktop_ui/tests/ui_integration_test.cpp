@@ -11,6 +11,7 @@
 #include <QLabel>
 #include <QLineEdit>
 #include <QPushButton>
+#include <QPlainTextEdit>
 #include <QScreen>
 #include <QTemporaryDir>
 #include <QTest>
@@ -21,6 +22,7 @@
 #include <geometry_msgs/msg/pose_with_covariance_stamped.hpp>
 #include <geometry_msgs/msg/pose_stamped.hpp>
 #include <geometry_msgs/msg/twist.hpp>
+#include <action_msgs/msg/goal_status_array.hpp>
 #include <nav_msgs/msg/occupancy_grid.hpp>
 #include <nav_msgs/msg/odometry.hpp>
 #include <nav2_msgs/action/navigate_to_pose.hpp>
@@ -89,6 +91,69 @@ private slots:
     rclcpp::init(0, nullptr, rclcpp::InitOptions(), rclcpp::SignalHandlerOptions::None);
   }
   void cleanupTestCase() { rclcpp::shutdown(); }
+  void initialPoseDoesNotRequireSpeedOrMapOrReadyNav2() {
+    auto node = std::make_shared<rclcpp::Node>("initial_pose_without_speed_fixture");
+    std::vector<geometry_msgs::msg::PoseWithCovarianceStamped> poses;
+    std::vector<geometry_msgs::msg::Twist> commands;
+    auto initial = node->create_subscription<geometry_msgs::msg::PoseWithCovarianceStamped>("/initialpose", 10,
+      [&](geometry_msgs::msg::PoseWithCovarianceStamped::ConstSharedPtr message) { poses.push_back(*message); });
+    auto velocity = node->create_subscription<geometry_msgs::msg::Twist>("/cmd_vel_teleop", 10,
+      [&](geometry_msgs::msg::Twist::ConstSharedPtr message) { commands.push_back(*message); });
+    auto request = node->create_publisher<geometry_msgs::msg::PoseWithCovarianceStamped>("/desktop_ui/initial_pose_request", 10);
+    auto odom = node->create_publisher<nav_msgs::msg::Odometry>("/odom", rclcpp::SensorDataQoS());
+    auto status = node->create_publisher<action_msgs::msg::GoalStatusArray>(
+      "/navigate_to_pose/_action/status", rclcpp::QoS(1).reliable().transient_local());
+    bool feedback = false, navActive = false;
+    QTimer publish;
+    connect(&publish, &QTimer::timeout, this, [&] {
+      rclcpp::spin_some(node);
+      if (feedback) {
+        nav_msgs::msg::Odometry message; message.header.stamp = node->now();
+        message.twist.twist.linear.x = .2; message.twist.twist.angular.z = .1;
+        odom->publish(message);
+      }
+      action_msgs::msg::GoalStatusArray message;
+      if (navActive) {
+        action_msgs::msg::GoalStatus goal; goal.status = goal.STATUS_EXECUTING;
+        message.status_list.push_back(goal);
+      }
+      status->publish(message);
+    }); publish.start(50);
+    const QString root = DESKTOP_UI_SOURCE_DIR;
+    auto config = DesktopConfig::load(root + "/config/desktop.json", root, QDir(root).absoluteFilePath(".."));
+    config.feedbackTimeoutMs = 500;
+    MainWindow window(config, false); window.show();
+    QVERIFY(QTest::qWaitForWindowExposed(&window));
+    window.findChild<QTabWidget *>("controlWorkspaceTabs")->setCurrentIndex(1);
+    auto *arm = window.findChild<QCheckBox *>("enableControl");
+    auto *relocate = window.findChild<QPushButton *>("setInitialPose");
+    auto *logs = window.findChild<QPlainTextEdit *>();
+    QVERIFY(arm && relocate && logs);
+    arm->setChecked(true); QTest::qWait(600);
+    QTest::mouseClick(relocate, Qt::LeftButton);
+    QTRY_COMPARE(poses.size(), 1); // No odometry, map TF or action server.
+    feedback = true; QTest::qWait(300);
+    QTest::mouseClick(relocate, Qt::LeftButton);
+    QTRY_COMPARE(poses.size(), 2); // Speed does not gate this pose-only operation.
+    QCOMPARE(commands.size(), 0);
+    geometry_msgs::msg::PoseWithCovarianceStamped selected;
+    selected.header.frame_id = "map"; selected.pose.pose.orientation.w = 1.;
+    arm->setChecked(false); request->publish(selected); QTest::qWait(300);
+    QCOMPARE(poses.size(), 2);
+    QVERIFY(logs->toPlainText().contains("请勾选主窗口顶部的"));
+    arm->setChecked(true); navActive = true; QTest::qWait(300);
+    QTest::mouseClick(relocate, Qt::LeftButton); QTest::qWait(300);
+    QCOMPARE(poses.size(), 2);
+    QVERIFY(logs->toPlainText().contains("仍有活动导航目标"));
+    navActive = false; QTest::qWait(300);
+    window.setProfileIndex(1); request->publish(selected); QTest::qWait(300);
+    QCOMPARE(poses.size(), 2);
+    QVERIFY(logs->toPlainText().contains("请切换到定位导航模式"));
+    window.setProfileIndex(2); // AMCL has the same initial-pose interface.
+    QTest::mouseClick(relocate, Qt::LeftButton); QTRY_COMPARE(poses.size(), 3);
+    QCOMPARE(commands.size(), 0);
+    arm->setChecked(false); publish.stop();
+  }
   void localNavigationInitialPoseAndRealPointCloudRendering() {
     using Navigate = nav2_msgs::action::NavigateToPose;
     using Handle = rclcpp_action::ServerGoalHandle<Navigate>;

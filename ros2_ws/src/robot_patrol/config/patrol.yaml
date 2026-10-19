@@ -9,6 +9,11 @@ robot_patrol:
     settle_timeout_sec: 10.0
     settle_linear_threshold: 0.03
     settle_angular_threshold: 0.05
+    # Only /patrol/save_current_point: tolerate low-speed odometry jitter.
+    # Units: m/s and rad/s. Both absolute speeds must be within their limits.
+    # These do not relax arrival, return-home or patrol_guard stop checks.
+    record_point_linear_threshold: 0.08
+    record_point_angular_threshold: 0.10
     settle_duration_sec: 0.8
     feedback_max_age_sec: 1.5
     tf_max_age_sec: 1.5

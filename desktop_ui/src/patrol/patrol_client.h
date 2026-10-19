@@ -62,6 +62,7 @@ public:
   ~PatrolClient() override;
 
   bool available() const;
+  bool routeServerReady() const;
   QString ownerSessionId() const;
 
   void refreshMaps();

@@ -11,8 +11,13 @@
 #include <rviz_common/tool_manager.hpp>
 #include <rviz_common/visualization_frame.hpp>
 #include <rviz_common/visualization_manager.hpp>
+#include <rviz_common/display.hpp>
+#include <rviz_common/display_group.hpp>
 #include <rviz_common/logging.hpp>
+#include <pluginlib/class_loader.hpp>
 #include <rclcpp/rclcpp.hpp>
+#include <functional>
+#include <set>
 
 RvizHost::RvizHost(const QString &path, QWidget *parent) : QWidget(parent) {
   rviz_common::set_logging_handlers(
@@ -33,7 +38,34 @@ RvizHost::RvizHost(const QString &path, QWidget *parent) : QWidget(parent) {
   auto *layout = new QVBoxLayout(this); layout->setContentsMargins(0, 0, 0, 0); layout->addWidget(frame_);
   setPanelsVisible(false);
 }
-RvizHost::~RvizHost() { delete frame_; frame_ = nullptr; node_.reset(); }
+RvizHost::~RvizHost() {
+  // Displays can leave weak subscription control blocks in the ROS node.
+  // Keep their code loaded until that node and its callback groups are gone.
+  std::unique_ptr<pluginlib::ClassLoader<rviz_common::Display>> libraries;
+  if (frame_ && frame_->getManager()) {
+    auto *manager = frame_->getManager();
+    manager->stopUpdate();
+    try {
+      libraries = std::make_unique<pluginlib::ClassLoader<rviz_common::Display>>(
+        "rviz_common", "rviz_common::Display");
+      std::set<std::string> loaded;
+      std::function<void(rviz_common::DisplayGroup *)> retain = [&](auto *group) {
+        for (int i = 0; i < group->numDisplays(); ++i) {
+          auto *display = group->getDisplayAt(i);
+          const auto id = display->getClassId().toStdString();
+          if (libraries->isClassAvailable(id) && loaded.insert(id).second)
+            libraries->loadLibraryForClass(id);
+          if (auto *child = dynamic_cast<rviz_common::DisplayGroup *>(display)) retain(child);
+        }
+      };
+      retain(manager->getRootDisplayGroup());
+    } catch (const std::exception &error) {
+      RCLCPP_WARN(rclcpp::get_logger("robot_desktop_rviz"), "Cannot retain display libraries for shutdown: %s", error.what());
+    }
+    manager->removeAllDisplays();
+  }
+  delete frame_; frame_ = nullptr; node_.reset();
+}
 bool RvizHost::loadProfile(const QString &path) {
   if (!QFileInfo::exists(path)) return false;
   // Embedded profiles are loaded explicitly by the host. Dock geometry and

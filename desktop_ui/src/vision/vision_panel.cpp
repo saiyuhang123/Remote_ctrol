@@ -24,13 +24,13 @@ VisionPanel::VisionPanel(const DesktopConfig &config, bool offline, QWidget *par
   setObjectName("visionPanel");
   client_ = new VisionClient(config, offline, this);
   auto *layout = new QVBoxLayout(this); layout->setContentsMargins(0, 0, 0, 0);
-  auto *hint = new QLabel("独立执勤：无需启动导航或巡航；未定位也保存图片。"); hint->setWordWrap(true); layout->addWidget(hint);
+  auto *hint = new QLabel("全部由上位机检测：人脸 / 行人 / 车牌。无需导航，未定位也保存图片；相机只提供视频。"); hint->setWordWrap(true); layout->addWidget(hint);
   auto *buttons = new QGridLayout;
   auto button = [&](const QString &text, const char *name, int row, int column) {
     auto *b = new QPushButton(text); b->setObjectName(name); b->setEnabled(!offline && client_->supported()); buttons->addWidget(b, row, column); return b;
   };
-  auto *faceStart = button("启动人脸抓拍", "visionStartFace", 0, 0);
-  auto *faceStop = button("停止人脸抓拍", "visionStopFace", 0, 1);
+  auto *faceStart = button("启动上位机人脸", "visionStartFace", 0, 0);
+  auto *faceStop = button("停止人脸检测", "visionStopFace", 0, 1);
   auto *hostStart = button("启动行人 / 车牌", "visionStartDetector", 1, 0);
   auto *hostStop = button("停止上位机检测", "visionStopDetector", 1, 1);
   layout->addLayout(buttons);
@@ -38,7 +38,7 @@ VisionPanel::VisionPanel(const DesktopConfig &config, bool offline, QWidget *par
   auto *person = new QCheckBox("行人"); person->setObjectName("visionPerson"); person->setChecked(true);
   auto *plate = new QCheckBox("车牌"); plate->setObjectName("visionPlate"); plate->setChecked(true);
   choices->addWidget(person); choices->addWidget(plate); choices->addStretch(); layout->addLayout(choices);
-  auto *faceState = new QLabel("人脸抓拍未连接"); auto *hostState = new QLabel("上位机检测未启动");
+  auto *faceState = new QLabel("上位机人脸检测未启动"); auto *hostState = new QLabel("上位机行人 / 车牌未启动");
   auto *recordState = new QLabel(client_->supported() ? "本地记录未启动" : "缺少 vision_interfaces，请先构建视觉模块");
   for (auto *label : {faceState, hostState, recordState}) { label->setWordWrap(true); label->setTextFormat(Qt::PlainText); layout->addWidget(label); }
   auto *history = new QPushButton("查看视觉记录"); history->setObjectName("visionHistory"); history->setEnabled(client_->supported()); layout->addWidget(history);
@@ -51,11 +51,14 @@ VisionPanel::VisionPanel(const DesktopConfig &config, bool offline, QWidget *par
   auto ages = std::make_shared<QHash<QString, QElapsedTimer>>();
   connect(client_, &VisionClient::status, this, [=](const QString &kind, const QJsonObject &value) {
     (*ages)[kind].restart();
-    if (kind == "hikvision_face") faceState->setText((value.value("enabled").toBool() ? QString("海康人脸接收已开启（等待设备抓拍）") : QString("海康人脸接收已停止"))
-      + QString("\n队列 %1 / 丢弃 %2 %3").arg(value.value("queue").toInt()).arg(value.value("dropped").toInt()).arg(value.value("last_error").toString()));
-    else if (kind == "detector") hostState->setText(QString("上位机：%1 · 行人 %2 / 车牌 %3\n%4")
+    if (kind == "detector") {
+      const QString face = value.value("face").toBool() ? "已开启（YuNet）"
+        : value.value("face_requested").toBool() ? "准备中 / 模型未就绪" : "已关闭";
+      faceState->setText("上位机人脸：" + face + "；仅检测并保存小图，不比对身份");
+      hostState->setText(QString("上位机：%1 · 行人 %2 / 车牌 %3\n%4")
       .arg(value.value("input_ready").toBool() ? "视频已接入" : "等待视频")
       .arg(value.value("person").toBool() ? "开" : "关").arg(value.value("plate").toBool() ? "开" : "关").arg(value.value("last_error").toString()));
+    }
     else if (kind == "recorder") recordState->setText(QString("本地记录 %1 条 · %2\n%3")
       .arg(value.value("records").toDouble(), 0, 'f', 0)
       .arg(value.value("map_id").toString().isEmpty() ? "地图未关联，图片正常保存" : "地图：" + value.value("map_id").toString())
@@ -63,7 +66,7 @@ VisionPanel::VisionPanel(const DesktopConfig &config, bool offline, QWidget *par
   });
   auto *freshness = new QTimer(this); freshness->setInterval(1000);
   connect(freshness, &QTimer::timeout, this, [=] {
-    for (const auto &entry : {qMakePair(QString("hikvision_face"), faceState), qMakePair(QString("detector"), hostState), qMakePair(QString("recorder"), recordState)}) {
+    for (const auto &entry : {qMakePair(QString("detector"), faceState), qMakePair(QString("detector"), hostState), qMakePair(QString("recorder"), recordState)}) {
       if (ages->contains(entry.first) && ages->value(entry.first).elapsed() > 3500) entry.second->setText("组件状态已过期，请检查节点是否运行");
     }
   }); freshness->start();
@@ -107,7 +110,7 @@ VisionPanel::VisionPanel(const DesktopConfig &config, bool offline, QWidget *par
         for (int column = 0; column < values.size(); ++column) table->setItem(row, column, new QTableWidgetItem(values[column]));
         table->item(row, 0)->setData(Qt::UserRole, event);
       }
-      detail->setText(QString("共 %1 条。海康时间为报警接收时间；未定位不影响图片保存。").arg(total));
+      detail->setText(QString("共 %1 条。上位机按视频帧时间记录；未定位不影响图片保存。旧海康记录保留原时间来源。").arg(total));
     });
     connect(table, &QTableWidget::itemSelectionChanged, dialog, [=] {
       const int row = table->currentRow(); if (row < 0) return;

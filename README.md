@@ -2,6 +2,8 @@
 
 实机开发从 [使用手册](实机开发使用手册.md) 开始，包含安装、标定、建图、定位、双里程计对比和 Nav2 启动。
 
+界面操作见[控制界面详细使用手册](控制界面详细使用手册.md)，按本地 Qt 和网页端逐项说明入口、操作步骤、成功标志及常见提示；现场验收使用[实车功能测试清单](实车功能测试清单.md)。
+
 这是一个基于 ROS 2 Humble 的智能巡检机器人远程控制项目，用于实机遥控、视频监控、识别、抓拍与巡检业务管理。2026-10-09 已清理 Gazebo 仿真、测试场地地图和模拟执行逻辑。具体清单见 [实机开发说明](实机开发说明.md)。
 
 > 当前状态：3D（FAST-LIO）与 2D（SLAM Toolbox 建图、Cartographer）三套建图导航链路已有实车记录；SLAM Toolbox 定位端现已切换 AMCL，完成隔离模拟验证，实车效果待验收。此前已完成轮速里程计卷尺标定和 Nav2 到点测试。三套方案的使用命令见 [建图导航命令](建图导航命令.md)（3D）和 [2D 建图导航](2d建图导航.md)（两套 2D）。本地路线执行、一键返回待命点和网页任务入口已接入 `robot_patrol`。
@@ -93,8 +95,10 @@ sudo apt install -y python3-pip python3-opencv ffmpeg v4l-utils \
 
 ```bash
 python3 -m pip install --user fastapi "uvicorn[standard]" \
-  websockets PyYAML requests numpy python-multipart
+  websockets PyYAML requests 'numpy==1.26.4' 'transforms3d==0.4.2' python-multipart
 ```
+
+NumPy 1.26.4 需要配套 `transforms3d==0.4.2`。Ubuntu 自带的 transforms3d 0.3.1 使用已移除的 `np.float`，会让 FAST-LIO 的 ICP 节点在导入 `tf_transformations` 时退出，随后 Nav2 持续提示 `map` 坐标系不存在。导航和视觉安装脚本已固定兼容版本；已有环境修复后需重新启动导航，并重新设置初始位姿。
 
 如果要启用图像识别，还需要安装：
 

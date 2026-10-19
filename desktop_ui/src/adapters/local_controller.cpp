@@ -109,10 +109,11 @@ void LocalController::stopManual() {
   else emergencyStop();
 }
 bool LocalController::navigate(double x, double y, double yaw) {
-  if (!enabled_ || !feedbackFresh() || estopped_ || manualMoving_ || patrolActive_) {
-    emit message("请启用操作、解除急停，并先取消巡航或结束手动行驶后再发送目标");
-    return false;
-  }
+  if (!enabled_) { emit message("导航目标未发送：请勾选主窗口顶部的“启用操作”"); return false; }
+  if (patrolActive_) { emit message("导航目标未发送：巡航任务仍在活动，请先取消整条巡航任务"); return false; }
+  if (manualMoving_) { emit message("导航目标未发送：仍在手动行驶，请先松开方向按钮"); return false; }
+  if (!feedbackFresh()) { emit message("导航目标未发送：急停反馈缺失或过期；请先在左侧“手动”页点击“解除急停（保持静止）”，已解除时请检查反馈是否更新"); return false; }
+  if (estopped_) { emit message("导航目标未发送：急停保持中，请在左侧“手动”页点击“解除急停（保持静止）”"); return false; }
   manualReady_ = false; emit manualChanged(false); return ros_->navigate(x, y, yaw);
 }
 bool LocalController::cancelNavigation() { return enabled_ && ros_->cancelNavigation(); }
