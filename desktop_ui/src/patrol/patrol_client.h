@@ -101,6 +101,7 @@ public:
   bool hasActiveOrPendingRun() const;
   void setOperatorAuthorized(bool enabled);
   void controlRun(quint8 command, const QString &runId);
+  void resetInterlock();
 
   QVector<PatrolMapInfo> maps() const;
   QString activeMapId() const;

@@ -33,8 +33,11 @@ class Recorder:
         if len(self.samples) >= 200000:
             self.state, self.error = 'INVALID', '录制点数达到上限，请分段录制'
             raise PatrolError('INVALID_DATA', self.error)
+        # Retain stationary feedback at least every 0.5 s as evidence of
+        # settling, even when spatial decimation would discard those poses.
         if not self.samples or distance(value, self.samples[-1]) >= 0.035 or \
                 abs(angle(value['yaw']-self.samples[-1]['yaw'])) >= 0.035 or \
+                value['t']-self.samples[-1]['t'] >= 0.5 or \
                 (abs(value['v']) < 0.02) != (abs(self.samples[-1]['v']) < 0.02):
             self.samples.append(value)
 

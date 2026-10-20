@@ -294,6 +294,7 @@ def configure(context):
             'base_from_body_translation': base_body[:3, 3].tolist(),
             'base_from_body_quaternion': quaternion(base_body),
             'broadcast_lio_frame': source != 'lio',
+            'odom_source': source,
             'initial_base_z': float(-base_body[2, 3])}
     if mode == 'mapping':
         if not args['pcd_map']:

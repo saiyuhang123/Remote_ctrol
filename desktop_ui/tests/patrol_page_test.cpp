@@ -27,6 +27,7 @@
 #include <QMessageBox>
 #include <QTimer>
 #include <QComboBox>
+#include <QCheckBox>
 #include <QSpinBox>
 #include <QJsonDocument>
 #include <QImage>
@@ -253,7 +254,7 @@ private slots:
         {"to",QString("node-%1").arg((i+1)%4)},{"speed",.2},{"enabled",true},{"blocks",QJsonArray{block}}};
       if(i<2) planBlocks.append(block);
     }
-    const QJsonObject document{{"nodes",nodes},{"edges",edges},{"bindings",bindings}};
+    QJsonObject document{{"nodes",nodes},{"edges",edges},{"bindings",bindings}};
     auto maps = node->create_service<patrol_interfaces::srv::ListMaps>(
         "/patrol/list_maps",
         [map](const std::shared_ptr<patrol_interfaces::srv::ListMaps::Request>,
@@ -284,9 +285,10 @@ private slots:
         response->runs.push_back(run);
       });
     Q_UNUSED(points);Q_UNUSED(home);Q_UNUSED(runs);
-    QString fakeRecordingState="IDLE";QJsonObject lastSavedRoad;
+    QString fakeRecordingState="IDLE";QJsonObject lastSavedRoad;QString lastRoadOperation;
+    int planRequests=0;
     auto roads=node->create_service<patrol_interfaces::srv::RoadCommand>("/patrol/road_command",
-      [&route,&fakeRecordingState,&lastSavedRoad,document,planBlocks](const std::shared_ptr<patrol_interfaces::srv::RoadCommand::Request> request,
+      [&route,&fakeRecordingState,&lastSavedRoad,&lastRoadOperation,&planRequests,&document,planBlocks](const std::shared_ptr<patrol_interfaces::srv::RoadCommand::Request> request,
                std::shared_ptr<patrol_interfaces::srv::RoadCommand::Response> response){
         const auto payload=QJsonDocument::fromJson(QByteArray::fromStdString(request->payload_json)).object();
         QJsonObject data;
@@ -295,11 +297,19 @@ private slots:
             QJsonObject{{"network_id","network-test"},{"name","厂区巡检路网"},{"revision",2},{"published",true},{"document",document}},
             QJsonObject{{"network_id","restore-test"},{"name","恢复草稿路网"},{"revision",7},{"published",true},{"document",QJsonObject{}}}};
         } else if(request->operation=="PLAN") {
+          ++planRequests;
           data={{"route_id",QString::fromStdString(route.route_id)},{"route_revision",1},
             {"loop_count",payload["loop_count"]},{"digest","verified-digest"},{"network_id","network-test"},
+            {"entry",QJsonObject{{"required",true},{"target_name","厂区巡检 · 点1"},{"length",1.2},{"direction_changes",2}}},
             {"legs",QJsonArray{QJsonObject{{"blocks",planBlocks},{"edge_ids",QJsonArray{"edge-0","edge-1"}}}}}};
         } else if(request->operation=="STATUS") data={{"state",fakeRecordingState},{"enabled",true},{"network_id","restore-test"}};
         else if(request->operation=="SAVE_RECORD") lastSavedRoad=payload;
+        else if(request->operation=="START_PATH" || request->operation=="MARK_PATH_POINT" || request->operation=="SAVE_PATH") {
+          lastRoadOperation=QString::fromStdString(request->operation);
+          if(request->operation=="SAVE_PATH") {
+            data={{"route_id",QString::fromStdString(route.route_id)},{"point_count",4},{"closed",false}};
+          }
+        }
         response->success=true;response->data_json=QJsonDocument(data).toJson(QJsonDocument::Compact).toStdString();
       });
     Q_UNUSED(roads);
@@ -379,6 +389,8 @@ private slots:
     QTRY_COMPARE(mode->currentData().toString(),QString("RECORDED_NETWORK"));
     QTRY_VERIFY(!start->isEnabled());QTRY_VERIFY(preview->isEnabled());
     preview->click();QTRY_VERIFY(start->isEnabled());
+    QTRY_VERIFY(page.findChild<QLabel*>("patrolMessage")->text().contains("将自动接入 厂区巡检 · 点1"));
+    QVERIFY(page.findChild<QLabel*>("patrolMessage")->text().contains("2 次前进/倒车换向"));
     loops->setValue(2);QTRY_VERIFY(!start->isEnabled());
     preview->click();QTRY_VERIFY(start->isEnabled());
     fakeRecordingState="REVIEW";client.roadCommand("STATUS");
@@ -390,6 +402,12 @@ private slots:
     QTRY_COMPARE(lastSavedRoad["expected_revision"].toInt(),7);
     QCOMPARE(lastSavedRoad["network_id"].toString(),QString("restore-test"));
     QVERIFY(!lastSavedRoad["owner_session_id"].toString().isEmpty());
+    auto *advanced=page.findChild<QCheckBox *>("roadAdvancedSettings");
+    QVERIFY(advanced && !advanced->isChecked());
+    auto *savePath=page.findChild<QPushButton *>("roadSavePath");
+    QVERIFY(savePath && !savePath->isHidden());
+    QTRY_VERIFY(savePath->isEnabled());savePath->click();
+    QTRY_COMPARE(lastRoadOperation,QString("SAVE_PATH"));
     fakeRecordingState="IDLE";client.roadCommand("STATUS");QTRY_VERIFY(preview->isEnabled());
     QVERIFY(!start->isEnabled());preview->click();QTRY_VERIFY(start->isEnabled());
     auto *mapSettings = page.findChild<QWidget *>("patrolMapSettings");
@@ -398,6 +416,7 @@ private slots:
     settingsToggle->click();QVERIFY(mapSettings->isVisible());
     settingsToggle->click();QVERIFY(mapSettings->isHidden());
     QTest::qWait(30); // Let Qt invalidate the expanded panel's minimum size.
+    advanced->setChecked(true);
     for(const auto size:{QSize(1100,680),QSize(1180,760),QSize(1366,768),QSize(1920,1080)}) {
       page.resize(size);
       for(int tab=0;tab<tabs->count();++tab) {
@@ -447,10 +466,31 @@ private slots:
     client.setOperatorAuthorized(true);start->click();
     QTRY_COMPARE(goalsReceived,1);QCOMPARE(receivedPlanDigest,QString("verified-digest"));
     QTRY_VERIFY(!client.hasActiveOrPendingRun());
+    // A teaching path starts from one explicit click; PLAN happens internally.
+    QJsonObject pointIds;
+    for(int i=0;i<4;++i) pointIds[QString("node-%1").arg(i)]=QString("point-%1").arg(i);
+    document["inspection_path"]=QJsonObject{{"route_id",QString::fromStdString(route.route_id)},
+      {"closed",false},{"point_ids",pointIds},{"edge_ids",QJsonArray{"edge-0","edge-1","edge-2"}}};
+    client.roadCommand("LIST");
+    QTRY_VERIFY(!client.roadNetworks().first().toObject()["document"].toObject()["inspection_path"].toObject().isEmpty());
+    loops->setValue(3);QTRY_VERIFY(start->isEnabled());
+    const int previousPlans=planRequests;
+    start->click();
+    QTRY_COMPARE(planRequests,previousPlans+1);
+    QTRY_COMPARE(goalsReceived,2);
+    QTRY_VERIFY(!client.hasActiveOrPendingRun());
+    // The default recording view also fits compact screens, with no manual
+    // point binding or publication controls visible.
+    advanced->setChecked(false);tabs->setCurrentIndex(3);page.resize(1100,680);QTest::qWait(30);
+    QVERIFY(page.findChild<QPushButton *>("roadPublish")->isHidden());
+    QVERIFY(page.rect().contains(QRect(savePath->mapTo(&page,QPoint()),savePath->size())));
+    QVERIFY(page.grab().save("/tmp/patrol_simple_recording.png"));
+    auto *beginPath=page.findChild<QPushButton *>("roadBegin");
+    QTRY_VERIFY(beginPath->isEnabled());beginPath->click();QTRY_COMPARE(lastRoadOperation,QString("START_PATH"));
     name->setText(QStringLiteral("修改后的路线"));
     QTRY_VERIFY(!start->isEnabled());
     QVERIFY(readiness->text().contains(QStringLiteral("未保存修改")));
-    QCOMPARE(goalsReceived, 1); // Only the explicit Start click sends a goal.
+    QCOMPARE(goalsReceived, 2); // Only explicit Start clicks send goals.
     QTimer::singleShot(0, [] {
       if(auto *box=qobject_cast<QMessageBox *>(QApplication::activeModalWidget())) box->done(QMessageBox::Cancel);
     });

@@ -93,6 +93,7 @@ def runtime(tmp_path_factory):
         def __init__(self):
             super().__init__('inert_recorded_road_simulator')
             self.x=self.y=self.yaw=0.;self.v=self.w=0.;self.last=0.;self.history=[]
+            self.command_delay=0.;self.speed_deadband=0.;self.steering_rate=0.;self.steer=0.;self.pending_commands=[]
             self.operator=True;self.obstacles=[];self.guard_ready=False;self.progress={}
             self.broadcaster=TransformBroadcaster(self);self.static=StaticTransformBroadcaster(self)
             tf=TransformStamped();tf.header.frame_id='map';tf.child_frame_id='odom';tf.transform.rotation.w=1.;tf.header.stamp=self.get_clock().now().to_msg();self.static.sendTransform(tf)
@@ -108,13 +109,23 @@ def runtime(tmp_path_factory):
         def on_progress(self,msg):
             self.progress=json.loads(msg.data)
         def command(self,msg):
-            self.v=msg.linear.x
+            now=time.monotonic()
+            self.last=now
+            self.pending_commands.append((now+self.command_delay,msg.linear.x,msg.angular.z))
+        def tick(self):
+            now=time.monotonic()
+            while self.pending_commands and self.pending_commands[0][0]<=now:
+                _,self.v,self.w=self.pending_commands.pop(0)
             # Same curvature saturation as the Ackermann chassis, without
             # starting the real bridge or any serial/CAN drivers.
-            self.w=max(-abs(self.v)/.69,min(abs(self.v)/.69,msg.angular.z))
-            self.last=time.monotonic()
-        def tick(self):
+            self.w=max(-abs(self.v)/.69,min(abs(self.v)/.69,self.w))
             v,w=(self.v,self.w) if time.monotonic()-self.last<.3 else (0.,0.)
+            if abs(v)<self.speed_deadband:v=w=0.
+            if self.steering_rate:
+                target=math.atan(.5*w/(1.63*v)) if abs(v)>.001 else 0.
+                step=math.radians(self.steering_rate)*.02
+                self.steer+=max(-step,min(step,target-self.steer))
+                w=v*1.63*math.tan(self.steer)/.5
             self.x+=v*math.cos(self.yaw)*.02;self.y+=v*math.sin(self.yaw)*.02;self.yaw+=w*.02
             self.history.append((self.x,self.y,self.yaw,v,w))
             stamp=self.get_clock().now().to_msg()
@@ -222,6 +233,131 @@ def start_route(rt,route,plan,loops=1):
     future=rt.client.send_goal_async(goal);wait(future.done)
     handle=future.result();assert handle.accepted
     return handle
+
+
+def make_teaching_route(rt, end_x=.8, loops=1):
+    from robot_patrol.recorded_routes.geometry import motion_blocks
+    from robot_patrol.recorded_routes.inspection_path import prepare_path
+    doc=dict(schema_version=1, nodes={}, edges={}, bindings={}, allowed_polygon=[],
+             map_stamp=rt.patrol.roads.map_stamp(rt.mapping), vehicle=rt.patrol.roads.vehicle_stamp(),
+             inspection_path=dict(edge_ids=['ab'], closed=False))
+    doc['nodes']={'a':dict(id='a',name='A',x=0.,y=0.,yaw=0.),
+                  'b':dict(id='b',name='B',x=end_x,y=0.,yaw=0.)}
+    pts=[dict(x=end_x*i/40,y=0.,yaw=0.) for i in range(41)]
+    doc['edges']['ab']=dict(id='ab',name='AB',**{'from':'a','to':'b'},blocks=motion_blocks(pts),speed=.2)
+    points=prepare_path(doc,'自动接入测试',make_reverse=True)
+    net=rt.patrol._store.save_network(rt.mapping.map_id,'自动接入测试',doc)
+    saved=rt.patrol._store.save_path_bundle(net,doc,points,publish=True)
+    route=rt.patrol._store.get_route(doc['inspection_path']['route_id'])
+    return route,rt.patrol.roads.preview(route.route_id,loops)
+
+
+def test_real_entry_planner_handles_large_heading_error_without_motion(runtime,monkeypatch):
+    rt=runtime;reset_sim(rt)
+    from robot_patrol.recorded_routes.entry import EntryPlanner
+    original=EntryPlanner.compute
+    captures=[]
+    def capture(self,start,target):
+        points=original(self,start,target)
+        captures.append(dict(start=start,target=target,points=points))
+        (rt.tmp/'entry_candidates.json').write_text(json.dumps(captures))
+        return points
+    monkeypatch.setattr(EntryPlanner,'compute',capture)
+    rt.sim.x=.11;rt.sim.y=-.03;rt.sim.yaw=-1.8
+    time.sleep(.5)
+    begin=len(rt.sim.history)
+    route,plan=make_teaching_route(rt)
+    assert plan['entry']['required']
+    assert plan['entry']['length']>.2
+    assert plan['initial_legs'][0]['blocks'][-1]['entry_target']['yaw']==0.
+    assert all(abs(v)<.001 for _,_,_,v,_ in rt.sim.history[begin:]),'planning must never send motion'
+    assert rt.sim.guard_ready,'a long plan must not starve executor heartbeats'
+
+
+def test_real_entry_then_two_shuttle_passes_never_repeat_connector(runtime):
+    rt=runtime;reset_sim(rt,-.4)
+    route,plan=make_teaching_route(rt,end_x=.6,loops=2)
+    assert plan['entry']['required']
+    begin=len(rt.sim.history)
+    handle=start_route(rt,route,plan,loops=2)
+    result=handle.get_result_async();wait(result.done,65)
+    assert result.result().result.success,(result.result().result,rt.sim.progress)
+    assert result.result().result.completed_loops==2
+    trace=rt.sim.history[begin:]
+    assert min(x for x,_,_,_,_ in trace)>-.45
+    assert -.1<=rt.sim.x<=.25
+    assert any(v<-.03 for _,_,_,v,_ in trace)
+
+
+def test_real_entry_planner_searches_around_obstacles_without_motion(runtime):
+    from robot_patrol.recorded_routes.entry import EntryPlanner,connector_blocks
+    rt=runtime;reset_sim(rt,-2.)
+    rt.sim.obstacles=[(-1.,0.,.12)]
+    time.sleep(.8)
+    planner=EntryPlanner(rt.patrol)
+    try:
+        start=rt.patrol.roads.current()
+        target=dict(x=0.,y=0.,yaw=0.)
+        points=planner.compute(start,target)
+        blocks=connector_blocks(points,start,target,.69)
+        assert max(abs(p['y']) for b in blocks for p in b['samples'])>.35
+        assert abs(rt.sim.x+2.)<.001 and abs(rt.sim.v)<.001
+    finally:
+        planner.close();rt.sim.obstacles=[]
+
+
+def test_real_entry_pause_resume_and_cancel_keep_the_same_connector(runtime):
+    rt=runtime;reset_sim(rt,-1.0)
+    route,plan=make_teaching_route(rt,end_x=.6)
+    handle=start_route(rt,route,plan)
+    wait(lambda:rt.sim.x>-.85,15)
+    control(rt,1)
+    wait(lambda:rt.patrol._active_engine and rt.patrol._active_engine.status['state']==7)
+    x=rt.sim.x;time.sleep(.4);assert abs(rt.sim.x-x)<.02
+    control(rt,2)
+    wait(lambda:rt.sim.x>x+.08,15)
+    cancel=handle.cancel_goal_async();wait(cancel.done)
+    result=handle.get_result_async();wait(result.done,10)
+    assert not result.result().result.success
+    x=rt.sim.x;time.sleep(.8)
+    assert abs(rt.sim.x-x)<.02 and x<0.
+
+
+def test_real_entry_tracks_large_heading_correction_before_recorded_patrol(runtime):
+    rt=runtime;reset_sim(rt)
+    rt.sim.x=.11;rt.sim.y=-.03;rt.sim.yaw=-1.8
+    time.sleep(.5)
+    route,plan=make_teaching_route(rt,end_x=.6)
+    assert plan['entry']['required'] and plan['entry']['direction_changes']>=1
+    begin=len(rt.sim.history)
+    handle=start_route(rt,route,plan)
+    result=handle.get_result_async();wait(result.done,80)
+    assert result.result().result.success,(result.result().result,rt.sim.progress)
+    trace=rt.sim.history[begin:]
+    assert any(v>.03 for _,_,_,v,_ in trace) and any(v<-.03 for _,_,_,v,_ in trace)
+    assert abs(rt.sim.y)<.15 and abs(math.atan2(math.sin(rt.sim.yaw),math.cos(rt.sim.yaw)))<.25
+    (rt.tmp/'entry_execution.json').write_text(json.dumps(dict(plan=plan,trace=trace)))
+
+
+def test_real_entry_with_chassis_delay_deadband_and_steering_rate(runtime):
+    rt=runtime;reset_sim(rt)
+    rt.sim.command_delay=.10;rt.sim.speed_deadband=.035;rt.sim.steering_rate=45.;rt.sim.steer=0.
+    rt.sim.x=.11;rt.sim.y=-.03;rt.sim.yaw=-1.8
+    time.sleep(.5)
+    try:
+        route,plan=make_teaching_route(rt,end_x=.6)
+        begin=len(rt.sim.history);started=time.monotonic()
+        handle=start_route(rt,route,plan)
+        result=handle.get_result_async();wait(result.done,80)
+        trace=rt.sim.history[begin:]
+        (rt.tmp/'entry_delayed_chassis.json').write_text(json.dumps(dict(plan=plan,trace=trace,elapsed=time.monotonic()-started)))
+        assert result.result().result.success,(result.result().result,rt.sim.progress)
+        assert max(v for _,_,_,v,_ in trace)>.12
+        assert min(v for _,_,_,v,_ in trace)>=-.12001
+        assert max(v for _,_,_,v,_ in trace)<=.20001
+        assert abs(rt.sim.y)<.15 and abs(math.atan2(math.sin(rt.sim.yaw),math.cos(rt.sim.yaw)))<.25
+    finally:
+        rt.sim.command_delay=rt.sim.speed_deadband=rt.sim.steering_rate=0.
 
 
 def test_real_nav2_continuous_recorded_path_and_guard_uuid(runtime):

@@ -118,9 +118,12 @@ public:
           else {
             auto &path=detour_?detour_path_:reference_;
             size_t index=detour_?detour_index_:reference_index_;
-            double tolerance=(!detour_ && block_+1<ticket_data_["blocks"].size())?0.09:0.21;
+            bool entry=ticket_data_["blocks"][block_].value("entry",false);
+            double tolerance=entry?0.06:((!detour_ && block_+1<ticket_data_["blocks"].size())?0.09:0.21);
             if(pathLength(path,index)>tolerance+0.05 || dist(current,path.poses.back().pose)>tolerance)
               fail("控制器成功但有序路径进度未完成");
+            else if(entry && std::abs(wrap(tf2::getYaw(current.orientation)-tf2::getYaw(path.poses.back().pose.orientation)))>0.15)
+              fail("自动接入运动段结束时车头未对齐");
             else {stop_reason_=detour_?Stop::REJOIN:Stop::END;phase_=Phase::STOP;phase_time_=Steady::now();stable_=Steady::time_point{};}
           }
         }
@@ -134,9 +137,18 @@ public:
               fail("绕障重入位姿不合格");
             else {reference_index_=rejoin_index_;detour_=false;phase_=Phase::START;phase_time_=Steady::now();wait_started_=Steady::time_point{};}
           } else {
-            block_++;
-            if(block_>=ticket_data_["blocks"].size()) {phase_=Phase::COMPLETE;complete_time_=Steady::now();}
-            else {loadBlock();phase_=Phase::START;phase_time_=Steady::now();}
+            const auto &block=ticket_data_["blocks"][block_];
+            // Recheck after the physical stop, before releasing the next
+            // gear or the recorded road. A business 20cm stop is not enough.
+            Pose target=block.contains("entry_target")?fromJson(block["entry_target"]):reference_.poses.back().pose;
+            if(block.value("entry",false) && (dist(current,target)>0.10 ||
+               std::abs(wrap(tf2::getYaw(current.orientation)-tf2::getYaw(target.orientation)))>0.20))
+              fail("自动接入停车后位姿未对齐，已停止任务");
+            else {
+              block_++;
+              if(block_>=ticket_data_["blocks"].size()) {phase_=Phase::COMPLETE;complete_time_=Steady::now();}
+              else {loadBlock();phase_=Phase::START;phase_time_=Steady::now();}
+            }
           }
         } else if(age(phase_time_)>10) fail("运动段停止未确认");
       } else if(phase_==Phase::WAIT) {
@@ -145,7 +157,8 @@ public:
         else if(mapsFresh() && stopped()) {
           bool aligned=pointPathDistance(current,reference_,reference_index_,std::min(reference_index_+8,reference_.poses.size()-1))<0.12;
           if(aligned && !referenceBlockedAhead()) {detour_=false;phase_=Phase::START;phase_time_=Steady::now();}
-          else if(age(last_plan_)>2.0 && ticket_data_["blocks"][block_]["direction"].get<int>()>0) requestPlan(current);
+          else if(age(last_plan_)>2.0 && !ticket_data_["blocks"][block_].value("entry",false) &&
+                  ticket_data_["blocks"][block_]["direction"].get<int>()>0) requestPlan(current);
         }
       } else if(phase_==Phase::PLAN) {
         permission(false);
@@ -260,7 +273,8 @@ private:
   Pose currentPose() {
     auto transform=tf_->lookupTransform("map","base_link",tf2::TimePointZero);
     double seconds=(node_->now()-rclcpp::Time(transform.header.stamp)).seconds();
-    if(seconds>1.5 || seconds < -0.5) throw std::runtime_error("map to base TF stale; age="+std::to_string(seconds));
+    if(seconds < -0.5) throw std::runtime_error("map to base TF clock is ahead; age="+std::to_string(seconds));
+    if(seconds>1.5) throw std::runtime_error("map to base TF stale; age="+std::to_string(seconds)+"s (limit 1.5s)");
     Pose result;result.position.x=transform.transform.translation.x;result.position.y=transform.transform.translation.y;
     result.orientation=transform.transform.rotation;return result;
   }
@@ -277,8 +291,10 @@ private:
     follow_done_=false;stopping_=false;follow_handle_.reset();send_pending_=true;
     controller_fault_.clear();
     phase_=Phase::FOLLOW;permission(true);
-    Follow::Goal goal;goal.path=active_path_;goal.controller_id="RecordedRoute";
-    goal.goal_checker_id=(detour_ || block_+1<ticket_data_["blocks"].size())?"recorded_stop_checker":"recorded_goal_checker";
+    Follow::Goal goal;goal.path=active_path_;
+    goal.controller_id=ticket_data_["blocks"][block_].value("entry",false)?"RecordedEntryRoute":"RecordedRoute";
+    goal.goal_checker_id=ticket_data_["blocks"][block_].value("entry",false)?"recorded_entry_checker":
+      ((detour_ || block_+1<ticket_data_["blocks"].size())?"recorded_stop_checker":"recorded_goal_checker");
     const unsigned gen=generation_;
     rclcpp_action::Client<Follow>::SendGoalOptions options;
     options.goal_response_callback=[this,gen](FollowHandle::SharedPtr handle){
@@ -500,6 +516,7 @@ private:
     Json value={{"ticket_id",ticket_},{"state",state},{"block",block_},
       {"reference_index",reference_index_},{"detour_index",detour_index_},{"rejoin_index",rejoin_index_},{"error",last_error_},{"waiting_reason",detour_rejection_},
       {"follow_dispatch_pending",send_pending_},{"follow_goal_id",child_id}};
+    value["entry"]=!ticket_data_.is_null() && block_<ticket_data_["blocks"].size() && ticket_data_["blocks"][block_].value("entry",false);
     if(detour_) {value["detour_points"]=Json::array();for(const auto &p:detour_path_.poses) value["detour_points"].push_back(toJson(p.pose));}
     std_msgs::msg::String message;message.data=value.dump();progress_pub_->publish(message);
   }

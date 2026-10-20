@@ -126,7 +126,7 @@ local_costmap:
       inflation_layer:
         plugin: nav2_costmap_2d::InflationLayer
         cost_scaling_factor: 10.0  # 陡衰减：3cm 软带内代价就掉光，窄缝中心保持自由，通过性不受影响
-        inflation_radius: 0.32   # 略大于内切半径 0.29 的最小可用值：产生"离墙远代价低"的梯度，全局路径不再贴障碍边
+        inflation_radius: 0.10   # 按需求改为 10cm：已小于内切半径 0.29，软代价带基本消失，路径贴障、窄缝通过性最大；碰撞仅靠 footprint 对致命障碍格兜底
       obstacle_layer:
         plugin: nav2_costmap_2d::ObstacleLayer
         enabled: true
@@ -180,7 +180,7 @@ global_costmap:
       inflation_layer:
         plugin: nav2_costmap_2d::InflationLayer
         cost_scaling_factor: 10.0  # 陡衰减：3cm 软带内代价就掉光，窄缝中心保持自由，通过性不受影响
-        inflation_radius: 0.32   # 略大于内切半径 0.29 的最小可用值：产生"离墙远代价低"的梯度，全局路径不再贴障碍边
+        inflation_radius: 0.10   # 按需求改为 10cm：已小于内切半径 0.29，软代价带基本消失，路径贴障、窄缝通过性最大；碰撞仅靠 footprint 对致命障碍格兜底
       always_send_full_costmap: true
 map_server:
   ros__parameters:

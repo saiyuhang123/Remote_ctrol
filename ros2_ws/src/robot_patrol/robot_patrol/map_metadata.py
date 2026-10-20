@@ -180,6 +180,15 @@ def _occupancy_lut(metadata: dict[str, Any]) -> bytes:
     return bytes(values)
 
 
+def occupancy_sha256(data) -> str:
+    """Hash signed ROS raster storage without a Python loop over every cell."""
+    try:
+        raster = memoryview(data).cast('B')
+    except TypeError:
+        raster = bytes(int(value) & 0xFF for value in data)
+    return hashlib.sha256(raster).hexdigest()
+
+
 def expected_occupancy_sha256(navigation_yaml: str) -> tuple[int, int, str]:
     """Return the (width, height, digest) Nav2 should publish for a map.
 

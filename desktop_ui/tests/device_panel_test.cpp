@@ -7,6 +7,9 @@
 #include <QJsonDocument>
 #include <QLabel>
 #include <QPushButton>
+#include <QTabWidget>
+#include <QLineEdit>
+#include <QDoubleSpinBox>
 #include <QSignalSpy>
 #include <QTemporaryDir>
 #include <QTest>
@@ -78,10 +81,11 @@ private slots:
     QVERIFY(button("gasStart")->isEnabled());
     QTest::mouseClick(button("gasStart"), Qt::LeftButton);
     QTRY_VERIFY(fixture.gasEnabled.load());
-    QTRY_VERIFY(panel.findChild<QLabel *>("gasValue")->text().contains("高报"));
+    QTRY_COMPARE(panel.findChild<QLabel *>("gasAlarm")->text(), QString("高报"));
     panel.hide(); QTest::qWait(200); QVERIFY(fixture.gasEnabled.load()); panel.show();
     QTest::mouseClick(button("gasStop"), Qt::LeftButton); QTRY_VERIFY(!fixture.gasEnabled.load());
-    QTRY_VERIFY(panel.findChild<QLabel *>("gasValue")->text().contains("无新鲜采样"));
+    QTRY_VERIFY(panel.findChild<QLabel *>("gasFreshness")->text().contains("无新鲜采样"));
+    panel.findChild<QTabWidget *>("deviceTabs")->setCurrentIndex(1);
     client.setControlEnabled(true); panel.setControlEnabled(true);
     QTRY_VERIFY(button("ptzPatrolStart")->isEnabled());
     QTest::mouseClick(button("ptzPatrolStart"), Qt::LeftButton);
@@ -108,6 +112,81 @@ private slots:
     client.setControlEnabled(true); panel.setControlEnabled(true);
     QVERIFY(!panel.findChild<QPushButton *>("gasStart")->isEnabled());
     QVERIFY(!panel.findChild<QPushButton *>("ptzPatrolStart")->isEnabled());
+  }
+  void layoutKeepsActionsVisibleAndTelemetryClearsOnStop() {
+    DeviceClient client(config(), true); // Display injection only; no real device commands.
+    DevicePanel panel(&client, false);
+    panel.setControlEnabled(true);
+    QSignalSpy camera(&client, &DeviceClient::cameraRequested);
+    panel.resize(640, 760); panel.show();
+    QVERIFY(QTest::qWaitForWindowExposed(&panel));
+    QJsonObject gas{{"enabled",true},{"connected",true},{"state","sampling"},{"interval",2.0},
+      {"port","/fake/gas"},{"address",1},{"baudrate",2400}};
+    client.status("gas", gas);
+    client.gasSample({{"raw_value",150},{"value_scaled",15.0},{"decimals",1},{"unit","ppm"},
+      {"state_code",2},{"range_raw",1000},{"low_alarm_raw",30},{"high_alarm_raw",60}});
+    QJsonObject ptz{{"state","stopped"},{"active",false},{"moving",false},{"pan_speed",2},{"sweep_seconds",20.0}};
+    client.status("ptz", ptz);
+    QCOMPARE(panel.findChild<QLabel *>("gasValue")->text(), QString("150"));
+    QVERIFY(panel.findChild<QLabel *>("gasEstimate")->text().contains("≈"));
+    QVERIFY(panel.findChild<QLabel *>("deviceGasSummary")->text().contains("150"));
+    auto *tabs=panel.findChild<QTabWidget *>("deviceTabs");
+    QVERIFY(tabs && tabs->count()==2);
+    for(const auto size:{QSize(480,640),QSize(580,680),QSize(640,760),QSize(900,800)}) {
+      panel.resize(size);QTest::qWait(30);
+      QCOMPARE(panel.size(),size);
+      for(int tab=0;tab<2;++tab) {
+        tabs->setCurrentIndex(tab);QTest::qWait(20);
+        QCOMPARE(panel.size(),size);
+        const QStringList names=tab==0 ? QStringList{"gasStart","gasStop"}
+                                       : QStringList{"ptzPatrolStart","ptzPatrolStop"};
+        for(const auto &name:names) {
+          auto *button=panel.findChild<QPushButton *>(name);QVERIFY(button && button->isVisible());
+          QVERIFY(panel.rect().contains(QRect(button->mapTo(&panel,QPoint()),button->size())));
+          QVERIFY(tabs->widget(tab)->rect().contains(QRect(button->mapTo(tabs->widget(tab),QPoint()),button->size())));
+        }
+        QVERIFY(panel.grab().save(QString("/tmp/device_duty_tab%1_%2.png").arg(tab).arg(size.width())));
+      }
+    }
+    panel.resize(640,760);tabs->setCurrentIndex(0);QTest::qWait(30);
+    auto *settings=panel.findChild<QWidget *>("gasSettings");
+    auto *toggle=panel.findChild<QPushButton *>("gasSettingsToggle");
+    QVERIFY(settings && settings->isHidden());
+    toggle->click();QVERIFY(settings->isVisible());
+    QVERIFY(!panel.findChild<QLineEdit *>("gasPort")->isEnabled()); // Running device keeps configuration locked.
+    QTest::qWait(30);QVERIFY(panel.grab().save("/tmp/device_duty_gas_settings.png"));
+    toggle->click();QTest::qWait(30);
+    tabs->setCurrentIndex(1);
+    auto *bounds=panel.findChild<QCheckBox *>("ptzBounds");
+    bounds->setChecked(true);
+    auto *minimum=panel.findChild<QDoubleSpinBox *>("ptzPanMinimum");
+    auto *maximum=panel.findChild<QDoubleSpinBox *>("ptzPanMaximum");
+    minimum->setValue(200);maximum->setValue(100);
+    QVERIFY(!panel.findChild<QPushButton *>("ptzPatrolStart")->isEnabled());
+    QVERIFY(panel.findChild<QLabel *>("ptzReadiness")->text().contains("最小水平角"));
+    minimum->setValue(0);maximum->setValue(180);
+    QVERIFY(panel.findChild<QPushButton *>("ptzPatrolStart")->isEnabled());
+    QTest::qWait(30);QVERIFY(panel.grab().save("/tmp/device_duty_ptz_bounds.png"));
+    client.ptzBlocked(true);ptz["state"]="sweeping";ptz["moving"]=true;ptz["active"]=true;
+    client.status("ptz",ptz);
+    QVERIFY(!panel.findChild<QPushButton *>("ptzPatrolStart")->isEnabled());
+    QVERIFY(panel.findChild<QPushButton *>("ptzPatrolStop")->isEnabled());
+    bounds->setChecked(false);QTest::qWait(30);
+    QVERIFY(panel.grab().save("/tmp/device_duty_active.png"));
+    QCOMPARE(camera.count(),0); // Viewing tabs/settings never starts a camera or sweep.
+    gas["enabled"]=false;gas["connected"]=false;client.status("gas",gas);
+    QCOMPARE(panel.findChild<QLabel *>("gasValue")->text(),QString("—"));
+    QVERIFY(!panel.findChild<QLabel *>("gasEstimate")->text().contains("15.0"));
+    gas["enabled"]=true;gas["connected"]=true;client.status("gas",gas);
+    QCOMPARE(panel.findChild<QLabel *>("gasValue")->text(),QString("—"));
+    client.gasSample({{"raw_value",20},{"unit","%LEL"},{"state_code",0}});
+    QCOMPARE(panel.findChild<QLabel *>("gasValue")->text(),QString("20"));
+    gas["last_error"]="isolated sensor error";client.status("gas",gas);
+    QCOMPARE(panel.findChild<QLabel *>("gasValue")->text(),QString("—"));
+    QVERIFY(panel.findChild<QLabel *>("gasStatus")->text().contains("isolated sensor error"));
+    ptz["last_error"]="isolated camera failure";ptz["state"]="error";client.status("ptz",ptz);
+    QCOMPARE(panel.findChild<QLabel *>("ptzActivity")->text(),QString("设备异常"));
+    QVERIFY(panel.findChild<QLabel *>("ptzPatrolStatus")->text().contains("isolated camera failure"));
   }
   void gasSummaryShowsLiveUnitsAlarmsAndExpiresWithoutNavigation() {
     DeviceClient client(config(), true); // Inject display events without starting hardware.

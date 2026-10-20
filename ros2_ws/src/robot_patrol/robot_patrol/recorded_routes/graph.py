@@ -7,7 +7,8 @@ import heapq
 import json
 import math
 
-from .geometry import angle, distance, pose, length, project, join_edges, validate_blocks
+from .geometry import (DIRECTION_BASELINE, angle, distance, pose, length, project,
+                       join_edges, validate_blocks)
 from ..models import PatrolError
 
 
@@ -48,7 +49,9 @@ def validate_network(doc, radius=0.69):
                 if ds > 0.20:
                     raise PatrolError('INVALID_DATA', '道路采样过稀，请重新处理')
                 along = (b['x']-a['x'])*math.cos(a['yaw']) + (b['y']-a['y'])*math.sin(a['yaw'])
-                if ds > 0.003 and along*block['direction'] < ds*0.6:
+                # A sub-baseline step (for example a 5 cm pose correction at a
+                # gear cusp) cannot establish a contradictory road direction.
+                if ds >= DIRECTION_BASELINE and along*block['direction'] < ds*0.6:
                     raise PatrolError('INVALID_DATA', '道路方向与车体朝向矛盾')
         validate_blocks(blocks, radius)
         chain = [blocks[0]['samples'][0]] + [b['samples'][-1] for b in blocks]

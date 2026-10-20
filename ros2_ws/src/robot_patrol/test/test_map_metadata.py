@@ -3,6 +3,18 @@ import hashlib
 from robot_patrol.map_metadata import expected_occupancy_sha256
 
 
+def test_signed_ros_raster_hash_is_exact_and_does_not_iterate_cells_in_python():
+    from array import array
+    from robot_patrol.map_metadata import occupancy_sha256
+    class RosRaster(array):
+        def __iter__(self):
+            raise AssertionError('large ROS map must use the buffer protocol')
+    values=list(range(-128,128))
+    expected=hashlib.sha256(bytes(v & 255 for v in values)).hexdigest()
+    assert occupancy_sha256(RosRaster('b',values))==expected
+    assert occupancy_sha256(values)==expected
+
+
 # Golden rasters captured from ROS 2 Humble nav2_map_server for this 3x2 PGM.
 # Source raster (top row first): [0, 128, 255, 64, 192, 254].
 # OccupancyGrid data is stored bottom row first.

@@ -31,6 +31,7 @@
 #include <patrol_interfaces/srv/list_points.hpp>
 #include <patrol_interfaces/srv/list_routes.hpp>
 #include <patrol_interfaces/srv/register_map.hpp>
+#include <patrol_interfaces/srv/reset_interlock.hpp>
 #include <patrol_interfaces/srv/save_current_point.hpp>
 #include <patrol_interfaces/srv/set_active_map.hpp>
 #include <patrol_interfaces/srv/set_home_point.hpp>
@@ -148,6 +149,7 @@ struct PatrolClient::Impl {
   rclcpp::Client<patrol_interfaces::srv::GetHomePoint>::SharedPtr getHomePoint;
   rclcpp::Client<patrol_interfaces::srv::SetHomePoint>::SharedPtr setHomePoint;
   rclcpp::Client<patrol_interfaces::srv::ControlRun>::SharedPtr controlRun;
+  rclcpp::Client<patrol_interfaces::srv::ResetInterlock>::SharedPtr resetInterlock;
   rclcpp::Client<patrol_interfaces::srv::RoadCommand>::SharedPtr road;
   QJsonArray networksData;
   rclcpp_action::Client<patrol_interfaces::action::RunRoute>::SharedPtr runRoute;
@@ -187,6 +189,7 @@ struct PatrolClient::Impl {
     getHomePoint = node->create_client<patrol_interfaces::srv::GetHomePoint>("/patrol/get_home_point");
     setHomePoint = node->create_client<patrol_interfaces::srv::SetHomePoint>("/patrol/set_home_point");
     controlRun = node->create_client<patrol_interfaces::srv::ControlRun>("/patrol/control");
+    resetInterlock = node->create_client<patrol_interfaces::srv::ResetInterlock>("/patrol/reset_interlock");
     runRoute = rclcpp_action::create_client<patrol_interfaces::action::RunRoute>(node, "/patrol/run_route");
     returnHome = rclcpp_action::create_client<patrol_interfaces::action::ReturnHome>(node, "/patrol/return_home");
     auto qos = rclcpp::QoS(1).reliable().transient_local();
@@ -253,6 +256,7 @@ struct PatrolClient::Impl {
     else if constexpr (std::is_same_v<Service, patrol_interfaces::srv::GetHomePoint>) client = getHomePoint;
     else if constexpr (std::is_same_v<Service, patrol_interfaces::srv::SetHomePoint>) client = setHomePoint;
     else if constexpr (std::is_same_v<Service, patrol_interfaces::srv::ControlRun>) client = controlRun;
+    else if constexpr (std::is_same_v<Service, patrol_interfaces::srv::ResetInterlock>) client = resetInterlock;
     else if constexpr (std::is_same_v<Service, patrol_interfaces::srv::RoadCommand>) client = road;
     if (!ready(client, QString::fromStdString(name))) return;
     client->async_send_request(request, [this, operation, callback](
@@ -901,6 +905,22 @@ void PatrolClient::controlRun(quint8 command, const QString &runId) {
 #else
   Q_UNUSED(command); Q_UNUSED(runId);
   PATROL_UNAVAILABLE(QStringLiteral("巡航控制"));
+#endif
+}
+
+void PatrolClient::resetInterlock() {
+#ifdef DESKTOP_HAS_PATROL_INTERFACES
+  auto request = std::make_shared<patrol_interfaces::srv::ResetInterlock::Request>();
+  request->request_id = QUuid::createUuid().toString(QUuid::WithoutBraces).toStdString();
+  request->session_id = impl_->ownerSessionId.toStdString();
+  impl_->call<patrol_interfaces::srv::ResetInterlock>(
+      "/patrol/reset_interlock", QStringLiteral("重启巡航联锁"), request,
+      [this](const patrol_interfaces::srv::ResetInterlock::Response &response) {
+        emit operationFinished(QStringLiteral("重启巡航联锁"), response.success,
+                               QString::fromStdString(response.message));
+      });
+#else
+  PATROL_UNAVAILABLE(QStringLiteral("重启巡航联锁"));
 #endif
 }
 

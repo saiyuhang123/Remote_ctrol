@@ -23,6 +23,9 @@ class TransformFusionNode(Node):
         rotation = self.declare_parameter('base_from_body_quaternion', [0., 0., 0., 1.]).value
         self.base_from_body = self._quat_to_mat(*rotation, *translation)
         self.broadcast_lio_frame = self.declare_parameter('broadcast_lio_frame', False).value
+        self.odom_source = self.declare_parameter('odom_source', 'wheel_imu').value
+        if self.odom_source not in ('lio', 'wheel', 'wheel_imu'):
+            raise ValueError('odom_source must be lio, wheel or wheel_imu')
 
         self.lock = threading.Lock()
         self.cur_odom_fastlio = None        # FastLIO /Odometry: odom_FL -> body
@@ -44,7 +47,7 @@ class TransformFusionNode(Node):
         # 주기 타이머
         period = 1.0 / self.FREQ_PUB_LOCALIZATION
         self.create_timer(period, self.timer_callback)
-        self.get_logger().info('Transform Fusion Node Initialized')
+        self.get_logger().info(f'Transform Fusion Node Initialized (odom_source={self.odom_source})')
 
     def cb_save_fastlio_odom(self, msg: Odometry):
         with self.lock:
@@ -133,7 +136,56 @@ class TransformFusionNode(Node):
         T_map_to_body      = self._mat_mul(T_map_to_odom_fl, T_odom_fl_to_body)
         T_map_to_base = self._mat_mul(T_map_to_body, self._inv_mat(self.base_from_body))
 
-        # 与 LIO 的采样时刻对齐，避免转弯时混用历史 LIO 和最新 EKF 位姿。
+        # LIO odometry and /Odometry use the very same world origin and
+        # body->base extrinsic. Their algebra cancels exactly: map->odom is
+        # the ICP transform. Looking up a historical, receipt-stamped TF here
+        # would inject a second, delayed vehicle displacement into map->odom.
+        if self.odom_source == 'lio':
+            T_map_to_odom = T_map_to_odom_fl
+        else:
+            T_map_to_odom = self._wheel_map_to_odom(fastlio_odom, T_map_to_base)
+            if T_map_to_odom is None:
+                return
+
+        trans = T_map_to_odom[:3, 3]
+        quat  = self._mat_to_quat(T_map_to_odom)
+
+        # map -> odom
+        t_msg = TransformStamped()
+        t_msg.header.stamp = self.get_clock().now().to_msg()
+        t_msg.header.frame_id    = 'map'
+        t_msg.child_frame_id     = 'odom'
+        t_msg.transform.translation.x = trans[0]
+        t_msg.transform.translation.y = trans[1]
+        t_msg.transform.translation.z = trans[2]
+        t_msg.transform.rotation.x    = quat[0]
+        t_msg.transform.rotation.y    = quat[1]
+        t_msg.transform.rotation.z    = quat[2]
+        t_msg.transform.rotation.w    = quat[3]
+        self.tf_broadcaster.sendTransform(t_msg)
+        if self.broadcast_lio_frame:
+            lio_tf = TransformStamped()
+            lio_tf.header.stamp = t_msg.header.stamp
+            lio_tf.header.frame_id, lio_tf.child_frame_id = 'map', 'lio_odom'
+            xyz_lio = T_map_to_odom_fl[:3, 3]
+            q_lio = self._mat_to_quat(T_map_to_odom_fl)
+            lio_tf.transform.translation.x, lio_tf.transform.translation.y, lio_tf.transform.translation.z = map(float, xyz_lio)
+            lio_tf.transform.rotation = Quaternion(x=float(q_lio[0]), y=float(q_lio[1]), z=float(q_lio[2]), w=float(q_lio[3]))
+            self.tf_broadcaster.sendTransform(lio_tf)
+
+        xyz = T_map_to_base[:3, 3]
+        quat2 = self._mat_to_quat(T_map_to_base)
+        loc_msg = Odometry()
+        loc_msg.header.stamp = fastlio_odom.header.stamp
+        loc_msg.header.frame_id = 'map'
+        loc_msg.child_frame_id = 'base_link'
+        loc_msg.pose.pose.position = Point(x=xyz[0], y=xyz[1], z=xyz[2])
+        loc_msg.pose.pose.orientation = Quaternion(x=quat2[0], y=quat2[1], z=quat2[2], w=quat2[3])
+        loc_msg.twist = fastlio_odom.twist
+        self.pub_localization.publish(loc_msg)
+
+    def _wheel_map_to_odom(self, fastlio_odom, T_map_to_base):
+        # Wheel/EKF has its own world origin; retain timestamp-aligned fusion.
         T_odom_ekf_to_body = None
         try:
             ekf_tf = self.tf_buffer.lookup_transform(
@@ -160,46 +212,7 @@ class TransformFusionNode(Node):
             # 没有同一时刻的 EKF 位姿时，不把 LIO 的世界系冒充 EKF odom。
             return
 
-        trans = T_map_to_odom[:3, 3]
-        quat  = self._mat_to_quat(T_map_to_odom)
-
-        # tf 브로드캐스트: map -> odom (与 EKF 的 odom 定义一致)
-        t_msg = TransformStamped()
-        t_msg.header.stamp = self.get_clock().now().to_msg()
-        t_msg.header.frame_id    = 'map'
-        t_msg.child_frame_id     = 'odom'
-        t_msg.transform.translation.x = trans[0]
-        t_msg.transform.translation.y = trans[1]
-        t_msg.transform.translation.z = trans[2]
-        t_msg.transform.rotation.x    = quat[0]
-        t_msg.transform.rotation.y    = quat[1]
-        t_msg.transform.rotation.z    = quat[2]
-        t_msg.transform.rotation.w    = quat[3]
-        self.tf_broadcaster.sendTransform(t_msg)
-        if self.broadcast_lio_frame:
-            lio_tf = TransformStamped()
-            lio_tf.header.stamp = t_msg.header.stamp
-            lio_tf.header.frame_id, lio_tf.child_frame_id = 'map', 'lio_odom'
-            xyz_lio = T_map_to_odom_fl[:3, 3]
-            q_lio = self._mat_to_quat(T_map_to_odom_fl)
-            lio_tf.transform.translation.x, lio_tf.transform.translation.y, lio_tf.transform.translation.z = map(float, xyz_lio)
-            lio_tf.transform.rotation = Quaternion(x=float(q_lio[0]), y=float(q_lio[1]), z=float(q_lio[2]), w=float(q_lio[3]))
-            self.tf_broadcaster.sendTransform(lio_tf)
-
-        # fused localization (map -> body)
-        xyz   = T_map_to_base[:3, 3]
-        quat2 = self._mat_to_quat(T_map_to_base)
-
-        loc_msg = Odometry()
-        loc_msg.header.stamp          = fastlio_odom.header.stamp
-        loc_msg.header.frame_id       = 'map'
-        loc_msg.child_frame_id        = 'base_link'
-        loc_msg.pose.pose.position    = Point(x=xyz[0], y=xyz[1], z=xyz[2])
-        loc_msg.pose.pose.orientation = Quaternion(
-            x=quat2[0], y=quat2[1], z=quat2[2], w=quat2[3]
-        )
-        loc_msg.twist = fastlio_odom.twist
-        self.pub_localization.publish(loc_msg)
+        return T_map_to_odom
 
 def main(args=None):
     rclpy.init(args=args)

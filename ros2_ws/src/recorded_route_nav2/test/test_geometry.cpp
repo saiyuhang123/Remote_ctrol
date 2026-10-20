@@ -1,6 +1,27 @@
 #include <gtest/gtest.h>
 #include "recorded_route_nav2/geometry.hpp"
+#include "recorded_route_nav2/entry_curve.hpp"
 using namespace recorded_route_nav2;
+TEST(RecordedEntry, LargeHeadingCorrectionRetainsExactCuspsAndCurvature) {
+  auto start=fromJson({{"x",.11},{"y",-.03},{"yaw",-1.8}}),goal=fromJson({{"x",0.},{"y",0.},{"yaw",0.}});
+  auto path=entryCurve(start,goal,.69);
+  ASSERT_GT(path.poses.size(),20u);
+  EXPECT_NEAR(dist(path.poses.front().pose,start),0.,1e-9);
+  EXPECT_NEAR(dist(path.poses.back().pose,goal),0.,1e-9);
+  int previous=0,changes=0;
+  for(size_t i=1;i<path.poses.size();++i) {
+    const auto &a=path.poses[i-1].pose;const auto &b=path.poses[i].pose;
+    double ds=dist(a,b),yaw=tf2::getYaw(a.orientation),da=wrap(tf2::getYaw(b.orientation)-yaw);
+    ASSERT_GT(ds,1e-7);EXPECT_LE(ds,.025001);
+    EXPECT_LE(std::abs(da)/ds,1/.69+.01);
+    double along=(b.position.x-a.position.x)*std::cos(yaw)+(b.position.y-a.position.y)*std::sin(yaw);
+    int gear=along>=0?1:-1;
+    if(previous && previous!=gear) ++changes;
+    previous=gear;
+  }
+  EXPECT_GE(changes,2);
+  EXPECT_TRUE(entryCurve(start,goal,.69).poses.size()==path.poses.size());
+}
 TEST(RecordedGeometry, FullFootprintCellIntersection) {
   Polygon p{{0.2,0.2},{1.2,0.2},{1.2,0.8},{0.2,0.8}};
   EXPECT_TRUE(polygonCell(p,0,0));

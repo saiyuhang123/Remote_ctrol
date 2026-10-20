@@ -5,4 +5,7 @@
   <class type="recorded_route_nav2::RecordedGoalChecker" base_class_type="nav2_core::GoalChecker">
     <description>Requires ordered path completion before position acceptance.</description>
   </class>
+  <class type="recorded_route_nav2::EntryProgressChecker" base_class_type="nav2_core::ProgressChecker">
+    <description>Ordered low-speed entry progress; delegates other navigation to SimpleProgressChecker.</description>
+  </class>
 </library>

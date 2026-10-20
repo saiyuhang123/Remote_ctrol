@@ -4,6 +4,7 @@
 #include "nav2_core/controller.hpp"
 #include "nav2_core/exceptions.hpp"
 #include "nav2_core/goal_checker.hpp"
+#include "nav2_core/progress_checker.hpp"
 #include "nav2_util/node_utils.hpp"
 #include "pluginlib/class_list_macros.hpp"
 #include "std_msgs/msg/string.hpp"
@@ -86,7 +87,7 @@ public:
     index_=best;first_=false;last_compute_=now;
     nav_msgs::msg::Path window;window.header=plan_.header;
     size_t start=index_>0?index_-1:0;
-    size_t end=index_+1;
+    size_t end=std::min(index_+1,plan_.poses.size()-1);
     while(end+1<plan_.poses.size() && arc_[end]-arc_[index_]<6.0) ++end;
     window.poses.assign(plan_.poses.begin()+start,plan_.poses.begin()+end+1);
     rpp_->setPlan(window);
@@ -141,6 +142,7 @@ public:
                   const std::shared_ptr<nav2_costmap_2d::Costmap2DROS>) override {
     auto node=parent.lock();
     tolerance_=param(node,name+".xy_goal_tolerance",0.20);
+    yaw_tolerance_=param(node,name+".yaw_goal_tolerance",-1.0);
     auto controller=param(node,name+".controller_id",std::string("RecordedRoute"));
     progress_=sharedProgress(std::string(node->get_node_base_interface()->get_fully_qualified_name())+"/"+controller);
   }
@@ -148,17 +150,54 @@ public:
   bool isGoalReached(const Pose &query,const Pose &goal,const geometry_msgs::msg::Twist &) override {
     std::lock_guard<std::mutex> lock(progress_->mutex);
     return std::chrono::duration<double>(Clock::now()-progress_->updated).count()<1.0 &&
-      progress_->remaining<=tolerance_ && dist(query,goal)<=tolerance_;
+      progress_->remaining<=tolerance_ && dist(query,goal)<=tolerance_ &&
+      (yaw_tolerance_<0 || std::abs(wrap(tf2::getYaw(query.orientation)-tf2::getYaw(goal.orientation)))<=yaw_tolerance_);
   }
   bool getTolerances(Pose &p,geometry_msgs::msg::Twist &v) override {
     p.position.x=tolerance_;p.position.y=tolerance_;
     p.position.z=std::numeric_limits<double>::lowest();
     p.orientation.x=p.orientation.y=p.orientation.z=p.orientation.w=std::numeric_limits<double>::lowest();
+    if(yaw_tolerance_>=0) p.orientation=fromJson(Json{{"x",0},{"y",0},{"yaw",yaw_tolerance_}}).orientation;
     v.linear.x=v.linear.y=v.linear.z=v.angular.x=v.angular.y=v.angular.z=std::numeric_limits<double>::lowest();
     return true;
   }
-private: std::shared_ptr<Progress> progress_;double tolerance_=0.2;
+private: std::shared_ptr<Progress> progress_;double tolerance_=0.2,yaw_tolerance_=-1.0;
+};
+
+// Humble has one progress checker for all controllers. Preserve its original
+// detector for ordinary navigation; low-speed entry uses ordered arc progress
+// so a valid short reversing curve is not required to travel 50cm in 20s.
+class EntryProgressChecker : public nav2_core::ProgressChecker {
+public:
+  void initialize(const rclcpp_lifecycle::LifecycleNode::WeakPtr &parent,const std::string &name) override {
+    auto node=parent.lock();
+    auto id=param(node,name+".entry_controller_id",std::string("RecordedEntryRoute"));
+    progress_=sharedProgress(std::string(node->get_node_base_interface()->get_fully_qualified_name())+"/"+id);
+    allowance_=param(node,name+".entry_time_allowance",20.0);
+    loader_=std::make_unique<pluginlib::ClassLoader<nav2_core::ProgressChecker>>("nav2_core","nav2_core::ProgressChecker");
+    ordinary_=loader_->createSharedInstance("nav2_controller::SimpleProgressChecker");
+    ordinary_->initialize(parent,name);reset();
+  }
+  void reset() override {ordinary_->reset();entry_=false;stamp_=0;baseline_=1e9;last_=Clock::now();}
+  bool check(geometry_msgs::msg::PoseStamped &current) override {
+    double remaining;int64_t plan_stamp;Clock::time_point updated;
+    {std::lock_guard<std::mutex> lock(progress_->mutex);
+      remaining=progress_->remaining;plan_stamp=progress_->stamp;updated=progress_->updated;}
+    auto now=Clock::now();
+    if(plan_stamp && std::chrono::duration<double>(now-updated).count()<0.75) {
+      if(!entry_ || plan_stamp!=stamp_) {entry_=true;stamp_=plan_stamp;baseline_=remaining;last_=now;}
+      if(baseline_-remaining>=.05) {baseline_=remaining;last_=now;}
+      return std::chrono::duration<double>(now-last_).count()<allowance_;
+    }
+    if(entry_) {ordinary_->reset();entry_=false;}
+    return ordinary_->check(current);
+  }
+private:
+  std::unique_ptr<pluginlib::ClassLoader<nav2_core::ProgressChecker>> loader_;
+  nav2_core::ProgressChecker::Ptr ordinary_;std::shared_ptr<Progress> progress_;
+  bool entry_=false;int64_t stamp_=0;double baseline_=1e9,allowance_=20.;Clock::time_point last_{};
 };
 } // namespace recorded_route_nav2
 PLUGINLIB_EXPORT_CLASS(recorded_route_nav2::RecordedController,nav2_core::Controller)
 PLUGINLIB_EXPORT_CLASS(recorded_route_nav2::RecordedGoalChecker,nav2_core::GoalChecker)
+PLUGINLIB_EXPORT_CLASS(recorded_route_nav2::EntryProgressChecker,nav2_core::ProgressChecker)

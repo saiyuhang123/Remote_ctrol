@@ -15,19 +15,29 @@ from rclpy.qos import QoSProfile, DurabilityPolicy, ReliabilityPolicy
 from patrol_interfaces.srv import RoadCommand
 from patrol_interfaces.msg import OperatorHeartbeat
 
-from ..models import PatrolError, new_id
+from ..models import PatrolError, new_id, validate_name
 from .geometry import pose, distance, angle, length
 from .graph import NetworkPlanner, validate_network, digest
 from .recorder import Recorder
+from .inspection_path import path_edges, path_nodes, prepare_path, is_path_route, plan_path, choose_entry
+from .entry import EntryPlanner
 
 
 class RoadComponent:
     def __init__(self, node):
         self.node, self.store = node, node._store
         self.lock = threading.RLock()
+        self.planning_lock = threading.Lock()
         self.recorder = None
         self.draft_id = ''
         self.owner = ''
+        self.anchor = None
+        self.path_mode = False
+        self.stationary = False
+        self.stop_since = 0.0
+        self.stop_pose = None
+        self.stop_map = None
+        self.moving_ticks = 0
         self.network_id = ''
         self.plans = {}
         self.tickets = {}
@@ -96,8 +106,93 @@ class RoadComponent:
         if document.get('vehicle') != self.vehicle_stamp():
             raise PatrolError('STALE_DATA','底盘转弯半径或车身尺寸已变化，请重新校验发布路网并更新任务版本')
 
+    @staticmethod
+    def anchored_pose(anchor, x, y, yaw):
+        c, s = math.cos(anchor['yaw']), math.sin(anchor['yaw'])
+        return {'x': anchor['x'] + c*x - s*y,
+                'y': anchor['y'] + s*x + c*y,
+                'yaw': angle(anchor['yaw'] + yaw)}
+
+    def _anchor_pose(self):
+        """Continuous pose used inside a segment.
+
+        Prefer LIO base odometry even in wheel_imu mode: /odom there is the
+        EKF output and its scale/steering error accumulated 25 cm over a 7.5
+        m segment, while the ICP correction refers to the LIO pose. Fall back
+        to odom->base_link only when /odom_lio is unavailable or stale.
+        """
+        latest = getattr(self.node, 'latest_lio_odom', None)
+        if latest is not None:
+            message, received = latest()
+            if message is not None and time.monotonic()-received <= 1.5:
+                p, q = message.pose.pose.position, message.pose.pose.orientation
+                yaw = math.atan2(2*(q.w*q.z+q.x*q.y), 1-2*(q.y*q.y+q.z*q.z))
+                stamp = message.header.stamp
+                return p.x, p.y, angle(yaw), int(stamp.sec)*1_000_000_000+int(stamp.nanosec)
+        return self.node._current_odom_pose()
+
+    def _capture_anchor(self, target):
+        """Freeze the continuous frame at a segment start.
+
+        ICP corrects map->odom about once per second. Recomposing every pose
+        with the live transform turns a 0.7 deg yaw correction at 8 m into a
+        10 cm step inside the recorded road. Anchoring the segment to its
+        start node keeps the shape continuous; the next segment re-anchors to
+        the saved end node, so the network still joins exactly.
+        """
+        if not hasattr(self.node, '_current_odom_pose') and \
+                not hasattr(self.node, 'latest_lio_odom'):
+            # Minimal test doubles (and any legacy node) keep map poses.
+            self.anchor = None
+            return None
+        ox, oy, oyaw, _ = self._anchor_pose()
+        yaw = angle(target['yaw'] - oyaw)
+        c, s = math.cos(yaw), math.sin(yaw)
+        self.anchor = {'x': target['x'] - (c*ox - s*oy),
+                       'y': target['y'] - (s*ox + c*oy),
+                       'yaw': yaw}
+        return self.anchor
+
+    def _close_anchor_gap(self, r):
+        """Pull a segment endpoint back to the live map with a smooth ramp.
+
+        The segment shape follows continuous odometry; the ICP map correction
+        is deliberately not applied as an in-segment step. At the split the
+        live map pose and the anchored end can therefore differ by the drift
+        accumulated since the segment start. Distribute that difference over
+        the segment (smoothstep, so both ends keep their curvature) instead
+        of leaving a map offset or reintroducing a kink. A difference too
+        large to be drift must be re-localized, not silently bent.
+        """
+        if self.anchor is None or not r.samples or len(r.samples) < 2:
+            return
+        try:
+            mx, my, myaw, _ = self.node._current_pose()
+        except PatrolError:
+            return
+        end = r.samples[-1]
+        dx, dy = mx-end['x'], my-end['y']
+        dyaw = angle(myaw-end['yaw'])
+        gap = math.hypot(dx, dy)
+        if gap > 0.15 or abs(dyaw) > 0.08:
+            raise PatrolError(
+                'INVALID_DATA',
+                f'分段末端定位偏差 {gap*100:.0f}cm/{abs(math.degrees(dyaw)):.1f}°，请重新定位后再分段')
+        n = len(r.samples)
+        for i, p in enumerate(r.samples):
+            f = i/(n-1)
+            f = f*f*(3-2*f)
+            p['x'] += f*dx
+            p['y'] += f*dy
+            p['yaw'] = angle(p['yaw'] + f*dyaw)
+
     def current(self):
-        x, y, yaw, stamp = self.node._current_pose()
+        if self.anchor is None:
+            x, y, yaw, stamp = self.node._current_pose()
+        else:
+            ox, oy, oyaw, stamp = self._anchor_pose()
+            value = self.anchored_pose(self.anchor, ox, oy, oyaw)
+            x, y, yaw = value['x'], value['y'], value['yaw']
         odom, received = self.node.latest_odom()
         if odom is None or time.monotonic()-received > 1.5:
             raise PatrolError('STALE_DATA', '没有新鲜的里程计反馈')
@@ -117,6 +212,13 @@ class RoadComponent:
             payload = json.loads(request.payload_json or '{}')
             if not isinstance(payload, dict):
                 raise PatrolError('INVALID_DATA', '请求必须为对象')
+            # Planning can take several seconds. Keep heartbeat, recording
+            # status and stop/ticket services independent of that computation.
+            if request.operation.upper() == 'PLAN':
+                data = self.dispatch('PLAN', payload)
+                response.success, response.message = True, 'ok'
+                response.data_json = json.dumps(data, ensure_ascii=False, allow_nan=False)
+                return response
             with self.lock:
                 op = request.operation.upper()
                 key = (op, str(payload.get('owner_session_id','')), str(payload.get('command_id','')))
@@ -172,6 +274,33 @@ class RoadComponent:
             return self.preview(p['route_id'], int(p.get('loop_count', 1)))
         self._idle()
         mapping = self._map()
+        if op == 'START_PATH':
+            if self.recorder:
+                raise PatrolError('BUSY', '请先结束当前录制')
+            self.node._require_execution_safety()
+            owner = str(p.get('owner_session_id', '')).strip()
+            seen, authorized = self.operator_seen.get(owner, (0, False))
+            if not owner or not authorized or time.monotonic()-seen > 3:
+                raise PatrolError('LEASE_LOST', '请启用操作，并确认操作端心跳正常')
+            name = validate_name(p.get('name', ''), '巡检路径名称')
+            current = self.current()
+            doc = dict(schema_version=1, nodes={}, edges={}, bindings={}, allowed_polygon=[],
+                       map_stamp=self.map_stamp(mapping), vehicle=self.vehicle_stamp(),
+                       inspection_path=dict(edge_ids=[], point_ids={}, route_id=new_id('route'), closed=False))
+            net = self.store.save_network(mapping.map_id, name, doc)
+            self._capture_anchor(current)
+            self.recorder = Recorder(mapping.map_id, mapping.revision, name=name)
+            # The first sample must use the same continuous time base as the
+            # rest of the segment; the pre-anchor map pose has a different TF
+            # stamp and could make the second sample's dt negative.
+            self.recorder.add(self.current())
+            self.owner, self.network_id, self.draft_id = owner, net['network_id'], new_id('draft')
+            self.path_mode = True
+            self._reset_stop()
+            self._save_draft()
+            return self.dispatch('STATUS', {})
+        if op in ('MARK_PATH_POINT', 'SAVE_PATH'):
+            return self._save_path(p, complete=op == 'SAVE_PATH')
         if op == 'CREATE':
             doc = {'schema_version': 1, 'nodes': {}, 'edges': {}, 'bindings': {},
                    'map_stamp': self.map_stamp(mapping), 'allowed_polygon': [],'vehicle':self.vehicle_stamp()}
@@ -187,18 +316,22 @@ class RoadComponent:
             net = self._network(p['network_id'])
             current = self.current()
             start_node = str(p.get('start_node', ''))
+            target = net['document']['nodes'][start_node] if start_node else current
             if start_node:
-                self._aligned(current, net['document']['nodes'][start_node])
+                self._aligned(current, target)
             self.owner = str(p.get('owner_session_id', '')).strip()
             if not self.owner:
                 raise PatrolError('INVALID_DATA', '录制操作端会话不能为空')
+            self._capture_anchor(target)
             self.recorder = Recorder(mapping.map_id, mapping.revision, start_node,
                                      name=str(p.get('name', '道路')))
-            self.recorder.add(current)
+            self.recorder.add(self.current())
             self.network_id, self.draft_id = net['network_id'], new_id('draft')
+            self.path_mode = False
+            self._reset_stop()
             self._save_draft()
             return self.dispatch('STATUS', {})
-        if op == 'RECOVER_DRAFT':
+        if op in ('RECOVER_DRAFT', 'RECOVER_PATH'):
             if self.recorder:
                 seen,enabled=self.operator_seen.get(self.owner,(0,False))
                 if p.get('draft_id') != self.draft_id or self.recorder.state == 'RECORDING' or \
@@ -213,13 +346,24 @@ class RoadComponent:
             r.samples = old['samples']
             if old.get('state')=='INVALID':
                 r.state, r.error = 'INVALID', old['error']
+            elif op == 'RECOVER_PATH':
+                r.state = 'PAUSED'
+                r.pause_pose = old.get('pause_pose') or pose(r.samples[-1])
             else:
                 r.finish(self.radius)
             self.recorder, self.network_id, self.draft_id = r, old['network_id'], draft['draft_id']
             self.owner = str(p.get('owner_session_id', ''))
             if not self.owner:
                 self.recorder = None
+                self.anchor = None
                 raise PatrolError('INVALID_DATA', '恢复操作端会话不能为空')
+            # Anchor to the live map pose, not to the draft endpoint: the
+            # subsequent resume check must still detect a robot that was moved
+            # while the backend was restarting.
+            self.anchor = None
+            self._capture_anchor(self.current())
+            self.path_mode = op == 'RECOVER_PATH'
+            self._reset_stop()
             self._save_draft()
             result = self.dispatch('STATUS', {})
             if r.state == 'REVIEW':
@@ -230,16 +374,25 @@ class RoadComponent:
             if not r or self.owner != str(p.get('owner_session_id', '')):
                 raise PatrolError('NOT_OWNER', '没有本会话的活动录制')
             if op == 'PAUSE_RECORD':
+                self._reset_stop()
                 r.pause(self.current())
             elif op == 'RESUME_RECORD':
+                self._reset_stop()
                 r.resume(self.current())
             elif op == 'DISCARD_RECORD':
                 r.state = 'DISCARDED'
                 self._save_draft()
                 self.recorder = None
+                self.anchor = None
+                self.path_mode = False
+                self._reset_stop()
             elif op == 'FINISH_RECORD':
                 r.add(self.current())
+                self._close_anchor_gap(r)
                 blocks = r.finish(self.radius)
+                self.anchor = None
+                self.path_mode = False
+                self._reset_stop()
                 self._save_draft()
                 self._publish_paths([(r.name,b['samples'],b['direction']) for b in blocks],self.plan_markers)
                 return dict(self.dispatch('STATUS', {}), review_blocks=blocks)
@@ -247,11 +400,19 @@ class RoadComponent:
                 result = self._save_record(p)
                 if op == 'MARK_NODE':
                     end = result['edge']['to']
+                    target = self._network(self.network_id)['document']['nodes'][end]
+                    self._capture_anchor(target)
                     self.recorder = Recorder(mapping.map_id, mapping.revision, end,
                                              name=str(p.get('next_name', '后续道路')))
                     self.recorder.add(self.current())
                     self.draft_id = new_id('draft')
+                    self.path_mode = False
+                    self._reset_stop()
                     self._save_draft()
+                else:
+                    self.anchor = None
+                    self.path_mode = False
+                    self._reset_stop()
                 return result
             self._save_draft()
             return self.dispatch('STATUS', {})
@@ -334,10 +495,114 @@ class RoadComponent:
         if distance(current, target) > 0.04 or abs(angle(current['yaw']-target['yaw'])) > 0.12:
             raise PatrolError('OFF_ROAD', '道路端点与节点不一致（需位置 4cm、朝向约 7° 内），请补录连接')
 
+    def _save_path(self, p, complete):
+        r = self.recorder
+        if r and self.owner != str(p.get('owner_session_id', '')):
+            raise PatrolError('NOT_OWNER', '没有本会话的活动录制')
+        if not complete and (not r or r.state != 'RECORDING'):
+            raise PatrolError('INVALID_STATE', '请先开始或继续录制，再记录点位')
+        net = self._network(p.get('network_id', self.network_id))
+        if r and net['network_id'] != self.network_id:
+            raise PatrolError('MAP_MISMATCH', '当前草稿属于另一条巡检路径')
+        if int(p.get('expected_revision', -1)) != net['revision']:
+            raise PatrolError('STALE_DATA', '路径版本已变化，请刷新后重试')
+        doc = copy.deepcopy(net['document'])
+        original_edges = path_edges(doc)
+        if 'inspection_path' not in doc:
+            doc['inspection_path'] = dict(edge_ids=[e['id'] for e in original_edges], point_ids={},
+                                          route_id=new_id('route'), closed=False)
+        current = None
+        if r:
+            if r.state not in ('RECORDING', 'PAUSED', 'REVIEW'):
+                raise PatrolError('INVALID_STATE', r.error or '当前录制无效，请检查定位后补录')
+            if r.state == 'RECORDING':
+                current = self.current()
+                r.add(current)
+                if r.samples and current['t'] > r.samples[-1]['t']:
+                    r.samples.append(current)
+                self._close_anchor_gap(r)
+            stayed = bool(r.samples and all(distance(r.samples[0], q) < .04 and
+                                           abs(angle(r.samples[0]['yaw']-q['yaw'])) < .10 for q in r.samples))
+            if not complete and stayed:
+                return dict(network=net, point_count=len(doc['inspection_path']['point_ids']),
+                            unchanged=True, state='RECORDING')
+            # A split saves the preceding edge immediately. Finishing while
+            # still at that node closes the session, without saving noise.
+            empty_tail = bool(complete and original_edges and r.samples and
+                              r.start_node == original_edges[-1]['to'] and
+                              stayed)
+            if stayed and not original_edges:
+                raise PatrolError('INVALID_DATA', '尚未录到有效道路，请先驾驶一段距离再保存')
+            if not empty_tail:
+                blocks = r.finish(self.radius)
+                start = r.start_node
+                if original_edges and start != original_edges[-1]['to']:
+                    raise PatrolError('INVALID_DATA', '新分段没有接在路径末端，请从末端继续录制')
+                if not start:
+                    start = new_id('port')
+                    doc['nodes'][start] = dict(pose(blocks[0]['samples'][0]), id=start, name='起点')
+                self._aligned(blocks[0]['samples'][0], doc['nodes'][start])
+                end = new_id('port')
+                first = original_edges[0]['from'] if original_edges else start
+                end_pose = blocks[-1]['samples'][-1]
+                if (distance(end_pose, doc['nodes'][first]) <= .04 and
+                        abs(angle(end_pose['yaw']-doc['nodes'][first]['yaw'])) <= .12):
+                    end = first
+                else:
+                    doc['nodes'][end] = dict(pose(end_pose), id=end, name='终点')
+                key = new_id('road')
+                doc['edges'][key] = dict(id=key, name=f'{net["name"][:90]} · 段{len(original_edges)+1}',
+                                        **{'from': start, 'to': end}, blocks=blocks,
+                                        raw_samples=copy.deepcopy(r.samples), speed=.20, enabled=True)
+                doc['inspection_path']['edge_ids'].append(key)
+        if not path_edges(doc):
+            raise PatrolError('INVALID_DATA', '尚未录到有效道路，请先驾驶一段距离')
+        created = prepare_path(doc, net['name'], make_reverse=complete)
+        if complete:
+            # Same publication checks as advanced road management; only the
+            # manual binding/publish steps disappear from the user workflow.
+            old, new = dict(doc['map_stamp']), self.map_stamp(self.node._active_map())
+            for key in ('image_sha256', 'navigation_yaml_sha256'):
+                old.pop(key, None)
+                new.pop(key, None)
+            if old != new:
+                raise PatrolError('MAP_MISMATCH', '录制地图的坐标基准已变化，请重新录制')
+            doc['map_stamp'] = self.map_stamp(self.node._active_map())
+            doc['vehicle'] = self.vehicle_stamp()
+            validate_network(doc, self.radius)
+            self._check_map_collision(doc)
+        draft = None
+        if r:
+            payload = dict(vars(r), state='SAVED', network_id=net['network_id'])
+            draft = dict(draft_id=self.draft_id, payload=payload)
+        saved = self.store.save_path_bundle(net, doc, created, publish=complete, draft=draft)
+        if r:
+            r.state = 'SAVED'
+        self.network_id = saved['network_id']
+        self.recorder = None
+        if not complete:
+            end = path_nodes(doc)[-1]
+            self._capture_anchor(doc['nodes'][end])
+            self.recorder = Recorder(r.map_id, r.map_revision, start_node=end, name=r.name)
+            self.recorder.add(self.current())
+            self.draft_id = new_id('draft')
+            self.path_mode = True
+            self._reset_stop()
+            self._save_draft()
+        else:
+            self.anchor = None
+            self.path_mode = False
+            self._reset_stop()
+        self.publish_preview(doc)
+        return dict(network=saved, route_id=doc['inspection_path']['route_id'] if complete else '',
+                    point_count=len(doc['inspection_path']['point_ids']),
+                    closed=doc['inspection_path']['closed'], state='IDLE' if complete else 'RECORDING')
+
     def _save_record(self, p):
         r = self.recorder
         if r.state == 'RECORDING':
             r.add(self.current())
+            self._close_anchor_gap(r)
         blocks = r.finish(self.radius)
         net = self._network(self.network_id)
         if int(p.get('expected_revision', -1)) != net['revision']:
@@ -420,31 +685,77 @@ class RoadComponent:
                             raise PatrolError('ROAD_COLLISION', f"道路 {edge['name']} 的车身扫掠与障碍/未知区域相交")
 
     def preview(self, route_id, loops):
+        planning_lock = getattr(self, 'planning_lock', None)
+        if planning_lock and not planning_lock.acquire(blocking=False):
+            raise PatrolError('BUSY', '正在规划自动接入，请稍候再试')
+        try:
+            return self._preview(route_id, loops)
+        finally:
+            if planning_lock:
+                planning_lock.release()
+
+    def _path_entry(self, document, current):
+        planner = None
+        def compute(start, target):
+            nonlocal planner
+            if planner is None:
+                planner = EntryPlanner(self.node)
+            return planner.compute(start, target)
+        def collision(blocks):
+            self._check_map_collision(dict(allowed_polygon=document.get('allowed_polygon', []),
+                edges={'entry':dict(name='自动接入', blocks=blocks)}))
+        try:
+            return choose_entry(document, current, compute, collision)
+        finally:
+            if planner:
+                planner.close()
+
+    def _preview(self, route_id, loops):
         if not 0 <= loops <= 100000:
             raise PatrolError('INVALID_DATA', '循环次数无效')
-        if self.recorder:
-            raise PatrolError('BUSY', '请先保存或放弃录制草稿')
-        mapping = self._map()
-        route = self.store.get_route(route_id)
-        if route.navigation_mode != 'RECORDED_NETWORK' or route.map_id != mapping.map_id:
-            raise PatrolError('UNSUPPORTED_MODE', '请选择当前地图的固定路线')
-        net = self._network(route.network_id)
-        if not net['published'] or net['revision'] != route.network_revision:
-            raise PatrolError('STALE_DATA', '路网未发布或已修改，请更新并保存巡检路线')
-        self._check_bindings(net['document'])
-        self._require_vehicle(net['document'])
-        validate_network(net['document'],self.radius)
-        plan = NetworkPlanner(net['document']).plan(route.steps, self.current(), loops)
+        with self.lock:
+            self._idle()
+            if self.recorder:
+                raise PatrolError('BUSY', '请先保存或放弃录制草稿')
+            mapping = self._map()
+            route = self.store.get_route(route_id)
+            if route.navigation_mode != 'RECORDED_NETWORK' or route.map_id != mapping.map_id:
+                raise PatrolError('UNSUPPORTED_MODE', '请选择当前地图的固定路线')
+            net = self._network(route.network_id)
+            if not net['published'] or net['revision'] != route.network_revision:
+                raise PatrolError('STALE_DATA', '路网未发布或已修改，请更新并保存巡检路线')
+            self._check_bindings(net['document'])
+            self._require_vehicle(net['document'])
+            validate_network(net['document'],self.radius)
+            current = self.current()
+        if is_path_route(net['document'], route):
+            entry = self._path_entry(net['document'], current)
+            plan = plan_path(net['document'], route.steps, current, loops, entry=entry)
+        else:
+            plan = NetworkPlanner(net['document']).plan(route.steps, current, loops)
         plan.update(route_id=route_id, route_revision=route.revision,
                     network_id=net['network_id'], network_revision=net['revision'],
                     map_id=mapping.map_id, map_revision=mapping.revision,
                     map_stamp=self.map_stamp(mapping))
         plan.pop('digest', None)
         plan['digest'] = digest(plan)
-        self.plans[plan['digest']] = copy.deepcopy(plan)
-        while len(self.plans) > 20:
-            self.plans.pop(next(iter(self.plans)))
-        self.publish_plan(plan)
+        with self.lock:
+            self._idle()
+            latest = self._map()
+            network = self._network(route.network_id)
+            if (not self.enabled or self.recorder or latest.map_id != mapping.map_id or
+                    latest.revision != mapping.revision or self.map_stamp(latest) != self.map_stamp(mapping) or
+                    network['revision'] != net['revision'] or not network['published'] or
+                    self.store.get_route(route_id).revision != route.revision):
+                raise PatrolError('STALE_DATA', '规划期间地图、道路或任务已变化，请重新开始')
+            self._require_vehicle(network['document'])
+            now = self.current()
+            if distance(now, current) > .10 or abs(angle(now['yaw']-current['yaw'])) > .20:
+                raise PatrolError('OFF_ROAD', '规划期间车辆位姿已变化，请停车后重新开始')
+            self.plans[plan['digest']] = copy.deepcopy(plan)
+            while len(self.plans) > 20:
+                self.plans.pop(next(iter(self.plans)))
+            self.publish_plan(plan)
         return plan
 
     def take_plan(self, route, requested_digest, loops):
@@ -532,6 +843,75 @@ class RoadComponent:
         except (ValueError, TypeError):
             return
 
+    def _reset_stop(self):
+        self.stationary = False
+        self.stop_since = 0.0
+        self.stop_pose = None
+        self.stop_map = None
+        self.moving_ticks = 0
+
+    def _safe_map_pose(self):
+        try:
+            x, y, yaw, _ = self.node._current_pose()
+            return dict(x=x, y=y, yaw=yaw)
+        except PatrolError:
+            return None
+
+    def _freeze_at_stop(self, recorder, current):
+        """Hold the pose reached when the wheels stop.
+
+        The pose estimate keeps drifting while the robot is stationary; adding
+        those samples would turn a stop into a sideways road segment. Record
+        the stop pose once, then keep the sample clock alive with identical
+        held samples so the next moving sample does not look like a 10 s
+        sampling gap.
+        """
+        if not self.stationary:
+            self.stationary = True
+            self.stop_since = time.monotonic()
+            self.stop_pose = dict(current)
+            self.stop_map = self._safe_map_pose()
+            recorder.add(current)
+            return
+        latest_map = self._safe_map_pose()
+        if latest_map is not None and abs(current['v']) < 0.05:
+            self.stop_map = latest_map
+        if current['t'] - recorder.samples[-1]['t'] >= 0.5:
+            recorder.add(dict(self.stop_pose, t=current['t'], v=0.0))
+
+    def _stop_split_needed(self, recorder, current):
+        if not self.path_mode or not self.stationary:
+            return False
+        if time.monotonic()-self.stop_since < 0.8:
+            return False
+        if length(recorder.samples) < 0.5:
+            return False
+        end = recorder.samples[-1]
+        # Compare the departure pose with the held stop pose, not the map
+        # pose: while parked, ICP keeps the map pose at the stop while LIO
+        # drifts away by up to 12 cm. That drift is what would become a
+        # sideways step when motion resumes.
+        gap = distance(end, current)
+        heading = abs(angle(current['yaw']-end['yaw']))
+        return gap > 0.05 or heading > 0.02
+
+    def _auto_stop_split(self):
+        recorder = self.recorder
+        if not recorder or recorder.state != 'RECORDING' or not self.path_mode:
+            return False
+        try:
+            network = self._network(self.network_id)
+            self._save_path(dict(owner_session_id=self.owner,
+                                 network_id=self.network_id,
+                                 expected_revision=network['revision']), complete=False)
+            self.node.get_logger().info('自动分段：停车漂移已转为节点')
+            return True
+        except PatrolError as error:
+            self.node.get_logger().warn(f'自动分段失败，保留当前录制：{error.message}')
+            return False
+        finally:
+            self._reset_stop()
+
     def tick(self):
         with self.lock:
             r = self.recorder
@@ -542,11 +922,30 @@ class RoadComponent:
                     current=self.current()
                     seen,enabled=self.operator_seen.get(self.owner,(0,False))
                     if not enabled or time.monotonic()-seen>3:
+                        self._reset_stop()
                         r.pause(current)
                         r.error='操作端离线或操作已禁用，录制已暂停；可恢复草稿预览后保存'
                         self._save_draft()
+                    elif abs(current['v']) < 0.05:
+                        self.moving_ticks = 0
+                        self._freeze_at_stop(r, current)
                     else:
-                        r.add(current)
+                        if self.stationary and self.moving_ticks < 2:
+                            # Ignore a one- or two-tick wheel/IMU sign blip at
+                            # the end of braking; it is still the same stop.
+                            self.moving_ticks += 1
+                            self._freeze_at_stop(r, current)
+                        else:
+                            split = self._stop_split_needed(r, current) if self.stationary else False
+                            if split:
+                                self._auto_stop_split()
+                            else:
+                                self._reset_stop()
+                            # A successful auto split has replaced self.recorder;
+                            # the old recorder is SAVED and must not receive this
+                            # moving sample.
+                            if r.state == 'RECORDING':
+                                r.add(current)
                 except PatrolError as error:
                     r.state, r.error = 'INVALID', error.message
                 if time.monotonic()-self.last_draft_save > 1:

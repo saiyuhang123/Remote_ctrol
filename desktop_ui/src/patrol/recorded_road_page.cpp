@@ -68,7 +68,7 @@ RecordedRoadPage::RecordedRoadPage(PatrolClient *client,QWidget *parent):QWidget
   root->setContentsMargins(0, 10, 0, 0);
   root->setSpacing(10);
   auto *statusRow = new QHBoxLayout;
-  statusRow->addWidget(patrolui::heading("录制与维护道路", this));
+  statusRow->addWidget(patrolui::heading("录制巡检路径", this));
   statusRow->addStretch();
   statusLabel_ = new QLabel("等待道路服务", this);
   statusLabel_->setObjectName("roadRecordingStatus");
@@ -90,7 +90,11 @@ RecordedRoadPage::RecordedRoadPage(PatrolClient *client,QWidget *parent):QWidget
     auto *b = new QPushButton(text, controls); b->setObjectName(name); b->setAutoDefault(false); return b;
   };
   auto *netHeading = new QHBoxLayout;
-  netHeading->addWidget(patrolui::heading("当前路网", controls));
+  netHeading->addWidget(patrolui::heading("已录路径", controls));
+  advanced_ = new QCheckBox("高级设置", controls);
+  advanced_->setObjectName("roadAdvancedSettings");
+  advanced_->setToolTip("显示手动连接、点位绑定和路网管理，日常录制无需设置。");
+  netHeading->addWidget(advanced_);
   netHeading->addStretch();
   auto *reload = button("刷新", "roadRefresh");
   netHeading->addWidget(reload);
@@ -100,7 +104,7 @@ RecordedRoadPage::RecordedRoadPage(PatrolClient *client,QWidget *parent):QWidget
   networks_->setSizeAdjustPolicy(QComboBox::AdjustToMinimumContentsLengthWithIcon);
   networks_->setMinimumContentsLength(12);
   left->addWidget(networks_);
-  networkSummary_ = patrolui::hint("还没有路网，请在“路网管理”中新建或导入。", controls);
+  networkSummary_ = patrolui::hint("填写路径名，直接开始录制。", controls);
   networkSummary_->setObjectName("roadNetworkSummary");
   left->addWidget(networkSummary_);
 
@@ -125,7 +129,7 @@ RecordedRoadPage::RecordedRoadPage(PatrolClient *client,QWidget *parent):QWidget
   auto *recordLayout = new QVBoxLayout(recordTab);
   recordLayout->setContentsMargins(0, 8, 0, 0);
   recordLayout->setSpacing(8);
-  controlTabs->addTab(recordTab, "录制道路");
+  controlTabs->addTab(recordTab, "录制路径");
   auto *recordScroll = new QScrollArea(recordTab);
   recordScroll->setObjectName("roadRecordingFormScroll");
   recordScroll->setWidgetResizable(true);
@@ -140,9 +144,9 @@ RecordedRoadPage::RecordedRoadPage(PatrolClient *client,QWidget *parent):QWidget
   recordLayout->addWidget(recordScroll, 1);
   auto *rf = new QFormLayout;
   rf->setSpacing(8);
-  roadName_ = new QLineEdit("道路", controls);
+  roadName_ = new QLineEdit("巡检路径", controls);
   roadName_->setObjectName("roadName");
-  rf->addRow("道路名称", roadName_);
+  rf->addRow("路径名称", roadName_);
   startNode_ = new QComboBox(controls);
   endNode_ = new QComboBox(controls);
   startNode_->setObjectName("roadStartNode");
@@ -159,17 +163,21 @@ RecordedRoadPage::RecordedRoadPage(PatrolClient *client,QWidget *parent):QWidget
   resume_ = button("继续录制", "roadResume");
   finish_ = button("结束预览", "roadFinish");
   save_ = button("保存道路", "roadSave"); save_->setProperty("primary", true);
+  savePath_ = button("结束并保存路径", "roadSavePath"); savePath_->setProperty("primary", true);
+  usePath_ = button("使用此路径", "roadUsePath");
   discard_ = button("放弃草稿", "roadDiscard"); discard_->setProperty("patrolDanger", true);
-  auto *splitRoad = button("此处分段，继续录制", "roadMarkNode");
+  auto *splitRoad = button("记录点位（分段）", "roadMarkNode");
   auto *grid = new QGridLayout;
   grid->setSpacing(8);
   grid->addWidget(begin_, 0, 0); grid->addWidget(pause_, 0, 1); grid->addWidget(resume_, 0, 2);
   grid->addWidget(finish_, 1, 0); grid->addWidget(save_, 1, 1); grid->addWidget(discard_, 1, 2);
   grid->addWidget(splitRoad, 2, 0, 1, 3);
+  grid->addWidget(savePath_, 2, 0, 1, 2);
+  grid->addWidget(usePath_, 2, 2);
   for(auto *control : {begin_, pause_, resume_, finish_, save_, discard_})
     control->setStyleSheet("padding-left:4px; padding-right:4px;");
   recordLayout->addLayout(grid);
-  recordFieldsLayout->addWidget(patrolui::hint("手动驾驶录制 → 结束预览 → 保存道路。路口转弯和反向通行需分别补录。", controls));
+  recordFieldsLayout->addWidget(patrolui::hint("开始录制 → 手动驾驶 → 沿途记录点位 → 结束并保存路径。\n每次分段自动建点，保存后直接用于巡检。\n非闭环：1趟到另一端，2趟往返；返程沿原轨迹倒车。闭环按圈行驶。", controls));
   auto *draftBox = new QGroupBox("恢复上次草稿", controls);
   auto *draftLayout = new QVBoxLayout(draftBox);
   draftsCombo_ = new QComboBox(draftBox);
@@ -267,7 +275,7 @@ RecordedRoadPage::RecordedRoadPage(PatrolClient *client,QWidget *parent):QWidget
   auto *emptyLayout = new QVBoxLayout(view_->viewport());
   emptyLayout->setContentsMargins(30, 20, 30, 20);
   emptyLayout->addStretch();
-  emptyPreview_ = patrolui::hint("当前路网还没有道路\n先新建路网，再手动驾驶录制第一条道路。", view_->viewport());
+  emptyPreview_ = patrolui::hint("填写路径名并开始录制\n手动驾驶时会在这里显示实际轨迹。", view_->viewport());
   emptyPreview_->setObjectName("roadPreviewEmpty");
   emptyPreview_->setAlignment(Qt::AlignCenter);
   emptyPreview_->setAttribute(Qt::WA_TransparentForMouseEvents);
@@ -296,14 +304,21 @@ RecordedRoadPage::RecordedRoadPage(PatrolClient *client,QWidget *parent):QWidget
 
   connect(reload,&QPushButton::clicked,this,&RecordedRoadPage::refresh);
   connect(create,&QPushButton::clicked,this,[this]{if(!networkName_->text().trimmed().isEmpty()) command("CREATE",{{"name",networkName_->text().trimmed()}});});
-  connect(begin_,&QPushButton::clicked,this,[this]{command("START_RECORD",{{"name",roadName_->text().trimmed()}, {"start_node",startNode_->currentData().toString()}});});
+  connect(begin_,&QPushButton::clicked,this,[this]{
+    command(advanced_->isChecked()?"START_RECORD":"START_PATH",{{"name",roadName_->text().trimmed()}, {"start_node",startNode_->currentData().toString()}});
+  });
   connect(pause_,&QPushButton::clicked,this,[this]{command("PAUSE_RECORD");});
   connect(resume_,&QPushButton::clicked,this,[this]{command("RESUME_RECORD");});
   connect(finish_,&QPushButton::clicked,this,[this]{command("FINISH_RECORD");});
-  connect(splitRoad,&QPushButton::clicked,this,[this]{command("MARK_NODE",{{"end_node",endNode_->currentData().toString()}});});
+  connect(splitRoad,&QPushButton::clicked,this,[this]{command(advanced_->isChecked()?"MARK_NODE":"MARK_PATH_POINT",{{"end_node",endNode_->currentData().toString()}});});
+  connect(savePath_,&QPushButton::clicked,this,[this]{command("SAVE_PATH");});
+  connect(usePath_,&QPushButton::clicked,this,[this]{
+    const auto id=selectedNetwork()["document"].toObject()["inspection_path"].toObject()["route_id"].toString();
+    if(!id.isEmpty()) emit pathReady(id);
+  });
   connect(save_,&QPushButton::clicked,this,[this]{command("SAVE_RECORD",{{"end_node",endNode_->currentData().toString()}});});
   connect(discard_,&QPushButton::clicked,this,[this]{if(QMessageBox::question(this,"放弃录制","放弃当前录制草稿？原始数据仍保留在本地记录中。") == QMessageBox::Yes) command("DISCARD_RECORD");});
-  connect(recover,&QPushButton::clicked,this,[this]{command("RECOVER_DRAFT",{{"draft_id",draftsCombo_->currentData().toString()}});});
+  connect(recover,&QPushButton::clicked,this,[this]{command(advanced_->isChecked()?"RECOVER_DRAFT":"RECOVER_PATH",{{"draft_id",draftsCombo_->currentData().toString()}});});
   connect(bind,&QPushButton::clicked,this,[this]{
     const auto id=point_->currentData().toString(),node=bindingNode_->currentData().toString();
     auto nodes=selectedNetwork()["document"].toObject()["bindings"].toObject()[id].toArray();
@@ -312,6 +327,21 @@ RecordedRoadPage::RecordedRoadPage(PatrolClient *client,QWidget *parent):QWidget
   });
   connect(unbind,&QPushButton::clicked,this,[this]{command("UNBIND_POINT",{{"point_id",point_->currentData().toString()},{"node_id",bindingNode_->currentData().toString()}});});
   connect(publish_,&QPushButton::clicked,this,[this]{command("PUBLISH");});
+  auto showAdvanced = [=](bool visible) {
+    startNode_->setVisible(visible); endNode_->setVisible(visible);
+    rf->labelForField(startNode_)->setVisible(visible); rf->labelForField(endNode_)->setVisible(visible);
+    finish_->setVisible(visible);save_->setVisible(visible);publish_->setVisible(visible);
+    savePath_->setVisible(!visible);usePath_->setVisible(!visible);
+    controlTabs->setTabVisible(1,visible);controlTabs->setTabVisible(2,visible);
+    if(!visible) controlTabs->setCurrentIndex(0);
+    grid->addWidget(splitRoad,visible?2:1,0,1,3);
+    recover->setText(visible?"载入草稿预览":"恢复录制草稿");
+    splitRoad->setText(visible?"此处分段，继续录制":"记录点位（分段）");
+    begin_->setText(visible?"开始录制":"开始录制新路径");
+    if(!status_.isEmpty()) updateNetworks();
+  };
+  connect(advanced_,&QCheckBox::toggled,this,showAdvanced);
+  showAdvanced(false);
   connect(update,&QPushButton::clicked,this,[this]{int row=roads_->currentRow();if(row>=0) command("UPDATE_EDGE",{{"edge_id",roads_->item(row,0)->data(Qt::UserRole).toString()}, {"enabled",edgeEnabled_->isChecked()},{"speed",speed_->value()}});});
   connect(exportButton,&QPushButton::clicked,this,[this]{command("EXPORT");});
   connect(import,&QPushButton::clicked,this,[this]{
@@ -379,7 +409,11 @@ void RecordedRoadPage::updateBindingSummary() {
 void RecordedRoadPage::updateNetworks() {
   refreshing_=true;
   const auto id=pendingNetworkId_.isEmpty()?networks_->currentData():QVariant(pendingNetworkId_);networks_->clear();
-  for(auto item:client_->roadNetworks()) {auto n=item.toObject();networks_->addItem(n["name"].toString()+QString(" · v%1 · %2").arg(n["revision"].toInt()).arg(n["published"].toBool()?"已发布":"待校验"),n["network_id"].toString());}
+  for(auto item:client_->roadNetworks()) {auto n=item.toObject();
+    const bool path=n["document"].toObject().contains("inspection_path");
+    networks_->addItem(n["name"].toString()+QString(" · v%1 · %2").arg(n["revision"].toInt())
+      .arg(n["published"].toBool()?(path?"已保存":"已发布"):(path?"录制中":"待校验")),n["network_id"].toString());
+  }
   int selected=networks_->findData(id);if(selected>=0) {networks_->setCurrentIndex(selected);pendingNetworkId_.clear();}
   auto doc=selectedNetwork()["document"].toObject();auto nodes=doc["nodes"].toObject();
   for(auto *combo:{startNode_,endNode_,bindingNode_}) {
@@ -393,9 +427,13 @@ void RecordedRoadPage::updateNetworks() {
   if(roads_->currentRow()>=0 && roads_->item(roads_->currentRow(),0))
     selectedEdge=roads_->item(roads_->currentRow(),0)->data(Qt::UserRole).toString();
   roads_->setRowCount(0);auto edges=doc["edges"].toObject();
-  for(auto it=edges.begin();it!=edges.end();++it) {
-    auto edge=it.value().toObject();int row=roads_->rowCount();roads_->insertRow(row);
-    auto *name=new QTableWidgetItem(edge["name"].toString());name->setData(Qt::UserRole,it.key());roads_->setItem(row,0,name);
+  QStringList edgeOrder=edges.keys();
+  if(!advanced_->isChecked() && doc.contains("inspection_path")) {
+    edgeOrder.clear();for(auto id:doc["inspection_path"].toObject()["edge_ids"].toArray()) edgeOrder<<id.toString();
+  }
+  for(const auto &edgeId:edgeOrder) {
+    auto edge=edges[edgeId].toObject();int row=roads_->rowCount();roads_->insertRow(row);
+    auto *name=new QTableWidgetItem(edge["name"].toString());name->setData(Qt::UserRole,edgeId);roads_->setItem(row,0,name);
     auto nodeName=[&](const QString &key){return nodes[edge[key].toString()].toObject()["name"].toString();};
     roads_->setItem(row,1,new QTableWidgetItem(nodeName("from")+" → "+nodeName("to")));
     QStringList dirs;for(auto b:edge["blocks"].toArray()) dirs<< (b.toObject()["direction"].toInt()>0?"前进":"倒车");
@@ -405,10 +443,16 @@ void RecordedRoadPage::updateNetworks() {
   }
   for(int row=0;row<roads_->rowCount();++row)
     if(roads_->item(row,0)->data(Qt::UserRole).toString()==selectedEdge) {roads_->selectRow(row);break;}
-  roadCount_->setText(QString("%1 条道路").arg(edges.size()));
-  networkSummary_->setText(selectedNetwork().isEmpty() ? "还没有路网，请在“路网管理”中新建或导入。"
+  roadCount_->setText(QString("%1 个路段").arg(roads_->rowCount()));
+  networkSummary_->setText(selectedNetwork().isEmpty() ? "填写路径名，直接开始录制。"
                           : QString("%1 个节点 · %2 条道路 · %3").arg(nodes.size()).arg(edges.size())
                             .arg(selectedNetwork()["published"].toBool()?"已发布":"修改后需校验发布"));
+  if(doc.contains("inspection_path")) {
+    const auto meta=doc["inspection_path"].toObject();
+    networkSummary_->setText(QString("%1 个点位 · %2 · %3").arg(meta["point_ids"].toObject().size())
+      .arg(meta["closed"].toBool()?"闭环":"非闭环往返")
+      .arg(selectedNetwork()["published"].toBool()?"已保存，可直接使用":"录制中，结束时自动检查并保存"));
+  }
   updateBindingSummary();
   refreshing_=false;redraw();
 }
@@ -428,10 +472,21 @@ void RecordedRoadPage::reply(const QString &op,bool success,const QString &text,
     statusLabel_->setText(enabled?QString("%1 · %2m · %3个样本 %4").arg(names.value(state_,state_)).arg(data["length"].toDouble(),0,'f',2).arg(data["samples"].toInt()).arg(data["error"].toString()):QString("本会话未启用固定路线：请停止流程，再勾选“路线巡航联锁”并启动定位导航"));
     patrolui::tone(statusLabel_, !enabled || state_=="PAUSED" || state_=="REVIEW" ? "warning"
                                : state_=="INVALID" ? "danger" : state_=="RECORDING" ? "info" : "good");
-    const bool idle=state_=="IDLE";begin_->setEnabled(enabled&&idle&&!selectedNetwork().isEmpty()&&!client_->hasActiveOrPendingRun());
+    const bool idle=state_=="IDLE";
+    const bool available=enabled&&idle&&!client_->hasActiveOrPendingRun();
+    begin_->setEnabled(available&&(!advanced_->isChecked()||!selectedNetwork().isEmpty()));
     pause_->setEnabled(state_=="RECORDING");resume_->setEnabled(state_=="PAUSED");finish_->setEnabled(state_=="RECORDING"||state_=="PAUSED");
     findChild<QPushButton*>("roadMarkNode")->setEnabled(state_=="RECORDING");
     save_->setEnabled(state_=="REVIEW");discard_->setEnabled(!idle);publish_->setEnabled(enabled&&idle);
+    const bool hasEdges=!selectedNetwork()["document"].toObject()["edges"].toObject().isEmpty();
+    savePath_->setEnabled(enabled&&!client_->hasActiveOrPendingRun()&&
+                         (state_=="RECORDING"||state_=="PAUSED"||state_=="REVIEW"||
+                          (idle&&hasEdges&&(!selectedNetwork()["published"].toBool()||
+                           !selectedNetwork()["document"].toObject().contains("inspection_path")))));
+    savePath_->setText(idle?"将已录道路保存为巡检路径":"结束并保存路径");
+    usePath_->setEnabled(available&&selectedNetwork()["published"].toBool()&&
+                        selectedNetwork()["document"].toObject().contains("inspection_path"));
+    advanced_->setEnabled(idle);
     networks_->setEnabled(idle);startNode_->setEnabled(idle);roadName_->setEnabled(idle);
     return;
   }
@@ -443,7 +498,17 @@ void RecordedRoadPage::reply(const QString &op,bool success,const QString &text,
   if(op=="PLAN") return;
   if(op=="SHOW_NETWORK") return;
   if(!success) {message_->setText(text);patrolui::tone(message_,"danger");return;}
-  if(op=="CREATE" || op=="IMPORT") pendingNetworkId_=data["network_id"].toString();
+  if(op=="CREATE" || op=="IMPORT" || op=="START_PATH") pendingNetworkId_=data["network_id"].toString();
+  if(op=="SAVE_PATH" || op=="MARK_PATH_POINT") {
+    pendingNetworkId_=data["network"].toObject()["network_id"].toString();
+    message_->setText(op=="SAVE_PATH" ? QString("巡检路径已保存，%1个点位；%2。可在“路线与执行”中直接开始。")
+                       .arg(data["point_count"].toInt()).arg(data["closed"].toBool()?"闭环按圈行驶":"非闭环按趟往返，返程沿原轨迹倒车")
+                     : data["unchanged"].toBool()?QString("当前位置已记录，继续驾驶后再记录下一个点位。")
+                     : QString("已记录点位，当前共%1个点位；继续驾驶即可。").arg(data["point_count"].toInt()));
+    patrolui::tone(message_,"good");refresh();
+    if(op=="SAVE_PATH") emit pathReady(data["route_id"].toString());
+    return;
+  }
   if(data.contains("review_blocks")) {
     plan_=QJsonObject{{"legs",QJsonArray{QJsonObject{{"blocks",data["review_blocks"]}}}}};redraw();
   }
@@ -492,7 +557,7 @@ void RecordedRoadPage::redraw(bool preserveView) {
     }
   };
   for(auto value:doc["edges"].toObject()) {
-    auto edge=value.toObject();if(!edge["enabled"].toBool(true)) continue;
+    auto edge=value.toObject();if(!edge["enabled"].toBool(true) || (!advanced_->isChecked() && edge.contains("reverse_of"))) continue;
     for(auto block:edge["blocks"].toArray()) {auto b=block.toObject();draw(b["samples"].toArray(),b["direction"].toInt()>0?QColor("#2563eb"):QColor("#d97706"),1.5);}
   }
   for(auto value:doc["nodes"].toObject()) {

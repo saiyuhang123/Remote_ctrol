@@ -3,7 +3,6 @@ from __future__ import annotations
 
 from pathlib import Path
 from types import SimpleNamespace
-import hashlib
 import json
 import os
 import threading
@@ -22,7 +21,7 @@ from builtin_interfaces.msg import Time as TimeMsg
 from geometry_msgs.msg import Twist
 from nav_msgs.msg import OccupancyGrid, Odometry
 from std_msgs.msg import Bool, String
-from tf2_ros import Buffer, TransformListener
+from .tf_feedback import TfFeedback
 
 from patrol_interfaces.action import ReturnHome, RunRoute
 from patrol_interfaces.msg import (
@@ -51,7 +50,7 @@ from .engine import (
     STATE_SUCCEEDED, STATE_VALIDATING,
 )
 from .map_export import default_web_map_dir, export_web_map
-from .map_metadata import expected_occupancy_sha256, read_map_binding
+from .map_metadata import expected_occupancy_sha256, occupancy_sha256, read_map_binding
 from .models import PatrolError, Point, RouteSnapshot, new_id, now_ns, require_finite
 from .nav2_client import Nav2Driver, quaternion_to_yaw
 from .store import PatrolStore
@@ -70,6 +69,31 @@ def _copy_time(value):
     return SimpleNamespace(sec=value.sec, nanosec=value.nanosec)
 
 
+def lookup_tf_pose(node, target_frame, label):
+    """Resolve target_frame -> base_link with the node's TF age guard."""
+    try:
+        transform = node.tf_buffer.lookup_transform(
+            target_frame,
+            node.get_parameter("base_frame").value,
+            Time(),
+        )
+        stamp = transform.header.stamp
+        age = (node.get_clock().now() - Time.from_msg(stamp)).nanoseconds / 1_000_000_000.0
+        limit = float(node.get_parameter("tf_max_age_sec").value)
+        if age < -0.5:
+            raise PatrolError("STALE_DATA", f"{label} TF 时间超前 {-age:.2f} 秒，请检查时钟同步")
+        if age > limit:
+            raise PatrolError("STALE_DATA", f"{label} TF 已过期（延迟 {age:.2f} 秒，上限 {limit:.2f} 秒），请检查定位和里程计更新")
+        translation = transform.transform.translation
+        stamp_ns = int(stamp.sec) * 1_000_000_000 + int(stamp.nanosec)
+        return (translation.x, translation.y,
+                quaternion_to_yaw(transform.transform.rotation), stamp_ns)
+    except PatrolError:
+        raise
+    except Exception as error:  # noqa: BLE001 - TF is external
+        raise PatrolError("NAV_NOT_READY", f"无法获取 {label} 位姿：{error}") from error
+
+
 class PatrolNode(Node):
     def __init__(self, parameter_overrides=None):
         super().__init__("robot_patrol", parameter_overrides=parameter_overrides)
@@ -77,6 +101,7 @@ class PatrolNode(Node):
             "robot_patrol" / "patrol.sqlite3"
         self.declare_parameter("database_path", str(default_database))
         self.declare_parameter("map_frame", "map")
+        self.declare_parameter("odom_frame", "odom")
         self.declare_parameter("base_frame", "base_link")
         self.declare_parameter("point_timeout_sec", 300.0)
         self.declare_parameter("cancel_confirm_timeout_sec", 2.0)
@@ -149,6 +174,9 @@ class PatrolNode(Node):
         self._odom_lock = threading.RLock()
         self._latest_odom_msg: Odometry | None = None
         self._latest_odom_time = 0.0
+        self._lio_odom_lock = threading.RLock()
+        self._latest_lio_odom_msg: Odometry | None = None
+        self._latest_lio_odom_time = 0.0
         self._map_lock = threading.RLock()
         self._latest_map: OccupancyGrid | None = None
         self._latest_map_time = 0.0
@@ -158,14 +186,19 @@ class PatrolNode(Node):
         self._guard_ready: bool | None = None
         self._guard_time = 0.0
 
-        self.tf_buffer = Buffer()
-        self.tf_listener = TransformListener(self.tf_buffer, self, spin_thread=False)
+        self._tf_feedback = TfFeedback(self)
+        self.tf_buffer = self._tf_feedback.buffer
 
         status_qos = QoSProfile(depth=1, reliability=ReliabilityPolicy.RELIABLE,
                                 durability=DurabilityPolicy.TRANSIENT_LOCAL)
         self._status_pub = self.create_publisher(PatrolStatus, "/patrol/status", status_qos,
                                                  callback_group=self._callback_group)
         self.create_subscription(Odometry, "/odom", self._on_odom, qos_profile_sensor_data,
+                                 callback_group=self._callback_group)
+        # Continuous LIO base pose. In wheel_imu mode /odom is the EKF output,
+        # which drifts several percent over a segment; /odom_lio is the LIO
+        # pose that the ICP map correction actually refers to.
+        self.create_subscription(Odometry, "/odom_lio", self._on_lio_odom, qos_profile_sensor_data,
                                  callback_group=self._callback_group)
         self.create_subscription(Bool, "/emergency_stop", self._on_estop, 10,
                                  callback_group=self._callback_group)
@@ -227,6 +260,13 @@ class PatrolNode(Node):
         self._publish_last_status()
         self._publish_executor_heartbeat()
         self.roads = RoadComponent(self)
+
+    def destroy_node(self):
+        feedback = getattr(self, '_tf_feedback', None)
+        if feedback is not None:
+            feedback.close()
+            self._tf_feedback = None
+        return super().destroy_node()
 
     # ------------------------------------------------------------- conversions
     def _to_ros_map(self, entry) -> MapBinding:
@@ -322,6 +362,15 @@ class PatrolNode(Node):
     def latest_odom(self):
         with self._odom_lock:
             return self._latest_odom_msg, self._latest_odom_time
+
+    def _on_lio_odom(self, message: Odometry) -> None:
+        with self._lio_odom_lock:
+            self._latest_lio_odom_msg = message
+            self._latest_lio_odom_time = time.monotonic()
+
+    def latest_lio_odom(self):
+        with self._lio_odom_lock:
+            return self._latest_lio_odom_msg, self._latest_lio_odom_time
 
     def _on_estop(self, message: Bool) -> None:
         with self._safety_lock:
@@ -667,8 +716,9 @@ class PatrolNode(Node):
             raise PatrolError("MAP_MISMATCH", f"无法核对地图栅格内容：{error.message}") from error
         if (expected_width, expected_height) != (int(info.width), int(info.height)):
             raise PatrolError("MAP_MISMATCH", "地图文件与 Nav2 /map 尺寸不一致")
-        actual_digest = hashlib.sha256(
-            bytes(int(value) & 0xFF for value in message.data)).hexdigest()
+        # ROS uses array('b'): hash its raw bytes in C, avoiding a Python
+        # per-cell loop that can delay TF/safety callbacks on large maps.
+        actual_digest = occupancy_sha256(message.data)
         if actual_digest != expected_digest:
             raise PatrolError("MAP_MISMATCH", "Nav2 实际 /map 栅格内容与已选地图文件不一致")
 
@@ -735,24 +785,12 @@ class PatrolNode(Node):
         return response
 
     def _current_pose(self):
-        try:
-            transform = self.tf_buffer.lookup_transform(
-                self.get_parameter("map_frame").value,
-                self.get_parameter("base_frame").value,
-                Time(),
-            )
-            stamp = transform.header.stamp
-            age = (self.get_clock().now() - Time.from_msg(stamp)).nanoseconds / 1_000_000_000.0
-            if age < -0.5 or age > float(self.get_parameter("tf_max_age_sec").value):
-                raise PatrolError("STALE_DATA", "map→base_link TF 已过期，不能采点或判断停稳")
-            translation = transform.transform.translation
-            stamp_ns = int(stamp.sec) * 1_000_000_000 + int(stamp.nanosec)
-            return (translation.x, translation.y,
-                    quaternion_to_yaw(transform.transform.rotation), stamp_ns)
-        except PatrolError:
-            raise
-        except Exception as error:  # noqa: BLE001 - TF is external
-            raise PatrolError("NAV_NOT_READY", f"无法获取 map→base_link 位姿：{error}") from error
+        return lookup_tf_pose(self, self.get_parameter("map_frame").value, "map→base_link")
+
+    def _current_odom_pose(self):
+        # Continuous LIO odometry, used to anchor a recorded segment while
+        # map->odom is being corrected by ICP. See RoadComponent.anchor.
+        return lookup_tf_pose(self, self.get_parameter("odom_frame").value, "odom→base_link")
 
     def _on_save_current_point(self, request, response):
         try:

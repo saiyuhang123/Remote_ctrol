@@ -26,7 +26,19 @@ SQLite schema v3，旧 v2 自动备份后迁移。道路、原始样本、草稿
 
 一个任务最多 20 万个重采样点，单网络最多 3000 节点/1 万边/20 万重采样点；录制原始点上限 20 万，请适时分段。服务单请求上限 32MB。
 
+停车样本至少每 0.5s 保留一次时间、轮速与位姿。对终点刹车后的定位过冲回摆，只在低速反馈、末端位姿已稳定至少 0.8s、末端 15cm 内且车头变化小于 0.10rad 时局部整理样本；保留最终实测终点，该终点到原有驶入轨迹必须在 6cm 内。反向轮速积分达到 2.5cm 时不做该整理，以保留真实慢速倒车。原始 `raw_samples` 和草稿坐标不改写，原始跳变/原地旋转检查、整理后的方向/曲率以及发布前的全车身碰撞检查仍生效。
+
 ## 服务
+
+日常录制采用 `START_PATH → MARK_PATH_POINT（重复）→ SAVE_PATH`。开始时自动新建道路库；每次记录点位提交原始道路、导航点与绑定；结束时自动验证碰撞/曲率、生成显式原路返程边、发布道路并创建 `RECORDED_NETWORK` 任务。最后的空尾段可直接收尾。所有持久修改仍由现有 PatrolStore 完成；最终点位、路网、任务和草稿状态为单事务提交。
+
+`inspection_path` 元数据保存 `edge_ids`（原始行驶顺序）、`point_ids`（节点→点位）、`route_id`、`closed` 和非闭环的 `reverse_edge_ids`。派生返程边带 `reverse_of`，采样倒序、运动方向取反，车头 yaw 不加 π；原始驾驶数据保留在原边。返程上限 0.10m/s。仅自动生成任务且点序未改变时使用顺序路径规划；普通高级任务继续使用有向路网规划，可任意排列点位。
+
+顺序任务的计划中，`pass_legs` 和 `pass_step_indices` 保存最多两套逐趟模板。执行器和 RecordedDriver 按趟数选相同模板，不展开大量重复点，不在自交处寻找捷径。非闭环从任一端点开始，`loop_count=1/2/3` 表示单程/往返/再单程；闭环按圈执行。启动使用新鲜 PLAN 摘要并保留原 guard、权限及终止确认。
+
+顺序任务现在支持自动接入：PLAN 在独立 ROS executor 上调用 `/compute_path_to_pose` 的 `RecordedEntry` 规划器，分别尝试两端（闭环仅起点），选择实际接入轨迹较短的可达端。精确 Reeds-Shepp 曲线保留连续车头朝向和全部换向点，必要时利用连续运动学 RRTConnect 搜索绕开障碍，2.5s 内未找到精确到达解时拒绝启动；后台再检查端点、曲率、车身、地图和允许区域。准备完成前仅做计算，不下发运动目标。PLAN 不持有道路全局锁，心跳和停止服务保持响应，规划期间车辆/地图/道路/任务变化会拒绝结果。
+
+`initial_legs` 仅供第一趟使用，在原有完整道路前插入带 `entry:true` 的运动段；`entry` 摘要含目标端点、长度和换向次数。后续趟仅用原 `pass_legs`，接入不增加趟数。所有接入段使用同一 UUID 票据和 guard，接入使用独立的 RecordedEntryRoute 低速 RPP 参数，前进上限 0.20m/s、倒车上限 0.12m/s；规划半径比硬件最小半径增大 25%，为跟踪修正预留转向余量。换向及接入终点采用独立的 3cm / 0.08rad 目标检查，停稳后再次核对朝向。途中遇障等待，不允许绕过接入换向点。自动接入限于点序未改变的简化录制任务，高级路网任意点序与返航仍遵守原来的录制连接约束。
 
 `/patrol/road_command` 类型 `patrol_interfaces/srv/RoadCommand`，请求 `operation` 与 `payload_json`，响应 `success,error_code,message,data_json`。JSON 对象中 `owner_session_id`、`command_id` 由客户端填充；最近 20 条有 command_id 的修改请求按操作/owner/ID 去重，ID 内容冲突拒绝。跨进程重启不提供永久幂等保证，应先 LIST/STATUS 核对后再重试。
 
@@ -36,6 +48,10 @@ SQLite schema v3，旧 v2 自动备份后迁移。道路、原始样本、草稿
 |---|---|---|
 | STATUS | 无 | enabled、录制 state/samples/length/error、当前道路 progress |
 | LIST | 无 | 活跃地图的 networks 与未处理 drafts |
+| START_PATH | name,owner_session_id | 新建并开始录制巡检路径，无需先 CREATE |
+| MARK_PATH_POINT | network_id,expected_revision,owner_session_id | 分段、自动建点并继续录制；原地重复点击不建重复点 |
+| SAVE_PATH | network_id,expected_revision,owner_session_id | 收尾、自动点位绑定、校验发布、创建任务；也可转换已有连续道路 |
+| RECOVER_PATH | draft_id,owner_session_id | 恢复为暂停状态，支持空尾段收尾；原地对齐后可继续录制 |
 | CREATE | name | 新的空路网 |
 | SHOW_NETWORK | network_id | 在 RViz 发布所选路网 |
 | START_RECORD | network_id,name,start_node（空表示新节点） | 开始被动录制，必须有非空 owner |
@@ -59,7 +75,7 @@ SQLite schema v3，旧 v2 自动备份后迁移。道路、原始样本、草稿
 
 LOAD_LEG / CHECK_LEG 是 BT 内部接口，需要匹配当前真实 NavigateToPose goal UUID 的有效 ticket_id。票据绑定不可变 leg、地图文件签名、run 和进度；暂停、取消、失联、地图变化后停止授权。
 
-录制操作端持续发布 `/patrol/operator_heartbeat`，操作禁用或 3 秒失联后自动暂停录制；该机制只暂停被动采样，不发送运动控制。恢复同一进程仍持有的暂停草稿时，其他在线 owner 会阻止接管。恢复进入预览后只可保存/放弃；若要继续驾驶录制，应先处理此段再开始下一段。
+录制操作端持续发布 `/patrol/operator_heartbeat`，操作禁用或 3 秒失联后自动暂停录制；该机制只暂停被动采样，不发送运动控制。恢复同一进程仍持有的暂停草稿时，其他在线 owner 会阻止接管。高级 `RECOVER_DRAFT` 进入预览后只可保存/放弃；简化 `RECOVER_PATH` 恢复为暂停状态，原地对齐后可继续采样，也可以直接结束保存。
 
 ## 命令行
 

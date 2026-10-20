@@ -240,7 +240,10 @@ class PatrolEngine:
                 self._set_status(state=STATE_VALIDATING, loop_index=loop_index,
                                  completed_loops=completed_loops,
                                  completed_steps=completed_steps)
-                for step_index, step in enumerate(self.snapshot.steps, start=1):
+                orders = self.snapshot.recorded_plan.get('pass_step_indices', [])
+                loop_steps = ([self.snapshot.steps[i] for i in orders[(loop_index-1) % len(orders)]]
+                              if orders else self.snapshot.steps)
+                for step_index, step in enumerate(loop_steps, start=1):
                     if self.flags.cancel_requested:
                         return self._canceled(completed_loops, completed_steps)
                     attempt_index = 0
@@ -336,7 +339,7 @@ class PatrolEngine:
                                  completed_steps=completed_steps)
                 if self.loop_count != 0 and completed_loops >= self.loop_count:
                     self._set_status(state=STATE_SUCCEEDED, active=False,
-                                     message=f"完成 {completed_loops} 圈")
+                                     message=f"完成 {completed_loops} {'趟' if self.snapshot.recorded_plan.get('traversal') == 'SHUTTLE' else '圈'}")
                     return EngineResult(True, STATE_SUCCEEDED, self.run_id,
                                         completed_loops, completed_steps)
                 if self.flags.cancel_requested:

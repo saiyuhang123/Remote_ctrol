@@ -1,0 +1,5 @@
+<library path="recorded_route_entry">
+  <class type="recorded_route_nav2::RecordedEntryPlanner" base_class_type="nav2_core::GlobalPlanner">
+    <description>Exact Reeds-Shepp entry with continuous RRTConnect obstacle search and complete swept-body checks.</description>
+  </class>
+</library>

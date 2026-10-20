@@ -36,9 +36,23 @@ def test_recorded_routes_are_opt_in_and_have_independent_plugins():
         original=yaml.safe_load(path.read_text())
         assert original['controller_server']['ros__parameters']['controller_plugins']==['FollowPath']
         controller=nav2_overlay('controller_server',path,hw)
-        assert controller['controller_plugins']==['FollowPath','RecordedRoute']
+        assert controller['controller_plugins']==['FollowPath','RecordedRoute','RecordedEntryRoute']
         assert controller['RecordedRoute.allow_reversing'] and not controller['RecordedRoute.use_rotate_to_heading']
-        assert nav2_overlay('planner_server',path,hw)['planner_plugins']==['GridBased','RecordedDetour']
+        planners=nav2_overlay('planner_server',path,hw)
+        assert planners['planner_plugins']==['GridBased','RecordedDetour','RecordedEntry']
+        assert planners['RecordedEntry.plugin']=='recorded_route_nav2::RecordedEntryPlanner'
+        assert planners['RecordedDetour.motion_model_for_search']=='DUBIN'
+        assert planners['RecordedEntry.minimum_turning_radius']>=.69
+        assert controller['recorded_entry_checker.xy_goal_tolerance']==.03
+        assert controller['recorded_entry_checker.yaw_goal_tolerance']==.08
+        assert controller['recorded_entry_checker.controller_id']=='RecordedEntryRoute'
+        assert controller['RecordedEntryRoute.max_lookahead_dist']<controller['RecordedRoute.max_lookahead_dist']
+        assert controller['RecordedEntryRoute.desired_linear_vel']==.20
+        assert controller['RecordedEntryRoute.min_approach_linear_velocity']==.05
+        assert controller['RecordedEntryRoute.approach_velocity_scaling_dist']==.12
+        assert controller['RecordedEntryRoute.regulated_linear_scaling_min_radius']==planners['RecordedEntry.minimum_turning_radius']
+        progress=original['controller_server']['ros__parameters']['progress_checker_plugin']
+        assert controller[progress+'.plugin']=='recorded_route_nav2::EntryProgressChecker'
 
 
 def test_desktop_recorded_markers_preserve_all_navigation_displays():
@@ -418,6 +432,7 @@ class IntegrationTests(unittest.TestCase):
         node.tf_buffer = SimpleNamespace(lookup_transform=lambda *args: tf)
         node.get_clock = lambda: SimpleNamespace(now=lambda: SimpleNamespace(to_msg=lambda: Time()))
         node.broadcast_lio_frame = True
+        node.odom_source = 'wheel_imu'
         node.cur_map_to_odom_fl = pose(map_lio)
         node.timer_callback()
         wanted = map_lio @ lio_body @ inverse(node.base_from_body) @ inverse(ekf_base)
@@ -425,6 +440,40 @@ class IntegrationTests(unittest.TestCase):
         np.testing.assert_allclose(actual, wanted, atol=1e-12)
         self.assertEqual(node.tf_broadcaster.messages[1].child_frame_id, 'lio_odom')
         self.assertEqual(node.pub_localization.messages[-1].child_frame_id, 'base_link')
+
+    def test_lio_fusion_never_injects_historical_tf_motion(self):
+        cls = load(SRC/'FAST_LIO_LOCALIZATION_ROS2/scripts/transform_fusion.py').TransformFusionNode
+        node = cls.__new__(cls)
+        node.lock, node.tf_broadcaster, node.pub_localization = threading.Lock(), Capture(), Capture()
+        node.odom_source, node.broadcast_lio_frame = 'lio', False
+        node.base_from_body = transform([.32, 0., .22], [0., 0., .08])
+        map_lio = transform([.3, -.2, 0.], [0., 0., .85])
+        node.cur_map_to_odom_fl = pose(map_lio)
+        node.tf_buffer = SimpleNamespace(lookup_transform=lambda *args: self.fail('LIO fusion must not query delayed odometry TF'))
+        node.get_clock = lambda: SimpleNamespace(now=lambda: SimpleNamespace(to_msg=lambda: Time()))
+        # Acceleration, sharp steering, braking and residence, with a
+        # realistic nonzero IMU offset. ICP is fixed for the whole replay.
+        for i, (x,y,yaw) in enumerate([(0.,0.,0.),(.06,0.,0.),(.12,-.01,-.12),
+                                     (.16,-.04,-.30),(.18,-.06,-.35),(.18,-.06,-.35)]):
+            body = transform([x,y,0.], [0.,0.,yaw])
+            node.cur_odom_fastlio = pose(body, 1000000000+i*100000000)
+            node.timer_callback()
+            actual_map_odom = node.tf_to_mat(node.tf_broadcaster.messages[-1])
+            np.testing.assert_allclose(actual_map_odom,map_lio,atol=1e-12)
+            np.testing.assert_allclose(actual_map_odom @ body @ inverse(node.base_from_body),
+                                       node.pose_to_mat(node.pub_localization.messages[-1]),atol=1e-12)
+
+    def test_wheel_fusion_without_matching_tf_does_not_invent_lio_origin(self):
+        cls = load(SRC/'FAST_LIO_LOCALIZATION_ROS2/scripts/transform_fusion.py').TransformFusionNode
+        node = cls.__new__(cls)
+        node.lock,node.tf_broadcaster,node.pub_localization=threading.Lock(),Capture(),Capture()
+        node.base_from_body=np.eye(4);node.odom_source='wheel';node._last_tf_warn=0.
+        node.cur_odom_fastlio=node.cur_map_to_odom_fl=pose(np.eye(4))
+        def missing(*args):raise RuntimeError('no wheel TF')
+        node.tf_buffer=SimpleNamespace(lookup_transform=missing)
+        node.get_logger=lambda:SimpleNamespace(warn=lambda _:None)
+        node.timer_callback()
+        self.assertFalse(node.tf_broadcaster.messages)
 
     def test_initial_pose_is_base_pose_not_lio_world_origin(self):
         cls = load(SRC/'FAST_LIO_LOCALIZATION_ROS2/scripts/global_localization.py').GlobalLocalizationNode
@@ -540,12 +589,16 @@ class IntegrationTests(unittest.TestCase):
                 self.assertNotIn('robot_localization', packages)
                 self.assertEqual(packages.count('rslidar_sdk'), 1)
                 self.assertEqual(sum(n.get('executable') == 'lio_odometry.py' for n in nodes), 1)
+                fusion=next(n for n in nodes if n.get('executable')=='transform_fusion.py')
+                self.assertEqual(fusion['parameters'][1]['odom_source'],'lio')
                 args['odom_source'] = 'wheel_imu'
                 nodes = bringup.configure(SimpleNamespace(launch_configurations=args))
                 self.assertEqual(sum(n['package'] == 'robot_localization' for n in nodes), 1)
                 lio = next(n for n in nodes if n.get('executable') == 'lio_odometry.py')
                 self.assertIs(lio['parameters'][0]['publish_tf'], False)
                 self.assertEqual(lio['parameters'][0]['odom_topic'], '/odom_lio')
+                fusion=next(n for n in nodes if n.get('executable')=='transform_fusion.py')
+                self.assertEqual(fusion['parameters'][1]['odom_source'],'wheel_imu')
                 args['odom_source'] = 'wheel'
                 nodes = bringup.configure(SimpleNamespace(launch_configurations=args))
                 self.assertFalse(any(n['package'] == 'robot_localization' for n in nodes))

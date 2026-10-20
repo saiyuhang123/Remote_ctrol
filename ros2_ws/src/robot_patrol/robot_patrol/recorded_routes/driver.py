@@ -18,6 +18,7 @@ from nav2_msgs.action import FollowPath
 from ..models import PatrolError
 from ..nav2_client import Nav2Driver, yaw_to_quaternion
 from .geometry import distance, angle, pose, project, length
+from .inspection_path import plan_leg
 
 
 def file_signature(mapping):
@@ -70,7 +71,7 @@ class RecordedDriver(Nav2Driver):
     def prepare_goal(self, step, goal, flags):
         loop, index = self._key(step)
         key = (loop, index)
-        leg = copy.deepcopy(self.plan['closure'] if loop > 1 and index == 0 else self.plan['legs'][index])
+        leg = copy.deepcopy(plan_leg(self.plan, loop, index))
         previous = self._attempts.get(key)
         if previous and previous.get('completed'):
             raise PatrolError('OFF_ROAD', '固定路线到点后发生偏移，禁止自动自由重定位，请重新预览任务')
@@ -82,6 +83,8 @@ class RecordedDriver(Nav2Driver):
             leg = self._continue_recorded_tail(leg, current)
             start = leg['blocks'][0]['samples'][0]
             if distance(current, start) > 0.15 or abs(angle(current['yaw']-start['yaw'])) > 0.30:
+                if leg['blocks'][0].get('entry'):
+                    raise PatrolError('OFF_ROAD', '车辆已离开自动接入的规划起始位姿，请停车后重新开始')
                 raise PatrolError('OFF_ROAD', '车辆未处于下一录制路段的接入位姿，请补录连接或重新预览')
         nav_uuid = uuid.uuid4()
         ticket_id = 'leg_' + uuid.uuid4().hex
@@ -123,7 +126,7 @@ class RecordedDriver(Nav2Driver):
         # Empty leg means a repeated point / already at the first node. It is
         # a real business step, but must not send a zero-length Nav2 goal.
         loop, index = self._key(step)
-        leg = self.plan['closure'] if loop > 1 and index == 0 else self.plan['legs'][index]
+        leg = plan_leg(self.plan, loop, index)
         if not leg['blocks']:
             current = self.roads.current()
             return 'SUCCEEDED' if distance(current, leg['target']) <= 0.20 and abs(angle(current['yaw']-leg['target']['yaw'])) < 0.30 else 'OFF_ROAD'
@@ -238,8 +241,8 @@ class RecordedDriver(Nav2Driver):
             self.stop_unconfirmed = False
         return super().stop_safe()
 
-    def reconfirm(self, step, flags):
-        result = super().reconfirm(step, flags)
+    def reconfirm(self, step, flags, status_cb):
+        result = super().reconfirm(step, flags, status_cb)
         if result == 'OFF_POINT':
             return 'OFF_POINT'
         return result

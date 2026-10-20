@@ -12,6 +12,8 @@ public:
   bool hasDraft() const { return state_ != "IDLE"; }
   void showPlan(const QJsonObject &plan);
   void pauseForClose();
+signals:
+  void pathReady(const QString &routeId);
 private:
   void refresh();
   void updateNetworks();
@@ -34,5 +36,7 @@ private:
   QGraphicsView *view_; QGraphicsScene *scene_;
   QTableWidget *roads_;
   QDoubleSpinBox *speed_; QCheckBox *edgeEnabled_;
+  QCheckBox *advanced_;
+  QPushButton *savePath_, *usePath_;
   QPushButton *begin_, *pause_, *resume_, *finish_, *save_, *discard_, *publish_;
 };

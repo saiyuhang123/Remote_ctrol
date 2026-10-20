@@ -81,6 +81,8 @@ private:
   QString activeMapName() const;
   PatrolMapInfo activeMap() const;
   PatrolRouteInfo routeById(const QString &routeId) const;
+  bool simpleRecordedPath() const;
+  void dispatchRun();
 
   PatrolClient *client_ = nullptr;
   QString mapYaml_;
@@ -131,6 +133,9 @@ private:
   QPushButton *previewRecorded_ = nullptr;
   RecordedRoadPage *roadsPage_ = nullptr;
   QString planDigest_;
+  QString pendingPathRouteId_;
+  bool startAfterPlan_=false;
+  quint64 startPlanGeneration_=0;
   bool recordingDraft_=false;
   QDoubleSpinBox *addStepDwell_ = nullptr;
   QPushButton *addStepButton_ = nullptr;
@@ -145,6 +150,7 @@ private:
   QPushButton *deleteRouteButton_ = nullptr;
   QSpinBox *loopCount_ = nullptr;
   QPushButton *startButton_ = nullptr;
+  QPushButton *resetInterlockButton_ = nullptr;
   QPushButton *pauseButton_ = nullptr;
   QPushButton *resumeButton_ = nullptr;
   QPushButton *cancelButton_ = nullptr;

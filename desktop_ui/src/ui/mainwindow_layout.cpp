@@ -310,8 +310,9 @@ void MainWindow::setupUi() {
   auto *deviceDialog = new QDialog(this); deviceWindow_ = deviceDialog;
   deviceDialog->setObjectName("deviceDutyWindow"); deviceDialog->setWindowTitle("设备执勤 · 气体检测与云台巡航");
   auto *deviceLayout = new QVBoxLayout(deviceDialog);
-  devicePanel_ = new DevicePanel(deviceClient_, offline_); deviceLayout->addWidget(scrollPane(devicePanel_));
-  deviceDialog->resize(560, 720);
+  deviceLayout->setContentsMargins(0, 0, 0, 0);
+  devicePanel_ = new DevicePanel(deviceClient_, offline_); deviceLayout->addWidget(devicePanel_);
+  deviceDialog->resize(640, 720);
   connect(deviceClient_, &DeviceClient::message, this, &MainWindow::log);
   connect(deviceClient_, &DeviceClient::cameraRequested, cameraPanel_, &CameraPanel::ensureCamera);
   connect(deviceClient_, &DeviceClient::ptzBlocked, cameraPanel_, &CameraPanel::setPatrolBlocked);
@@ -554,6 +555,6 @@ void MainWindow::showOperationResult(const QString &operation, bool success, con
 
 void MainWindow::openDeviceWindow() {
   const auto available = screen()->availableGeometry().size();
-  deviceWindow_->resize(qMin(580, available.width() - 40), qMin(780, available.height() - 60));
+  deviceWindow_->resize(qMin(640, available.width() - 40), qMin(760, available.height() - 60));
   deviceWindow_->show(); deviceWindow_->raise(); deviceWindow_->activateWindow();
 }

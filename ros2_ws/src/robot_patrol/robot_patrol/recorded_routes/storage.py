@@ -2,8 +2,9 @@
 from __future__ import annotations
 
 import json
-from ..models import PatrolError, new_id, now_ns, validate_name
+from ..models import PatrolError, new_id, now_ns, validate_name, validate_point_values
 from .graph import validate_network, digest
+from .geometry import distance
 
 
 class RoadStorage:
@@ -85,6 +86,60 @@ class RoadStorage:
             if conn.execute('SELECT 1 FROM routes WHERE network_id=?', (network_id,)).fetchone():
                 raise PatrolError('IN_USE', '仍有巡检路线引用该路网，不能删除')
             conn.execute('DELETE FROM road_networks WHERE network_id=?', (network_id,))
+
+    def save_path_bundle(self, network, document, points, *, publish=False, draft=None):
+        """Commit auto-points, road revision, task and draft as one transaction."""
+        from .inspection_path import route_point_ids
+        mapping = self.get_map(network['map_id'])
+        validate_network(document, float(document['vehicle']['minimum_turning_radius']))
+        name = validate_name(network['name'], '巡检路径名称')
+        for point in points:
+            validate_name(point['name'], '点位名称')
+            validate_point_values(point['x'], point['y'], point['yaw'])
+        ordered = route_point_ids(document) if publish else []
+        if publish and not 1 <= len(ordered) <= 500:
+            raise PatrolError('INVALID_DATA', '巡检路径需包含 1～500 个点位')
+        now = now_ns()
+        route_id = document['inspection_path']['route_id']
+        with self._transaction() as conn:
+            row = conn.execute('SELECT * FROM road_networks WHERE network_id=?', (network['network_id'],)).fetchone()
+            if not row or row['revision'] != network['revision'] or row['map_revision'] != mapping.revision:
+                raise PatrolError('STALE_DATA', '路径或地图版本已变化，请刷新后重试')
+            revision = row['revision'] + 1
+            for point in points:
+                conn.execute('''INSERT INTO points(point_id,map_id,name,x,y,yaw,source,sampled_at,
+                               revision,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,1,?,?)''',
+                             (point['point_id'], mapping.map_id, point['name'], point['x'], point['y'],
+                              point['yaw'], 'recorded_path', now, now, now))
+            for point_id, ports in document['bindings'].items():
+                point = conn.execute('SELECT * FROM points WHERE point_id=?', (point_id,)).fetchone()
+                if not point or point['map_id'] != mapping.map_id:
+                    raise PatrolError('POINT_NOT_BOUND', '路径点位已删除或地图不一致，请检查点位')
+                if any(distance(dict(point), document['nodes'][port]) > .08 for port in ports):
+                    raise PatrolError('POINT_NOT_BOUND', '路径点位已移动，请检查点位与录制路径')
+            conn.execute('UPDATE road_networks SET revision=?,published=?,document_json=?,updated_at=? WHERE network_id=?',
+                         (revision, int(publish), json.dumps(document, ensure_ascii=False, allow_nan=False),
+                          now, network['network_id']))
+            if publish:
+                old = conn.execute('SELECT * FROM routes WHERE route_id=?', (route_id,)).fetchone()
+                if old and (old['map_id'] != mapping.map_id or old['network_id'] != network['network_id']):
+                    raise PatrolError('STALE_DATA', '巡检路径任务标识冲突，请刷新')
+                if old:
+                    conn.execute('UPDATE routes SET revision=revision+1,updated_at=?,network_revision=? WHERE route_id=?',
+                                 (now, revision, route_id))
+                    conn.execute('DELETE FROM route_steps WHERE route_id=?', (route_id,))
+                else:
+                    conn.execute('''INSERT INTO routes(route_id,map_id,name,revision,created_at,updated_at,
+                                 navigation_mode,network_id,network_revision) VALUES(?,?,?,1,?,?,?,?,?)''',
+                                 (route_id, mapping.map_id, name, now, now, 'RECORDED_NETWORK', network['network_id'], revision))
+                for order, point_id in enumerate(ordered):
+                    conn.execute('INSERT INTO route_steps VALUES(?,?,?,?,?)',
+                                 (new_id('step'), route_id, order, point_id, 0.0))
+            if draft:
+                conn.execute('INSERT OR REPLACE INTO road_drafts VALUES(?,?,?,?)',
+                             (draft['draft_id'], mapping.map_id,
+                              json.dumps(draft['payload'], ensure_ascii=False, allow_nan=False), now))
+        return self.get_network(network['network_id'])
 
     def save_road_draft(self, draft_id, map_id, payload):
         with self._transaction() as conn:

@@ -37,7 +37,12 @@ def nav2_overlay(executable, source_file, hw):
         # retains its motion model and parameters for free navigation.
         names=original['planner_server']['ros__parameters']['planner_plugins']
         radius=hardware_radius(hw)
-        return {'planner_plugins':list(dict.fromkeys(names+['RecordedDetour'])),
+        return {'planner_plugins':list(dict.fromkeys(names+['RecordedDetour','RecordedEntry'])),
+                'RecordedEntry.plugin':'recorded_route_nav2::RecordedEntryPlanner',
+                # Leave steering authority for correcting the measured pose
+                # error when restarting after a cusp, rather than saturating
+                # the chassis along the entire nominal turn.
+                'RecordedEntry.minimum_turning_radius':radius*1.25,
                 'RecordedDetour.plugin':'nav2_smac_planner/SmacPlannerHybrid',
                 'RecordedDetour.minimum_turning_radius':radius,
                 'RecordedDetour.motion_model_for_search':'DUBIN',
@@ -52,8 +57,10 @@ def nav2_overlay(executable, source_file, hw):
         return {}
     cfg = original['controller_server']['ros__parameters']
     speed = min(0.2, float(hw['chassis']['max_speed']))
-    result = {'controller_plugins': list(dict.fromkeys(cfg['controller_plugins']+['RecordedRoute'])),
-              'goal_checker_plugins': list(dict.fromkeys(cfg['goal_checker_plugins']+['recorded_goal_checker','recorded_stop_checker']))}
+    result = {'controller_plugins': list(dict.fromkeys(cfg['controller_plugins']+['RecordedRoute','RecordedEntryRoute'])),
+              'goal_checker_plugins': list(dict.fromkeys(cfg['goal_checker_plugins']+['recorded_goal_checker','recorded_stop_checker','recorded_entry_checker']))}
+    progress=cfg.get('progress_checker_plugin','progress_checker')
+    result[progress+'.plugin']='recorded_route_nav2::EntryProgressChecker'
     parameters = {
         'plugin': 'recorded_route_nav2::RecordedController', 'desired_linear_vel': speed,
         'strict_deviation': 0.20, 'max_heading_error': 0.55,
@@ -66,14 +73,23 @@ def nav2_overlay(executable, source_file, hw):
         'regulated_linear_scaling_min_radius': 1.5,
     }
     result.update({'RecordedRoute.'+key: value for key,value in parameters.items()})
+    entry_parameters=dict(parameters, desired_linear_vel=speed, lookahead_dist=.15,
+                          min_lookahead_dist=.08,max_lookahead_dist=.20,lookahead_time=1.0,
+                          min_approach_linear_velocity=.05,approach_velocity_scaling_dist=.12,
+                          regulated_linear_scaling_min_speed=.05,
+                          regulated_linear_scaling_min_radius=hardware_radius(hw)*1.25)
+    result.update({'RecordedEntryRoute.'+key:value for key,value in entry_parameters.items()})
     for name,tolerance in [('recorded_goal_checker',0.20),('recorded_stop_checker',0.08)]:
         result.update({name+'.plugin': 'recorded_route_nav2::RecordedGoalChecker',
                        name+'.controller_id': 'RecordedRoute', name+'.xy_goal_tolerance': tolerance})
+    result.update({'recorded_entry_checker.plugin':'recorded_route_nav2::RecordedGoalChecker',
+                   'recorded_entry_checker.controller_id':'RecordedEntryRoute',
+                   'recorded_entry_checker.xy_goal_tolerance':0.03,
+                   'recorded_entry_checker.yaw_goal_tolerance':0.08})
     return result
 
 
 def clearance_rewrites():
-    # A smooth obstacle potential keeps candidate paths away from walls.
-    # Only opt-in road sessions use this; full-body collision checks still
-    # decide whether a candidate can be executed.
-    return {'inflation_radius':'0.55','cost_scaling_factor':'3.0'}
+    # Match normal Nav2's 10 cm inflation radius in recorded-route sessions.
+    # Full-body collision checks still decide whether a path can be executed.
+    return {'inflation_radius':'0.10','cost_scaling_factor':'3.0'}

@@ -384,7 +384,7 @@ void PatrolPage::buildUi() {
   startReadinessLabel_->setMargin(8);
   runLayout->addWidget(startReadinessLabel_);
   auto *runRow = new QHBoxLayout;
-  runRow->addWidget(new QLabel("循环次数", runGroup));
+  runRow->addWidget(new QLabel("执行次数", runGroup));
   loopCount_ = new QSpinBox(runGroup);
   loopCount_->setObjectName("patrolLoopCount");
   loopCount_->setRange(0, 100000); loopCount_->setValue(1);
@@ -398,8 +398,11 @@ void PatrolPage::buildUi() {
   resumeButton_ = pageButton("继续", runGroup, "patrolResume");
   cancelButton_ = pageButton("取消任务", runGroup, "patrolCancel");
   cancelButton_->setProperty("patrolDanger", true);
+  resetInterlockButton_ = pageButton("重启巡航联锁", runGroup, "patrolResetInterlock");
+  resetInterlockButton_->setToolTip("取消旧 Nav2 目标并复位巡航联锁；要求车辆已停稳、没有活动任务");
   runRow->addWidget(startButton_); runRow->addWidget(pauseButton_);
   runRow->addWidget(resumeButton_); runRow->addWidget(cancelButton_);
+  runRow->addWidget(resetInterlockButton_);
   runLayout->addLayout(runRow);
   progressLabel_ = patrolui::hint("尚未执行路线", runGroup);
   progressLabel_->setObjectName("patrolProgressLabel");
@@ -441,10 +444,16 @@ void PatrolPage::buildUi() {
   });
   tabs_->addTab(runsTab, "执行记录");
   roadsPage_ = new RecordedRoadPage(client_, tabs_);
-  tabs_->addTab(roadsPage_, "录制路网");
+  tabs_->addTab(roadsPage_, "录制路径");
+  connect(roadsPage_,&RecordedRoadPage::pathReady,this,[this](const QString &routeId){
+    if(routeId.isEmpty()) return;
+    if(!confirmDraftDiscard()) return;
+    routeDirty_=false;pendingPathRouteId_=routeId;planDigest_.clear();startAfterPlan_=false;
+    client_->refreshPoints(activeMapId_);client_->refreshRoutes(activeMapId_);client_->roadCommand("LIST");
+  });
   root->addWidget(tabs_, 1);
 
-  messageLabel_ = patrolui::hint("先录入点位，再编排路线；固定路线需先录制并发布道路路网。", this);
+  messageLabel_ = patrolui::hint("在“录制路径”中手动录一遍并保存，即可选择路径开始巡检。也可自行编排已有导航点。", this);
   messageLabel_->setObjectName("patrolMessage");
   messageLabel_->setTextFormat(Qt::PlainText);
   messageLabel_->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
@@ -487,6 +496,14 @@ void PatrolPage::buildUi() {
   connect(pauseButton_, &QPushButton::clicked, this, &PatrolPage::pauseRun);
   connect(resumeButton_, &QPushButton::clicked, this, &PatrolPage::resumeRun);
   connect(cancelButton_, &QPushButton::clicked, this, &PatrolPage::cancelRun);
+  connect(resetInterlockButton_, &QPushButton::clicked, this, [this] {
+    if (QMessageBox::question(
+            this, QStringLiteral("重启巡航联锁"),
+            QStringLiteral("将取消旧 Nav2 目标并复位巡航联锁。\n"
+                           "要求车辆已停稳、没有活动任务。继续？")) != QMessageBox::Yes)
+      return;
+    client_->resetInterlock();
+  });
   connect(refreshRunsButton_, &QPushButton::clicked, this, [this] {
     client_->refreshRuns(activeMapId_);
   });
@@ -499,10 +516,10 @@ void PatrolPage::buildUi() {
   connect(routeNetwork_,QOverload<int>::of(&QComboBox::currentIndexChanged),this,[this]{
     if(!loadingRoute_) {routeDirty_=true;planDigest_.clear();} updateActionStates();
   });
-  connect(loopCount_,QOverload<int>::of(&QSpinBox::valueChanged),this,[this]{planDigest_.clear();updateActionStates();});
+  connect(loopCount_,QOverload<int>::of(&QSpinBox::valueChanged),this,[this]{planDigest_.clear();startAfterPlan_=false;updateActionStates();});
   connect(previewRecorded_,&QPushButton::clicked,this,[this]{
     if(routeDirty_ || currentRouteId_.isEmpty()) {setMessage("请先保存路线再预览",true);return;}
-    planDigest_.clear();client_->roadCommand("PLAN",{{"route_id",currentRouteId_},{"loop_count",loopCount_->value()}});
+    startAfterPlan_=false;planDigest_.clear();client_->roadCommand("PLAN",{{"route_id",currentRouteId_},{"loop_count",loopCount_->value()}});
   });
   connect(client_,&PatrolClient::roadNetworksChanged,this,[this]{
     const auto oldId=routeNetwork_->currentData();
@@ -534,6 +551,7 @@ void PatrolPage::buildUi() {
       if(client_->status().active && !state.isEmpty()) {
         line=QString("道路执行：%1 · 运动段 %2 · 参考采样 %3")
           .arg(phases.value(state,state)).arg(progress["block"].toInt()+1).arg(progress["reference_index"].toInt());
+        if(progress["entry"].toBool()) line="自动接入路径 · "+line;
         const auto reason=progress["error"].toString().isEmpty()?progress["waiting_reason"].toString():progress["error"].toString();
         if(!reason.isEmpty()) line+=" · "+reason;
       }
@@ -558,14 +576,23 @@ void PatrolPage::buildUi() {
       text->setPlainText(lines.isEmpty()?"此任务没有录制道路执行事件。":lines.join('\n'));layout->addWidget(text);dialog->show();return;
     }
     if(op!="PLAN") return;
-    if(!ok) {planDigest_.clear();setMessage(message,true);updateActionStates();return;}
+    if(!ok) {startAfterPlan_=false;planDigest_.clear();setMessage(message,true);updateActionStates();return;}
     if(data["route_id"].toString()!=currentRouteId_ || data["route_revision"].toVariant().toULongLong()!=currentRouteRevision_ ||
        data["loop_count"].toInt()!=loopCount_->value() || routeDirty_) return;
     planDigest_=data["digest"].toString();roadsPage_->showPlan(data);
     QStringList parts;
     for(auto leg:data["legs"].toArray()) {auto l=leg.toObject();parts<<QString("%1 段录制道路").arg(l["edge_ids"].toArray().size());}
-    setMessage("已验证实际行驶路线："+parts.join(" → ")+"。绿色轨迹可在“录制路网”页查看；启动后仅遇障允许受限绕行。",false);
+    setMessage(data["traversal"]=="SHUTTLE" ? "路径已验证：非闭环按趟往返，返程沿原轨迹倒车。"
+               : "已验证实际行驶路线："+parts.join(" → ")+"。绿色轨迹可在“录制路径”页查看。",false);
+    const auto entry=data["entry"].toObject();
+    if(entry["required"].toBool()) {
+      setMessage(QString("将自动接入 %1（约 %2 米，%3 次前进/倒车换向），对齐后沿录制路径巡检。接入不计巡检趟数。")
+        .arg(entry["target_name"].toString()).arg(entry["length"].toDouble(),0,'f',1)
+        .arg(entry["direction_changes"].toInt()),false);
+    }
+    const bool requestedStart=startAfterPlan_;startAfterPlan_=false;
     updateActionStates();
+    if(requestedStart && startButton_->isEnabled()) dispatchRun();
   });
   connect(stepsTable_, &QTableWidget::itemSelectionChanged, this, [this] {
     const int row = stepsTable_->currentRow();
@@ -663,6 +690,16 @@ void PatrolPage::onPointsChanged() {
 
 void PatrolPage::onRoutesChanged() {
   populateRoutes();
+  if(!pendingPathRouteId_.isEmpty()) {
+    const auto path=routeById(pendingPathRouteId_);
+    if(!path.routeId.isEmpty()) {
+      pendingPathRouteId_.clear();loadRouteIntoEditor(path);
+      for(int row=0;row<routesTable_->rowCount();++row)
+        if(routesTable_->item(row,0)->data(Qt::UserRole).toString()==path.routeId) routesTable_->selectRow(row);
+      tabs_->setCurrentIndex(1);
+      setMessage("巡检路径已就绪，停车后选择执行次数并点击“开始”。系统自动接入可达端点，再沿录制路径巡检。",false);
+    }
+  }
   if (!currentRouteId_.isEmpty()) {
     const auto route = routeById(currentRouteId_);
     if (!route.routeId.isEmpty() && !routeDirty_) loadRouteIntoEditor(route);
@@ -792,6 +829,7 @@ void PatrolPage::populateRuns() {
 }
 
 void PatrolPage::loadRouteIntoEditor(const PatrolRouteInfo &route) {
+  startAfterPlan_=false;
   loadingRoute_ = true;
   currentRouteId_ = route.routeId;
   currentRouteRevision_ = route.revision;
@@ -955,9 +993,10 @@ bool PatrolPage::confirmDraftDiscard() {
 }
 
 void PatrolPage::closeEvent(QCloseEvent *event) {
+  startAfterPlan_=false;planDigest_.clear();
   if(!confirmDraftDiscard()) {event->ignore();return;}
   if(roadsPage_ && roadsPage_->hasDraft()) {
-    const auto choice=QMessageBox::question(this,"录制草稿","关闭前暂停录制并保留草稿，稍后可在“录制路网”中恢复。是否关闭？",
+    const auto choice=QMessageBox::question(this,"录制草稿","关闭前暂停录制并保留草稿，稍后可在“录制路径”中恢复。是否关闭？",
                                            QMessageBox::Yes|QMessageBox::No,QMessageBox::No);
     if(choice!=QMessageBox::Yes) {event->ignore();return;}
     roadsPage_->pauseForClose();
@@ -990,12 +1029,38 @@ void PatrolPage::startRun() {
     return;
   }
   if (routeDirty_) { setMessage(QStringLiteral("路线有未保存修改，请先保存"), true); return; }
+  updateActionStates();
+  if(!startButton_->isEnabled()) {setMessage(startButton_->toolTip(),true);return;}
   if (startPermission_) {
     QString reason;
     if (!startPermission_(&reason)) {
       setMessage(reason.isEmpty() ? QStringLiteral("当前不允许启动巡航") : reason, true);
       return;
     }
+  }
+  if(simpleRecordedPath()) {
+    // Every explicit start plans from the current pose afresh.
+    planDigest_.clear();
+    startAfterPlan_=true;const auto generation=++startPlanGeneration_;
+    setMessage("正在检查路径并规划自动接入，请保持车辆静止……",false);
+    client_->roadCommand("PLAN",{{"route_id",currentRouteId_},{"loop_count",loopCount_->value()}});
+    updateActionStates();
+    QTimer::singleShot(20000,this,[this,generation]{
+      if(startAfterPlan_&&generation==startPlanGeneration_) {
+        startAfterPlan_=false;setMessage("路径检查超时，请确认后台状态后重新开始。",true);updateActionStates();
+      }
+    });
+    return;
+  }
+  dispatchRun();
+}
+
+void PatrolPage::dispatchRun() {
+  updateActionStates();
+  if(!startButton_->isEnabled() || (navigationMode_->currentData()=="RECORDED_NETWORK" && planDigest_.isEmpty())) return;
+  if(startPermission_) {
+    QString reason;
+    if(!startPermission_(&reason)) {setMessage(reason,true);return;}
   }
   const auto map = activeMap();
   client_->runRoute(currentRouteId_, activeMapId_, currentRouteRevision_, map.revision,
@@ -1023,6 +1088,7 @@ void PatrolPage::resumeRun() {
 }
 
 void PatrolPage::cancelRun() {
+  if(startAfterPlan_) {startAfterPlan_=false;planDigest_.clear();updateActionStates();setMessage("已取消启动路径检查",false);return;}
   const auto status = client_->status();
   if (status.runId.startsWith(QStringLiteral("return_"))) {
     client_->cancelReturnHome();
@@ -1076,6 +1142,28 @@ PatrolRouteInfo PatrolPage::routeById(const QString &routeId) const {
   return {};
 }
 
+bool PatrolPage::simpleRecordedPath() const {
+  if(navigationMode_->currentData()!="RECORDED_NETWORK" || currentRouteId_.isEmpty()) return false;
+  for(auto value:client_->roadNetworks()) {
+    const auto net=value.toObject();
+    if(net["network_id"]!=routeNetwork_->currentData().toString()) continue;
+    const auto doc=net["document"].toObject(),meta=doc["inspection_path"].toObject();
+    if(meta["route_id"]!=currentRouteId_) return false;
+    const auto edges=doc["edges"].toObject();const auto ids=meta["edge_ids"].toArray();
+    QStringList nodes;
+    for(auto id:ids) {
+      const auto edge=edges[id.toString()].toObject();
+      if(nodes.isEmpty() && !meta["closed"].toBool()) nodes<<edge["from"].toString();
+      nodes<<edge["to"].toString();
+    }
+    if(nodes.size()!=currentSteps_.size()) return false;
+    for(int i=0;i<nodes.size();++i)
+      if(meta["point_ids"].toObject()[nodes[i]].toString()!=currentSteps_[i].pointId) return false;
+    return true;
+  }
+  return false;
+}
+
 void PatrolPage::updateActionStates() {
   const bool available = client_ && client_->available();
   const bool hasMap = !activeMapId_.isEmpty();
@@ -1127,7 +1215,11 @@ void PatrolPage::updateActionStates() {
   const bool fixed=navigationMode_->currentData()=="RECORDED_NETWORK";
   routeNetwork_->setVisible(fixed);previewRecorded_->setVisible(fixed);
   previewRecorded_->setEnabled(!offline_ && !recordingDraft_ && !routeDirty_ && !activeRun && !currentRouteId_.isEmpty() && client_->roadServerReady());
-  if(fixed && planDigest_.isEmpty()) startBlockers << "固定路线尚未验证，请点击“预览实际路线”；缺路时需补录";
+  const bool simple=simpleRecordedPath();
+  loopCount_->setSuffix(simple ? " 趟/圈" : "");
+  loopCount_->setToolTip(simple?"非闭环：1趟到另一端，2趟往返，3趟再去；可从任一端点开始，返程沿原轨迹倒车。闭环每次完整走一圈。0为持续执行。":"0 表示持续循环，其他数字表示执行圈数");
+  if(fixed && planDigest_.isEmpty() && !simple) startBlockers << "固定路线尚未验证，请点击“预览实际路线”；缺路时需补录";
+  if(startAfterPlan_) startBlockers << "正在检查路径，请稍候；可点击取消任务终止启动";
   if(roadsPage_ && roadsPage_->hasDraft()) startBlockers << "录制草稿尚未保存或放弃";
   if (activeRun) {
     startBlockers << (paused ? QStringLiteral("当前任务已暂停，请使用“继续”，或取消后再开始新任务")
@@ -1145,6 +1237,7 @@ void PatrolPage::updateActionStates() {
   const QString startDisabledTip = startBlockers.join('\n');
   startButton_->setEnabled(canStart);
   startButton_->setToolTip(startDisabledTip);
+  resetInterlockButton_->setEnabled(!offline_ && client_->available());
   startReadinessLabel_->setText(
       canStart ? QStringLiteral("启动条件：已就绪，可以点击“开始”")
                : QStringLiteral("启动条件：尚未就绪（%1 项）\n%2")
@@ -1166,7 +1259,7 @@ void PatrolPage::updateActionStates() {
   resumeButton_->setEnabled(!offline_ && available && routeRun && paused &&
                             resumePermitted);
   resumeButton_->setToolTip(resumePermissionTip);
-  cancelButton_->setEnabled(!offline_ && available && activeRun);
+  cancelButton_->setEnabled(!offline_ && available && (activeRun||startAfterPlan_));
   const auto home = client_->homePoint();
   const bool validHome = hasMap && home.exists && home.mapId == activeMapId_;
   const bool returnRunning = activeRun && status.runId.startsWith(QStringLiteral("return_"));
