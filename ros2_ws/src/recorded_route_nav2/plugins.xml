@@ -1,11 +1,15 @@
+<class_libraries>
 <library path="recorded_route_controller">
   <class type="recorded_route_nav2::RecordedController" base_class_type="nav2_core::Controller">
     <description>Ordered progress and live motion permission around RPP.</description>
   </class>
+</library>
+<library path="recorded_route_checkers">
   <class type="recorded_route_nav2::RecordedGoalChecker" base_class_type="nav2_core::GoalChecker">
     <description>Requires ordered path completion before position acceptance.</description>
   </class>
   <class type="recorded_route_nav2::EntryProgressChecker" base_class_type="nav2_core::ProgressChecker">
-    <description>Ordered low-speed entry progress; delegates other navigation to SimpleProgressChecker.</description>
+    <description>Ordered progress for recorded entry and roads; delegates ordinary navigation to SimpleProgressChecker.</description>
   </class>
 </library>
+</class_libraries>

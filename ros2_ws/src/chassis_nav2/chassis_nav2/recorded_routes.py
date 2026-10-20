@@ -64,6 +64,7 @@ def nav2_overlay(executable, source_file, hw):
     parameters = {
         'plugin': 'recorded_route_nav2::RecordedController', 'desired_linear_vel': speed,
         'strict_deviation': 0.20, 'max_heading_error': 0.55,
+        'minimum_turning_radius': hardware_radius(hw),
         'use_rotate_to_heading': False, 'allow_reversing': True,
         'lookahead_dist': 0.35, 'use_velocity_scaled_lookahead_dist': True,
         'lookahead_time': 1.5, 'min_lookahead_dist': 0.15, 'max_lookahead_dist': 0.50,
@@ -74,7 +75,7 @@ def nav2_overlay(executable, source_file, hw):
     }
     result.update({'RecordedRoute.'+key: value for key,value in parameters.items()})
     entry_parameters=dict(parameters, desired_linear_vel=speed, lookahead_dist=.15,
-                          min_lookahead_dist=.08,max_lookahead_dist=.20,lookahead_time=1.0,
+                          min_lookahead_dist=.08,max_lookahead_dist=.40,lookahead_time=1.0,
                           min_approach_linear_velocity=.05,approach_velocity_scaling_dist=.12,
                           regulated_linear_scaling_min_speed=.05,
                           regulated_linear_scaling_min_radius=hardware_radius(hw)*1.25)

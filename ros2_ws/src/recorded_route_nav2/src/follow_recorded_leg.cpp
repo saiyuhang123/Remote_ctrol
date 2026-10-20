@@ -13,6 +13,7 @@
 #include "std_msgs/msg/string.hpp"
 #include "patrol_interfaces/srv/road_command.hpp"
 #include "recorded_route_nav2/geometry.hpp"
+#include "recorded_route_nav2/tracking.hpp"
 
 namespace recorded_route_nav2 {
 using Steady=std::chrono::steady_clock;
@@ -60,7 +61,10 @@ public:
     fault_sub_=node_->create_subscription<std_msgs::msg::String>("/patrol/recorded_controller_fault",10,
       [this](std_msgs::msg::String::ConstSharedPtr msg){
         try {auto value=Json::parse(msg->data);
-          if(value.value("plan_stamp",int64_t(0))==stamp(active_path_.header.stamp)) controller_fault_=value.value("code",std::string());
+          if(value.value("plan_stamp",int64_t(0))==stamp(active_path_.header.stamp)) {
+            controller_fault_=value.value("code",std::string());
+            controller_message_=value.value("message",std::string());
+          }
         } catch(const std::exception &) {}
       });
   }
@@ -114,12 +118,14 @@ public:
         if(!mapsFresh() || age(odom_time_)>1.5) fail("运行 costmap/里程计过期");
         else if(controller_fault_=="COLLISION" || blockedAhead()) {stop_reason_=Stop::OBSTACLE;stopFollow();phase_=Phase::STOP;phase_time_=Steady::now();stable_=Steady::time_point{};}
         else if(follow_done_) {
-          if(follow_result_!=rclcpp_action::ResultCode::SUCCEEDED) fail("路径跟踪失败，禁止自由重规划");
+          if(follow_result_!=rclcpp_action::ResultCode::SUCCEEDED)
+            fail("路径跟踪失败，禁止自由重规划"+
+              (controller_message_.empty()?std::string():"："+controller_fault_+" / "+controller_message_));
           else {
             auto &path=detour_?detour_path_:reference_;
             size_t index=detour_?detour_index_:reference_index_;
             bool entry=ticket_data_["blocks"][block_].value("entry",false);
-            double tolerance=entry?0.06:((!detour_ && block_+1<ticket_data_["blocks"].size())?0.09:0.21);
+            double tolerance=active_tolerance_+.01;
             if(pathLength(path,index)>tolerance+0.05 || dist(current,path.poses.back().pose)>tolerance)
               fail("控制器成功但有序路径进度未完成");
             else if(entry && std::abs(wrap(tf2::getYaw(current.orientation)-tf2::getYaw(path.poses.back().pose.orientation)))>0.15)
@@ -141,9 +147,10 @@ public:
             // Recheck after the physical stop, before releasing the next
             // gear or the recorded road. A business 20cm stop is not enough.
             Pose target=block.contains("entry_target")?fromJson(block["entry_target"]):reference_.poses.back().pose;
-            if(block.value("entry",false) && (dist(current,target)>0.10 ||
-               std::abs(wrap(tf2::getYaw(current.orientation)-tf2::getYaw(target.orientation)))>0.20))
-              fail("自动接入停车后位姿未对齐，已停止任务");
+            if(dist(current,target)>active_tolerance_+.01 ||
+               std::abs(wrap(tf2::getYaw(current.orientation)-tf2::getYaw(target.orientation)))>
+                 (block.value("entry",false)?0.20:0.30))
+              fail("运动段停车后位姿未对齐，已停止任务");
             else {
               block_++;
               if(block_>=ticket_data_["blocks"].size()) {phase_=Phase::COMPLETE;complete_time_=Steady::now();}
@@ -288,8 +295,23 @@ private:
     if(!follow_->action_server_is_ready()) throw std::runtime_error("FollowPath server not ready");
     active_path_=source;active_path_.poses.assign(source.poses.begin()+offset,source.poses.end());
     active_path_.header.stamp=node_->now();active_offset_=offset;
+    for(auto &p:active_path_.poses) p.header=active_path_.header;
+    active_direction_=detour_?1:ticket_data_["blocks"][block_]["direction"].get<int>();
+    if(active_direction_!=geometryDirection(active_path_))
+      throw std::runtime_error("ticket direction contradicts recorded block");
+    double next_length=1e9;
+    if(!detour_ && block_+1<ticket_data_["blocks"].size())
+      next_length=pathLength(makePath(ticket_data_["blocks"][block_+1]["samples"]));
+    // A resumed/rejoined suffix is not a newly recorded short manoeuvre.
+    // Keep the full motion's tolerance budget across action restarts.
+    active_motion_length_=pathLength(source);
+    active_stop_cap_=blockStopCap(active_motion_length_,next_length);
+    bool entry=ticket_data_["blocks"][block_].value("entry",false);
+    active_tolerance_=executionTolerance(
+      entry?.03:((detour_ || block_+1<ticket_data_["blocks"].size())?.08:.20),
+      active_motion_length_,active_stop_cap_);
     follow_done_=false;stopping_=false;follow_handle_.reset();send_pending_=true;
-    controller_fault_.clear();
+    controller_fault_.clear();controller_message_.clear();
     phase_=Phase::FOLLOW;permission(true);
     Follow::Goal goal;goal.path=active_path_;
     goal.controller_id=ticket_data_["blocks"][block_].value("entry",false)?"RecordedEntryRoute":"RecordedRoute";
@@ -327,7 +349,10 @@ private:
     double speed=0.2;
     if(!ticket_data_.is_null() && block_<ticket_data_["blocks"].size()) speed=ticket_data_["blocks"][block_].value("speed",0.2);
     value.data=Json({{"valid",valid},{"plan_stamp",stamp(active_path_.header.stamp)},
-                     {"ticket_id",ticket_},{"speed_limit",std::min(detour_?0.10:0.20,speed)}}).dump();
+                     {"ticket_id",ticket_},{"block",block_},{"direction",active_direction_},
+                     {"stop_tolerance_cap",active_stop_cap_},
+                     {"motion_length",active_motion_length_},
+                     {"speed_limit",std::min(detour_?0.10:0.20,speed)}}).dump();
     permit_pub_->publish(value);
   }
   bool mapsFresh() const {return local_ && global_ && age(local_time_)<2.0 && age(global_time_)<3.0;}
@@ -532,7 +557,9 @@ private:
   rclcpp::Subscription<std_msgs::msg::String>::SharedPtr ctrl_sub_,fault_sub_;
   nav_msgs::msg::OccupancyGrid::ConstSharedPtr local_,global_;nav_msgs::msg::Odometry odom_;
   nav_msgs::msg::Path reference_,active_path_,detour_path_,candidate_,prefix_;
-  Json ticket_data_;std::string ticket_,road_operation_,last_error_,controller_fault_,detour_rejection_,free_reason_;
+  Json ticket_data_;std::string ticket_,road_operation_,last_error_,controller_fault_,controller_message_,detour_rejection_,free_reason_;
+  int active_direction_=0;
+  double active_stop_cap_=0,active_tolerance_=0,active_motion_length_=0;
   Polygon footprint_,region_;
   Phase phase_=Phase::LOAD;Stop stop_reason_=Stop::END;
   bool road_pending_=false,stopping_=false,send_pending_=false,follow_done_=false,plan_done_=false,detour_=false;

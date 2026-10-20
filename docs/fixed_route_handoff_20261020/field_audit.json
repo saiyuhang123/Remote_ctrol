@@ -1,0 +1,222 @@
+{
+  "commit": "397810c",
+  "database_access": "read-only",
+  "route_id": "route_0dcdc506b2ed4ffea873abc35002b6b9",
+  "network_id": "network_c824901c6a9446579b2bfb2737b9fad1",
+  "edge_id": "road_65e85734176c43b4a5cf8e99e40c6484",
+  "blocks": [
+    {
+      "index": 0,
+      "direction": 1,
+      "sample_count": 197,
+      "length_m": 7.201479782493801,
+      "first_pair_body_projection_m": 0.03102893330525441,
+      "net_body_projection_m": 4.079317679721366,
+      "net_lateral_m": 4.165679725121429,
+      "barriers": []
+    },
+    {
+      "index": 1,
+      "direction": -1,
+      "sample_count": 3,
+      "length_m": 0.065364210706185,
+      "first_pair_body_projection_m": -0.02036902059005228,
+      "net_body_projection_m": -0.0407380411801052,
+      "net_lateral_m": 0.05111645568748486,
+      "barriers": []
+    },
+    {
+      "index": 2,
+      "direction": 1,
+      "sample_count": 3,
+      "length_m": 0.08790450670838719,
+      "first_pair_body_projection_m": 0.0375294276546135,
+      "net_body_projection_m": 0.075058855309227,
+      "net_lateral_m": 0.04575336642601739,
+      "barriers": []
+    }
+  ],
+  "runs": [
+    {
+      "run_id": "run_6b0317854844488a94203cf3cce13353",
+      "started_local": "2026-10-20T16:45:35.310113+08:00",
+      "completed_steps": 0,
+      "entry_plan": {
+        "required": true,
+        "target_node": "port_f3518c14e10f455196e87794b689323d",
+        "target_name": "巡检路径 · 点1",
+        "length": 1.7704233932350966,
+        "direction_changes": 1
+      },
+      "last_event": {
+        "block": 0,
+        "detour_index": 0,
+        "entry": true,
+        "error": "路径跟踪失败，禁止自由重规划",
+        "follow_dispatch_pending": false,
+        "follow_goal_id": "d48ef24872402ce746479e99c86ca61b",
+        "reference_index": 1,
+        "rejoin_index": 0,
+        "state": "FAILED",
+        "ticket_id": "leg_dd92f31de0114c86916106a2d9206080",
+        "waiting_reason": "",
+        "received_at": 2409.602342714
+      },
+      "failed_block_length_m": 1.517588134800943,
+      "remaining_at_last_published_progress_m": 1.4927640032427696,
+      "block_sample_count": 62
+    },
+    {
+      "run_id": "run_429243adf6d742fbb185f109c12fee6e",
+      "started_local": "2026-10-20T16:48:49.928445+08:00",
+      "completed_steps": 0,
+      "entry_plan": {
+        "required": true,
+        "target_node": "port_f3518c14e10f455196e87794b689323d",
+        "target_name": "巡检路径 · 点1",
+        "length": 2.3784181344298068,
+        "direction_changes": 0
+      },
+      "last_event": {
+        "block": 0,
+        "detour_index": 0,
+        "entry": true,
+        "error": "路径跟踪失败，禁止自由重规划",
+        "follow_dispatch_pending": false,
+        "follow_goal_id": "1d7a5ec9db572c967c036c6b658135f8",
+        "reference_index": 41,
+        "rejoin_index": 0,
+        "state": "FAILED",
+        "ticket_id": "leg_92dbc307f44c44d3b0b08e7580cb3d5d",
+        "waiting_reason": "",
+        "received_at": 2611.65135924
+      },
+      "failed_block_length_m": 2.3784181344298068,
+      "remaining_at_last_published_progress_m": 1.3625639359547919,
+      "block_sample_count": 97
+    },
+    {
+      "run_id": "run_0131dc12d4df45e399cf081287fb6b97",
+      "started_local": "2026-10-20T16:53:28.382135+08:00",
+      "completed_steps": 0,
+      "entry_plan": {
+        "required": true,
+        "target_node": "port_f3518c14e10f455196e87794b689323d",
+        "target_name": "巡检路径 · 点1",
+        "length": 1.3873009033673072,
+        "direction_changes": 0
+      },
+      "last_event": {
+        "block": 0,
+        "detour_index": 0,
+        "entry": true,
+        "error": "路径跟踪失败，禁止自由重规划",
+        "follow_dispatch_pending": false,
+        "follow_goal_id": "ca300360b2bc84a15372974f5648ce15",
+        "reference_index": 48,
+        "rejoin_index": 0,
+        "state": "FAILED",
+        "ticket_id": "leg_da66c4fe412844f2974f74afa9c4efba",
+        "waiting_reason": "",
+        "received_at": 2897.89452058
+      },
+      "failed_block_length_m": 1.3873009033673072,
+      "remaining_at_last_published_progress_m": 0.1980852830550674,
+      "block_sample_count": 57
+    }
+  ],
+  "raw_tail_evidence": [
+    {
+      "index": 128,
+      "x": 1.1628122204698323,
+      "y": -7.595469827445085,
+      "yaw": -0.8090631689837097,
+      "t": 1792484626.9623666,
+      "v": 0.4364548557579687
+    },
+    {
+      "index": 129,
+      "x": 1.1834326820052827,
+      "y": -7.630302225864427,
+      "yaw": -0.8058837446930133,
+      "t": 1792484627.0609355,
+      "v": 0.3916112513883215
+    },
+    {
+      "index": 130,
+      "x": 1.1823216091736137,
+      "y": -7.667217258858996,
+      "yaw": -0.8046021309654169,
+      "t": 1792484627.2608457,
+      "v": 0.052573260302387646
+    },
+    {
+      "index": 131,
+      "x": 1.1785430412091085,
+      "y": -7.671147513013978,
+      "yaw": -0.8032679793278464,
+      "t": 1792484627.3621142,
+      "v": 0.002801776179649427
+    },
+    {
+      "index": 132,
+      "x": 1.182612408144611,
+      "y": -7.644484942050972,
+      "yaw": -0.8050343350537066,
+      "t": 1792484627.560802,
+      "v": -0.06967369419614287
+    },
+    {
+      "index": 133,
+      "x": 1.1870411163184529,
+      "y": -7.606338078818959,
+      "yaw": -0.8070760659919171,
+      "t": 1792484627.9616263,
+      "v": -0.044951552062486556
+    },
+    {
+      "index": 134,
+      "x": 1.1871770636376964,
+      "y": -7.606227895508092,
+      "yaw": -0.8070331408629815,
+      "t": 1792484628.4661925,
+      "v": 0.0
+    },
+    {
+      "index": 180,
+      "x": 1.1921610465229313,
+      "y": -7.613114163617868,
+      "yaw": -0.8055878904558341,
+      "t": 1792484653.6705186,
+      "v": 0.0
+    },
+    {
+      "index": 181,
+      "x": 1.2719990091950697,
+      "y": -7.628907056146481,
+      "yaw": -0.8007615993581765,
+      "t": 1792484653.8711622,
+      "v": 0.3259025343257387
+    }
+  ],
+  "pure_geometry_counterexample": {
+    "path": "x=0..2m every 0.04m, y=0, yaw=0, direction=+1",
+    "robot_pose": [
+      1.01,
+      0.1,
+      0.0
+    ],
+    "lookahead_m": 0.08,
+    "nearest_path_pose": [
+      1.0,
+      0.0,
+      0.0
+    ],
+    "carrot_in_base": [
+      -0.01,
+      -0.1
+    ],
+    "rpp_direction": -1,
+    "note": "Offline geometric subproblem reproduced; not a recorded real-vehicle pose or full ROS runtime test."
+  }
+}

@@ -44,15 +44,29 @@ def validate_network(doc, radius=0.69):
                 raise PatrolError('INVALID_DATA', '道路方向或采样数量无效')
             for p in block['samples']:
                 pose(p)
+            barriers = block.get('barriers', [])
+            if not isinstance(barriers, list) or any(
+                    type(i) is not int or not 0 <= i < len(block['samples']) for i in barriers):
+                raise PatrolError('INVALID_DATA', '道路不可跳过事件的采样下标无效')
+            window_length = window_along = total_length = total_along = 0.0
             for a, b in zip(block['samples'], block['samples'][1:]):
                 ds = distance(a, b)
                 if ds > 0.20:
                     raise PatrolError('INVALID_DATA', '道路采样过稀，请重新处理')
-                along = (b['x']-a['x'])*math.cos(a['yaw']) + (b['y']-a['y'])*math.sin(a['yaw'])
-                # A sub-baseline step (for example a 5 cm pose correction at a
-                # gear cusp) cannot establish a contradictory road direction.
-                if ds >= DIRECTION_BASELINE and along*block['direction'] < ds*0.6:
-                    raise PatrolError('INVALID_DATA', '道路方向与车体朝向矛盾')
+                yaw = a['yaw'] + .5*angle(b['yaw']-a['yaw'])
+                along = (b['x']-a['x'])*math.cos(yaw) + (b['y']-a['y'])*math.sin(yaw)
+                window_length += ds
+                window_along += along
+                total_length += ds
+                total_along += along
+                # Test a physical baseline, including dense imported paths.
+                # No individual 5cm sample could pass the former 8cm gate.
+                if window_length >= DIRECTION_BASELINE:
+                    if window_along*block['direction'] < window_length*.6:
+                        raise PatrolError('INVALID_DATA', '道路方向与车体朝向矛盾')
+                    window_length = window_along = 0.0
+            if total_length < .003 or total_along*block['direction'] < total_length*.5:
+                raise PatrolError('INVALID_DATA', '道路方向与车体朝向矛盾或有效位移不足')
         validate_blocks(blocks, radius)
         chain = [blocks[0]['samples'][0]] + [b['samples'][-1] for b in blocks]
         for previous, following in zip(blocks, blocks[1:]):
@@ -124,6 +138,13 @@ class NetworkPlanner:
                     continue
                 trimmed = copy.deepcopy(edge)
                 trimmed['blocks'][0]['samples'] = [q] + tail
+                # q is the new sample 0; old sample i+1 becomes sample 1.
+                # Retain an event at q itself when the projection is exactly
+                # an original vertex, instead of moving it to a later visit.
+                trimmed['blocks'][0]['barriers'] = [
+                    j-i for j in edge['blocks'][0].get('barriers', [])
+                    if j > i or (j == i and t <= 1e-9)
+                ]
                 projections.append((d, edge['to'], length([q]+tail), trimmed))
         if projections:
             # Two explicitly recorded directions on the same road are valid

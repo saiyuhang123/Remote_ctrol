@@ -95,6 +95,7 @@ def runtime(tmp_path_factory):
             self.x=self.y=self.yaw=0.;self.v=self.w=0.;self.last=0.;self.history=[]
             self.command_delay=0.;self.speed_deadband=0.;self.steering_rate=0.;self.steer=0.;self.pending_commands=[]
             self.operator=True;self.obstacles=[];self.guard_ready=False;self.progress={}
+            self.controller_progress=[];self.controller_faults=[]
             self.broadcaster=TransformBroadcaster(self);self.static=StaticTransformBroadcaster(self)
             tf=TransformStamped();tf.header.frame_id='map';tf.child_frame_id='odom';tf.transform.rotation.w=1.;tf.header.stamp=self.get_clock().now().to_msg();self.static.sendTransform(tf)
             self.odom=self.create_publisher(Odometry,'/odom',10)
@@ -105,6 +106,10 @@ def runtime(tmp_path_factory):
             self.create_subscription(Bool,'/patrol/guard_ready',lambda msg:setattr(self,'guard_ready',msg.data),10)
             from std_msgs.msg import String
             self.create_subscription(String,'/patrol/recorded_progress',self.on_progress,10)
+            self.create_subscription(String,'/patrol/recorded_controller_progress',
+                                     lambda msg:self.controller_progress.append(json.loads(msg.data)),10)
+            self.create_subscription(String,'/patrol/recorded_controller_fault',
+                                     lambda msg:self.controller_faults.append(json.loads(msg.data)),10)
             self.tick_count=0;self.create_timer(.02,self.tick)
         def on_progress(self,msg):
             self.progress=json.loads(msg.data)
@@ -178,7 +183,8 @@ def runtime(tmp_path_factory):
         wait(lambda:patrol._latest_map is not None)
         yield SimpleNamespace(sim=sim,patrol=patrol,guard=guard,client=client,mapping=mapping,tmp=tmp)
     finally:
-        (tmp/'trace.json').write_text(json.dumps({'history':sim.history,'progress':sim.progress}))
+        (tmp/'trace.json').write_text(json.dumps({'history':sim.history,'progress':sim.progress,
+            'controller_progress':sim.controller_progress,'controller_faults':sim.controller_faults}))
         if patrol._active_engine:
             patrol._active_engine.request_cancel()
             try:wait(lambda:patrol._active_engine is None,10)
@@ -195,7 +201,7 @@ def runtime(tmp_path_factory):
         print('Real Nav2 logs:',tmp)
 
 
-def make_route(rt, coords, stop_indices, loops=1, close_loop=False):
+def make_route(rt, coords, stop_indices, loops=1, close_loop=False, blocks_override=None):
     from robot_patrol.recorded_routes.geometry import motion_blocks
     from robot_patrol.recorded_routes.graph import NetworkPlanner
     from robot_patrol.models import new_id
@@ -208,6 +214,9 @@ def make_route(rt, coords, stop_indices, loops=1, close_loop=False):
         pts=[dict(x=a['x']+(b['x']-a['x'])*j/n,y=a['y']+(b['y']-a['y'])*j/n,
                   yaw=a['yaw']+(b['yaw']-a['yaw'])*j/n) for j in range(n+1)]
         doc['edges'][str(i)]={'id':str(i),'name':str(i),'from':str(i),'to':str(i+1),'blocks':motion_blocks(pts),'speed':.2}
+        if blocks_override is not None:
+            assert len(coords)==2
+            doc['edges'][str(i)]['blocks']=blocks_override
     if close_loop:
         assert coords[0]==coords[-1]
         doc['edges'][str(len(coords)-2)]['to']='0'
@@ -358,6 +367,73 @@ def test_real_entry_with_chassis_delay_deadband_and_steering_rate(runtime):
         assert abs(rt.sim.y)<.15 and abs(math.atan2(math.sin(rt.sim.yaw),math.cos(rt.sim.yaw)))<.25
     finally:
         rt.sim.command_delay=rt.sim.speed_deadband=rt.sim.steering_rate=0.
+
+
+def test_real_entry_lateral_error_larger_than_minimum_lookahead(runtime):
+    from robot_patrol.recorded_routes.geometry import motion_blocks
+    rt=runtime;reset_sim(rt)
+    rt.sim.x=.01;rt.sim.y=.10
+    time.sleep(.4)
+    points=[dict(x=i*.025,y=0.,yaw=0.) for i in range(61)]
+    blocks=motion_blocks(points)
+    blocks[0].update(entry=True, speed=.12)
+    route,plan=make_route(rt,[points[0],points[-1]],[1],blocks_override=blocks)
+    begin=len(rt.sim.history)
+    handle=start_route(rt,route,plan);result=handle.get_result_async();wait(result.done,55)
+    trace=rt.sim.history[begin:]
+    assert result.result().result.success,(result.result().result,rt.sim.progress)
+    assert min(v for _,_,_,v,_ in trace)>=-.005
+    assert abs(rt.sim.y)<.03
+    assert all(abs(w)<=abs(v)/.69+1e-6 for _,_,_,v,w in trace)
+
+
+@pytest.mark.parametrize('case',json.loads(
+    (Path(__file__).parent/'data/recorded_entry_failures.json').read_text()),
+    ids=lambda case:case['name'])
+def test_real_field_entry_paths_with_chassis_delay(runtime,case):
+    rt=runtime;reset_sim(rt)
+    rt.sim.x=case['start']['x'];rt.sim.y=case['start']['y'];rt.sim.yaw=case['start']['yaw']
+    rt.sim.command_delay=.10;rt.sim.speed_deadband=.035;rt.sim.steering_rate=45.;rt.sim.steer=0.
+    time.sleep(.5)
+    try:
+        route,plan=make_route(rt,[case['start'],case['target']],[1],blocks_override=case['blocks'])
+        begin=len(rt.sim.history)
+        handle=start_route(rt,route,plan);result=handle.get_result_async();wait(result.done,65)
+        assert result.result().result.success,(result.result().result,rt.sim.progress)
+        trace=rt.sim.history[begin:]
+        assert math.hypot(rt.sim.x-case['target']['x'],rt.sim.y-case['target']['y'])<.04
+        assert abs(math.atan2(math.sin(rt.sim.yaw-case['target']['yaw']),
+                              math.cos(rt.sim.yaw-case['target']['yaw'])))<.10
+        if all(b['direction']==1 for b in case['blocks']):
+            assert min(p[3] for p in trace)>=-.005
+        (rt.tmp/(case['name']+'.json')).write_text(json.dumps(dict(plan=plan,trace=trace)))
+    finally:
+        rt.sim.command_delay=rt.sim.speed_deadband=rt.sim.steering_rate=0.
+
+
+@pytest.mark.parametrize('reverse_length',[.05,.065364210706185])
+def test_real_short_reverse_is_executed_after_precision_cusp_stop(runtime,reverse_length):
+    from robot_patrol.recorded_routes.geometry import motion_blocks
+    rt=runtime;reset_sim(rt)
+    points=[]
+    for start,end in [(0.,.6),(.6,.6-reverse_length),(.6-reverse_length,.8)]:
+        count=math.ceil(abs(end-start)/.01)
+        for i in range(count+1):
+            p=dict(x=start+(end-start)*i/count,y=0.,yaw=0.)
+            if not points or p!=points[-1]:points.append(p)
+    blocks=motion_blocks(points)
+    assert [b['direction'] for b in blocks]==[1,-1,1]
+    route,plan=make_route(rt,[points[0],points[-1]],[1],blocks_override=blocks)
+    begin=len(rt.sim.history)
+    handle=start_route(rt,route,plan);result=handle.get_result_async();wait(result.done,45)
+    assert result.result().result.success,(result.result().result,rt.sim.progress)
+    trace=rt.sim.history[begin:]
+    reverse=[p for p in trace if p[3]<-.005]
+    assert reverse,'short recorded reversal must not be swallowed by goal tolerance'
+    reverse_travel=sum(-p[3]*.02 for p in reverse)
+    assert reverse_travel>=reverse_length*.70,(reverse_travel,reverse_length)
+    first_reverse=next(i for i,p in enumerate(trace) if p[3]<-.005)
+    assert sum(abs(p[3])<.005 for p in trace[max(0,first_reverse-60):first_reverse])>=35
 
 
 def test_real_nav2_continuous_recorded_path_and_guard_uuid(runtime):
@@ -555,6 +631,26 @@ def test_real_recording_service_round_trip_and_command_retry(runtime):
     finally:
         rt.sim.operator=True;teleop.publish(Twist())
         rt.sim.destroy_client(client);rt.sim.destroy_publisher(teleop)
+
+
+def test_real_inconsistent_field_tail_stops_without_deleting_short_blocks(runtime):
+    rt=runtime;reset_sim(rt)
+    blocks=json.loads((Path(__file__).parent/'data/recorded_field_tail.json').read_text())
+    original=json.dumps(blocks,sort_keys=True)
+    route,plan=make_route(rt,[blocks[0]['samples'][0],blocks[-1]['samples'][-1]],
+                         [1],blocks_override=blocks)
+    handle=start_route(rt,route,plan);result=handle.get_result_async();wait(result.done,40)
+    # Field data contains a 6.5cm reversal with 5.1cm lateral displacement.
+    # A controller fix must not turn this into a falsely completed route.
+    assert not result.result().result.success
+    assert rt.sim.progress['state']=='FAILED'
+    assert '位姿未对齐' in rt.sim.progress['error'] or 'ENDPOINT_UNREACHABLE' in rt.sim.progress['error']
+    assert result.result().result.completed_steps==0
+    assert [b['direction'] for b in plan['legs'][0]['blocks']]==[1,-1,1]
+    assert json.dumps(blocks,sort_keys=True)==original
+    x,y=rt.sim.x,rt.sim.y
+    time.sleep(.8)
+    assert math.hypot(rt.sim.x-x,rt.sim.y-y)<.005 and abs(rt.sim.v)<.005
 
 
 def test_real_operator_loss_while_blocked_latches_and_interrupts(runtime):

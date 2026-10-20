@@ -54,6 +54,40 @@ def test_no_reverse_connection_and_no_free_fallback():
         NetworkPlanner(doc).plan(steps('A','C','B'),dict(x=0.,y=0.,yaw=0.))
 
 
+@pytest.mark.parametrize('spacing', [.01, .025, .05])
+def test_dense_import_cannot_hide_wrong_block_direction(spacing):
+    doc = network()
+    block = doc['edges']['AB']['blocks'][0]
+    block['samples'] = [dict(x=i*spacing, y=0., yaw=0.)
+                        for i in range(round(1/spacing)+1)]
+    block['direction'] = -1
+    with pytest.raises(PatrolError, match='方向'):
+        validate_network(doc)
+
+
+@pytest.mark.parametrize('barriers', [[-1], [10000], [1.5], [True], '3'])
+def test_invalid_barrier_indices_are_rejected(barriers):
+    doc = network()
+    doc['edges']['AB']['blocks'][0]['barriers'] = barriers
+    with pytest.raises(PatrolError, match='下标'):
+        validate_network(doc)
+
+
+def test_midroad_entry_remaps_barriers_to_the_same_original_pose():
+    doc = network()
+    # Only one recorded direction, making this entry unambiguous.
+    doc['edges'] = {'AB': doc['edges']['AB']}
+    old = doc['edges']['AB']['blocks'][0]
+    old['barriers'] = [2, 12, 18]
+    original = copy.deepcopy(old)
+    planner = NetworkPlanner(doc)
+    _, _, prefix = planner.start_candidates(dict(x=.43, y=0., yaw=0.))[0]
+    trimmed = prefix[0]['blocks'][0]
+    assert [trimmed['samples'][i] for i in trimmed['barriers']] == [
+        old['samples'][12], old['samples'][18]]
+    assert old == original
+
+
 def test_same_xy_different_heading_does_not_create_a_junction():
     doc=network()
     doc['nodes']['B2']=dict(id='B2',name='B2',x=1.,y=0.,yaw=math.pi)

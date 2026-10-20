@@ -2,15 +2,17 @@
 
 ROS2 Humble 插件包；由 `enable_recorded_routes:=true` 按需加载，默认导航不依赖它。
 
-- `recorded_route_nav2::RecordedController`：保留不可变运动段和单调进度，将局部窗口交给已安装的 RPP；限制轨迹偏离、朝向及运动方向，检查 BT 运动授权是否新鲜。
-- `recorded_route_nav2::RecordedGoalChecker`：完整段剩余弧长和实际位置必须同时满足容差，防止闭环刚启动就成功。业务目标 0.20m，换向/绕行重入 0.08m。
+- `recorded_route_nav2::RecordedController`：保留不可变运动段，以连续线段投影维护单调弧长进度。`OrderedPursuit` 复用已安装 Humble RPP 的调速、坐标变换及碰撞预测，按路径弧长选前视点，并在碰撞预测之前使用票据方向和硬件可行曲率。横向误差超过最小前视距离时，不再误选车后的最近采样点而自行倒车。方向由票据明确授权，并用各采样区间在车头方向上的累计位移核对，不能用首尾弦长替代。限制轨迹偏离、朝向及授权新鲜度；端点已在允许运动方向后方且未满足到达条件时停止报错。
+- `recorded_route_nav2::RecordedGoalChecker`：完整段剩余弧长和实际位置必须同时满足容差，防止闭环刚启动就成功。业务目标上限 0.20m，换向/绕行重入上限 0.08m。实际位置容差还取当前段及下一段长度的 1/8 上限，避免长段提前停车吞掉随后几厘米的真实倒车；换向前仍需确认停稳。
 - `recorded_route_nav2::RecordedEntryPlanner`：独立的 `RecordedEntry` 全局规划器，优先使用精确 Reeds-Shepp 连接；有障碍时在连续 SE(2) 空间使用 RRTConnect 搜索，仍以 Reeds-Shepp 作为运动连接，并在每次连接中检查完整车身。完整车身栅格检查拒绝障碍、未知和越界；搜索检查间隔不超过 2cm，求解限时 2.5s，仅接受精确到达端点的解；返回连续车头朝向并采样到每个换向边界，避免直接使用角度离散后的短掉头轨迹。接入跟踪使用同一 RecordedController 的独立实例 `RecordedEntryRoute`，配置较短前视距离和低速接近参数，前进上限 0.20m/s、倒车上限 0.12m/s；规划半径留 25% 跟踪余量。独立 `recorded_entry_checker` 要求有序剩余距离、位置 0.03m 和朝向 0.08rad 同时满足，不进行原地转向。停车后再校验接入端点，接入遇障停车等待。
-- `recorded_route_nav2::EntryProgressChecker`：Humble 的单进度检查入口中，接入控制器使用有序弧长进度（20s 内至少推进 5cm），避免低速倒车被默认的 50cm 进度门槛误判；其他导航委托原 SimpleProgressChecker，参数保持原值。
+- `recorded_route_nav2::EntryProgressChecker`：Humble 的单进度检查入口中，接入和录制道路控制器均使用有序弧长进度（20s 内至少推进 `min(2cm, 段长/4)`），避免低速倒车被默认的 50cm 进度门槛误判；其他导航委托原 SimpleProgressChecker，参数保持原值。
 - `recorded_route_bt` 中的 `FollowRecordedLeg`：从 robot_patrol 加载当前真实 Nav2 goal UUID 授权的道路票据，通过真实 FollowPath 跟踪；确认停稳后换向，到障碍前停车，调用独立 RecordedDetour Smac 规划器生成候选（直接及左右侧引导）并严格校验；直道还提供经过同样校验的精确阿克曼圆弧变道候选，回归后继续原参考段。
 
 插件不直接发布 `/cmd_vel`。速度经过现有 controller_server → velocity_smoother → twist_mux → 底盘桥；guard 继续校验外层 NavigateToPose UUID。每次尝试生成私有、原子写入的 BT XML，终止后删除；外层和内部 FollowPath 都确认停止后才释放执行权。
 
-`/patrol/recorded_motion_permit` 带当前计划时间戳，有效期 0.6s。BT/票据服务失联会停止内部跟踪；执行器另行检查 FollowPath 取消结果，内部停车未确认也进入既有 guard 联锁。此机制不取代独立 guard。
+`/patrol/recorded_motion_permit` 带当前计划时间戳、ticket、block、明确方向、速度、完整运动段长度及停车容差上限，有效期 0.6s。恢复/绕行回归后的剩余路径继承完整段的容差预算，不能当作新的短换向段。BT/票据服务失联会停止内部跟踪；执行器另行检查 FollowPath 取消结果，内部停车未确认也进入既有 guard 联锁。此机制不取代独立 guard。BT 与控制器须一起更新并重启 Nav2，旧 permit 不含必要字段会被拒绝。
+
+`/patrol/recorded_controller_fault` 包含故障码、原始原因、ticket/block、controller、方向、参考进度、横向误差和前视点，避免把 BT 节点名 `recorded_leg_N` 误当作第 N 个巡检点。控制器与 goal/progress checker 分别安装为独立动态库，共用进度库，兼容 Humble 的 pluginlib 加载顺序。
 
 局部/全局代价地图必须新鲜；当前跟踪前方扫掠在局部和全局地图同时检查。完整候选在全局动态障碍地图检查，并在局部地图覆盖范围内额外核对局部障碍；未覆盖的后续候选不会被当作局部已观测，行驶接近后仍需通过新鲜局部检查。全局未知栅格、车身扫掠碰撞和允许区域外一律拒绝。
 
