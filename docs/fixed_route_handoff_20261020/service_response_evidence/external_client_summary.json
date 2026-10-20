@@ -1,0 +1,18 @@
+{
+  "external-road-service-soak.jsonl": {
+    "calls": 835,
+    "success": 815,
+    "failed": 20,
+    "first_failure_at_sec": 532.83,
+    "last_success_at_sec": 899.98,
+    "note": "The test server shut down near the end; late failures are expected after teardown."
+  },
+  "external-road-service-soak2.jsonl": {
+    "calls": 539,
+    "success": 525,
+    "failed": 14,
+    "first_failure_at_sec": 532.25,
+    "last_success_at_sec": 528.21,
+    "note": "The test server shut down near the end; late failures are expected after teardown."
+  }
+}
