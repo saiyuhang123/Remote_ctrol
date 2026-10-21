@@ -76,7 +76,7 @@ stamp_ns  点云时间戳
 pose      4x4 T_lio_odom_body
 ```
 
-关键帧触发条件：移动超过 0.8 m、转动超过 12°，或非静止状态持续 2 秒。  
+关键帧触发条件：移动超过 0.8 m、转动超过 12°，或非静止状态持续 2 秒。
 纯停车不会生成重复关键帧。
 
 ## 阶段 2：ICP 回环检测 + 位姿图优化 + 重建 PCD
@@ -120,7 +120,7 @@ offline_outputs/fastlio_bag_full/keyframes/loop_closure/
 ./scripts/offline_fastlio/run_loop_closure.sh   /home/jkbot/Remote_ctrol/offline_outputs/fastlio_bag_full4/keyframes   --manual-start-end   --manual-submap-half 10   --manual-min-fitness 0.35   --manual-max-rmse 0.55   --map-voxel 0.10
 ```
 
-这条命令强制取 `最后一帧 -> 第一帧` 做一次 ICP，适合只有一处大闭环的场景。  
+这条命令强制取 `最后一帧 -> 第一帧` 做一次 ICP，适合只有一处大闭环的场景。
 它不会伪造水平闭合：如果 bag 终点离起点还有一段距离，`diagnostics.json` 会保留水平残差。当前这个 bag 的实际结果是：
 
 ```text

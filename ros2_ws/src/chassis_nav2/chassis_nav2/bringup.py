@@ -296,6 +296,7 @@ def configure(context):
             'broadcast_lio_frame': source != 'lio',
             'odom_source': source,
             'initial_base_z': float(-base_body[2, 3])}
+    loop_closure_node = None
     if mode == 'mapping':
         if not args['pcd_map']:
             raise ValueError('建图需要 pcd_map:=/绝对路径/site.pcd 作为保存路径')
@@ -305,13 +306,40 @@ def configure(context):
             backup = output.with_name(f"{output.stem}_{datetime.now():%Y%m%d_%H%M%S}{output.suffix}")
             output.rename(backup)
             print(f'[bringup] 旧地图已备份为 {backup.name}，本次建图保存到 {output.name}')
-        fast['map_file_path'] = str(output)
+        # FAST-LIO's own PCD is the raw incremental map. The live loop-closure
+        # node owns the final path and writes the 6DoF-corrected map there.
+        raw_output = output.with_name(f'{output.stem}_fastlio_raw{output.suffix}')
+        fast['map_file_path'] = str(raw_output)
+        loop_closure_node = Node(
+            package='fastlio_loop_closure', executable='live_loop_closure',
+            name='fastlio_loop_closure', output='screen',
+            parameters=[{
+                'output_map_path': str(output),
+                'keyframe_distance': 0.8,
+                'keyframe_angle_deg': 12.0,
+                'keyframe_max_gap_sec': 2.0,
+                'stationary_distance': 0.15,
+                'stationary_angle_deg': 2.0,
+                'search_radius': 12.0,
+                'min_time_diff_sec': 300.0,
+                'min_index_diff': 30,
+                'submap_half_window': 5,
+                'min_fitness': 0.35,
+                'max_rmse': 0.50,
+                'max_loops': 20,
+                'try_start_end_on_save': True,
+                'map_voxel': 0.10,
+                'save_keyframe_voxel': 0.10,
+            }],
+        )
     else:
         fast['map_file_path'] = existing_file(args['pcd_map'], '定位 PCD 地图')
         if Path(fast['map_file_path']).stat().st_size == 0:
             raise ValueError(f"定位 PCD 地图为空：{fast['map_file_path']}；请重新建图保存，或选择同一地图对应的有效 PCD/PGM/YAML，不能只使用栅格文件")
     nodes.append(Node(package='fast_lio_localization', executable='fastlio_mapping', name='fast_lio_mapping',
                       parameters=[profile_path, fast], output='screen'))
+    if loop_closure_node is not None:
+        nodes.append(loop_closure_node)
     nodes.append(Node(package='chassis_nav2', executable='lio_odometry.py',
         parameters=[{'base_from_body_matrix': base_body.reshape(-1).tolist(),
                      'odom_topic': '/odom' if source == 'lio' else '/odom_lio',

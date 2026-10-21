@@ -116,6 +116,7 @@ struct RosAdapter::Impl {
     navigation = rclcpp_action::create_client<Navigate>(node, "/navigate_to_pose");
     // Keep clients alive so DDS discovery completes before an operator clicks.
     clients["/map_save"] = node->create_client<std_srvs::srv::Trigger>("/map_save");
+    clients["/loop_closure/save_map"] = node->create_client<std_srvs::srv::Trigger>("/loop_closure/save_map");
     for (const auto *command : {"login", "start_stream", "stop_stream"}) {
       const auto name = std::string("/hk_camera/") + command;
       clients[name] = node->create_client<std_srvs::srv::Trigger>(name);
@@ -525,7 +526,13 @@ void RosAdapter::recognize() {
 void RosAdapter::saveState(const QString &backend, const QString &prefix) {
   if (backend == "fastlio") {
     auto req = std::make_shared<std_srvs::srv::Trigger::Request>();
-    impl_->request<std_srvs::srv::Trigger>("save_state", "/map_save", req, [this](auto r) { emit requestFinished("save_state", r->success, QString::fromStdString(r->message)); });
+    // In mapping mode the live 6DoF backend overlaps FAST-LIO and writes the
+    // corrected map to the same prefix. Prefer it; fall back to raw FAST-LIO
+    // for older sessions or if the live backend is not running.
+    const QString save_service = impl_->clients.at("/loop_closure/save_map")->service_is_ready()
+        ? "/loop_closure/save_map" : "/map_save";
+    impl_->request<std_srvs::srv::Trigger>("save_state", save_service.toStdString(), req,
+        [this](auto r) { emit requestFinished("save_state", r->success, QString::fromStdString(r->message)); });
   }
 #ifdef DESKTOP_HAS_SLAM_TOOLBOX
   else if (backend == "slam_toolbox") {

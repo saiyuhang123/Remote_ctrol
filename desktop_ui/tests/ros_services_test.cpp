@@ -214,6 +214,24 @@ time.sleep(30)
     QFile result(marker); QVERIFY(result.open(QIODevice::ReadOnly));
     QCOMPARE(result.readAll(), QByteArray("snapshot preserved"));
   }
+  void mapSavePrefersLiveLoopClosureService() {
+    FixtureExecutor fixture;
+    std::atomic_int raw_calls{0}, corrected_calls{0};
+    auto raw = mockService<std_srvs::srv::Trigger>(fixture.node, "/map_save", [&raw_calls](auto, auto r) {
+      ++raw_calls; r->success = true; r->message = "raw";
+    });
+    auto corrected = mockService<std_srvs::srv::Trigger>(fixture.node, "/loop_closure/save_map", [&corrected_calls](auto, auto r) {
+      ++corrected_calls; r->success = true; r->message = "corrected";
+    });
+    fixture.start(); RosAdapter adapter(config()); QSignalSpy results(&adapter, &RosAdapter::requestFinished);
+    QTest::qWait(400);
+    adapter.saveState("fastlio", "/tmp/desktop_map");
+    QTRY_COMPARE_WITH_TIMEOUT(results.size(), 1, 3000);
+    QVERIFY(results.last().at(1).toBool());
+    QCOMPARE(raw_calls.load(), 0);
+    QCOMPARE(corrected_calls.load(), 1);
+  }
+
   void mapSaveUsesBackendServiceTypes() {
     FixtureExecutor fixture;
     auto trigger = mockService<std_srvs::srv::Trigger>(fixture.node, "/map_save", [](auto, auto r) { r->success = true; r->message = "mock PCD saved"; });
