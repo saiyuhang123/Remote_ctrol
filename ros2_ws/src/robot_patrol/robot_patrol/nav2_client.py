@@ -29,8 +29,8 @@ def quaternion_to_yaw(q) -> float:
 class Nav2Driver:
     def __init__(self, node: Node, action_name: str = "/navigate_to_pose",
                  map_frame: str = "map", base_frame: str = "base_link",
-                 point_timeout: float = 300.0, settle_timeout: float = 10.0,
-                 settle_linear: float = 0.03, settle_angular: float = 0.05,
+                 point_timeout: float = 300.0, settle_timeout: float = 20.0,
+                 settle_linear: float = 0.10, settle_angular: float = 0.12,
                  settle_duration: float = 0.8, feedback_max_age: float = 1.5,
                  tf_max_age: float = 1.5, resume_position_tolerance: float = 0.5,
                  resume_yaw_tolerance: float = 0.35,

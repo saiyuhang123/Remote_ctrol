@@ -18,6 +18,7 @@
 #include "hk_camera/srv/set_ptz_pose.hpp"
 #include "hk_camera/srv/get_ptz_pose.hpp"
 #include "hk_camera/srv/control_ptz.hpp"
+#include "hk_camera/srv/ptz_preset.hpp"
 
 namespace hk_camera
 {
@@ -98,6 +99,9 @@ private:
     void onGetPTZPose(
         const srv::GetPTZPose::Request::SharedPtr req,
         srv::GetPTZPose::Response::SharedPtr res);
+    void onPTZPreset(
+        const srv::PTZPreset::Request::SharedPtr req,
+        srv::PTZPreset::Response::SharedPtr res);
     void onControlPTZ(const srv::ControlPTZ::Request::SharedPtr req,
                       srv::ControlPTZ::Response::SharedPtr res);
     bool stopPTZ();
@@ -151,6 +155,7 @@ private:
     rclcpp::Service<srv::CapturePicture>::SharedPtr           capture_srv_;
     rclcpp::Service<srv::SetPTZPose>::SharedPtr               set_ptz_pose_srv_;
     rclcpp::Service<srv::GetPTZPose>::SharedPtr               get_ptz_pose_srv_;
+    rclcpp::Service<srv::PTZPreset>::SharedPtr                ptz_preset_srv_;
     rclcpp::Service<srv::ControlPTZ>::SharedPtr               control_ptz_srv_;
     rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr        login_srv_;
     rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr        logout_srv_;

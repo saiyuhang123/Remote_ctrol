@@ -372,7 +372,7 @@ def test_storage_fixed_mode_revision_and_backup(tmp_path):
     store._conn.execute('UPDATE schema_version SET version=2')
     store.close()
     store=PatrolStore(path)
-    assert list(tmp_path.glob('*.pre_v3.*.bak'))
+    assert list(tmp_path.glob('*.pre_v*.*.bak'))
     assert store.get_route(route.route_id).network_id==net['network_id']
     store.close()
 

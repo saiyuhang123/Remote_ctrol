@@ -6,9 +6,12 @@ robot_patrol:
     base_frame: "base_link"
     point_timeout_sec: 300.0
     cancel_confirm_timeout_sec: 2.0
-    settle_timeout_sec: 10.0
-    settle_linear_threshold: 0.03
-    settle_angular_threshold: 0.05
+    # Real-car odometry at standstill can retain a small nonzero twist.
+    # Wait longer and treat <=0.10 m/s, <=0.12 rad/s as stopped for 0.8 s.
+    # This is only the post-Nav2 settle check; Nav2 goal checking remains 10cm/50°.
+    settle_timeout_sec: 20.0
+    settle_linear_threshold: 0.10
+    settle_angular_threshold: 0.12
     # Only /patrol/save_current_point: tolerate low-speed odometry jitter.
     # Units: m/s and rad/s. Both absolute speeds must be within their limits.
     # These do not relax arrival, return-home or patrol_guard stop checks.
@@ -30,6 +33,26 @@ robot_patrol:
     return_cancel_timeout_sec: 15.0
     # Empty means derive from ROBOT_PROJECT_ROOT (or ~/Remote_ctrol).
     web_map_dir: ""
+    # Point inspection actions: PTZ move -> capture -> online vision recognition.
+    # The API key stays in a local file outside git (default /home/jkbot/dshapi).
+    inspection_image_dir: "~/.local/share/robot_patrol/inspections"
+    inspection_service_timeout_sec: 5.0
+    inspection_capture_timeout_sec: 15.0
+    inspection_recognition_timeout_sec: 150.0
+    # Device cannot report absolute pan/tilt. Presets are device-side,
+    # repeatable positions; wait this long for the camera to finish moving.
+    inspection_preset_settle_sec: 5.0
+    inspection_preset_service: "/hk_camera/preset"
+    inspection_capture_service: "/hk_camera/capture"
+    inspection_recognition_service: "/vision/recognize_image"
+    inspection_default_prompt: |
+      只按以下5行输出，每行都必须保留，没有识别到的内容写“无”；
+      不要Markdown、不要编号、不要额外解释、不要描述背景、纸箱、货物或场景，不要推测：
+      设备状态：
+      仪表读数：
+      指示灯：
+      告警文字：
+      明显异常：
 
 inspection_recorder:
   ros__parameters:

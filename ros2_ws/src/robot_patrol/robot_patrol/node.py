@@ -25,13 +25,15 @@ from .tf_feedback import TfFeedback
 
 from patrol_interfaces.action import ReturnHome, RunRoute
 from patrol_interfaces.msg import (
-    ExecutorHeartbeat, MapBinding, PatrolPoint, PatrolRoute, PatrolStatus, RouteStep, RunRecord,
+    ExecutorHeartbeat, InspectionResult as InspectionResultMsg,
+    MapBinding, PatrolPoint, PatrolRoute, PatrolStatus, RouteStep, RunRecord,
 )
 from patrol_interfaces.srv import (
     ControlRun,
     DeletePoint,
     DeleteRoute,
     GetHomePoint,
+    GetInspectionResults,
     GetRuns,
     ListMaps,
     ListPoints,
@@ -55,6 +57,7 @@ from .models import PatrolError, Point, RouteSnapshot, new_id, now_ns, require_f
 from .nav2_client import Nav2Driver, quaternion_to_yaw
 from .store import PatrolStore
 from .recorded_routes.component import RoadComponent
+from .inspection_client import InspectionClient
 
 
 def stamp_from_ns(value: int) -> TimeMsg:
@@ -105,9 +108,9 @@ class PatrolNode(Node):
         self.declare_parameter("base_frame", "base_link")
         self.declare_parameter("point_timeout_sec", 300.0)
         self.declare_parameter("cancel_confirm_timeout_sec", 2.0)
-        self.declare_parameter("settle_timeout_sec", 10.0)
-        self.declare_parameter("settle_linear_threshold", 0.03)
-        self.declare_parameter("settle_angular_threshold", 0.05)
+        self.declare_parameter("settle_timeout_sec", 20.0)
+        self.declare_parameter("settle_linear_threshold", 0.10)
+        self.declare_parameter("settle_angular_threshold", 0.12)
         self.declare_parameter("record_point_linear_threshold", 0.08)
         self.declare_parameter("record_point_angular_threshold", 0.10)
         self.declare_parameter("settle_duration_sec", 0.8)
@@ -131,6 +134,20 @@ class PatrolNode(Node):
         self.declare_parameter('recorded_detour_max_skip', 4.0)
         self.declare_parameter('recorded_detour_max_length', 10.0)
         self.declare_parameter('recorded_obstacle_wait_timeout', 120.0)
+        self.declare_parameter('inspection_image_dir',
+                               str(Path.home() / '.local/share/robot_patrol/inspections'))
+        self.declare_parameter('inspection_service_timeout_sec', 5.0)
+        self.declare_parameter('inspection_capture_timeout_sec', 15.0)
+        self.declare_parameter('inspection_recognition_timeout_sec', 150.0)
+        self.declare_parameter('inspection_preset_settle_sec', 5.0)
+        self.declare_parameter('inspection_preset_service', '/hk_camera/preset')
+        self.declare_parameter('inspection_capture_service', '/hk_camera/capture')
+        self.declare_parameter('inspection_recognition_service', '/vision/recognize_image')
+        self.declare_parameter(
+            'inspection_default_prompt',
+            '只按以下5行输出，每行都必须保留，没有识别到的内容写“无”；'
+            '不要Markdown、不要编号、不要额外解释、不要描述背景、纸箱、货物或场景，不要推测：\n'
+            '设备状态：\n仪表读数：\n指示灯：\n告警文字：\n明显异常：')
 
         self._callback_group = ReentrantCallbackGroup()
         self._instance_id = "patrol_" + uuid.uuid4().hex
@@ -245,6 +262,8 @@ class PatrolNode(Node):
         service(DeleteRoute, "/patrol/delete_route", self._on_delete_route)
         service(ControlRun, "/patrol/control", self._on_control)
         service(GetRuns, "/patrol/get_runs", self._on_get_runs)
+        service(GetInspectionResults, "/patrol/get_inspection_results",
+                self._on_get_inspection_results)
         service(GetHomePoint, "/patrol/get_home_point", self._on_get_home_point)
         service(SetHomePoint, "/patrol/set_home_point", self._on_set_home_point)
 
@@ -260,6 +279,8 @@ class PatrolNode(Node):
         self._publish_last_status()
         self._publish_executor_heartbeat()
         self.roads = RoadComponent(self)
+        self._inspection_client = InspectionClient(
+            self, self._store, callback_group=self._callback_group)
 
     def destroy_node(self):
         feedback = getattr(self, '_tf_feedback', None)
@@ -291,6 +312,9 @@ class PatrolNode(Node):
         message.source = point.source
         message.sampled_at = stamp_from_ns(point.sampled_at_ns)
         message.revision = int(point.revision)
+        message.inspection_enabled = bool(point.inspection_enabled)
+        message.ptz_preset = int(point.ptz_preset)
+        message.recognition_prompt = str(point.recognition_prompt or "")
         return message
 
     def _to_ros_route(self, route) -> PatrolRoute:
@@ -312,6 +336,9 @@ class PatrolNode(Node):
             item.y = float(step.y)
             item.yaw = float(step.yaw)
             item.dwell_seconds = float(step.dwell_seconds)
+            item.inspection_enabled = bool(step.inspection_enabled)
+            item.ptz_preset = int(step.ptz_preset)
+            item.recognition_prompt = str(step.recognition_prompt or "")
             message.steps.append(item)
         return message
 
@@ -351,6 +378,27 @@ class PatrolNode(Node):
         message.map_revision = int(record.map_revision)
         message.started_at = stamp_from_ns(record.started_at_ns)
         message.finished_at = stamp_from_ns(record.finished_at_ns)
+        return message
+
+    def _to_ros_inspection_result(self, result) -> InspectionResultMsg:
+        message = InspectionResultMsg()
+        message.result_id = result.result_id
+        message.run_id = result.run_id
+        message.map_id = result.map_id
+        message.point_id = result.point_id
+        message.point_name = result.point_name
+        message.loop_index = int(result.loop_index)
+        message.step_index = int(result.step_index)
+        message.started_at = stamp_from_ns(result.started_at_ns)
+        message.finished_at = stamp_from_ns(result.finished_at_ns)
+        message.ptz_preset = int(result.ptz_preset)
+        message.prompt = result.prompt
+        message.image_path = result.image_path
+        message.text = result.text
+        message.model = result.model
+        message.success = bool(result.success)
+        message.error_code = result.error_code
+        message.message = result.message
         return message
 
     # ---------------------------------------------------------------- callbacks
@@ -765,6 +813,8 @@ class PatrolNode(Node):
             point = self._store.upsert_point(
                 request.point_id, request.map_id, request.name, request.x, request.y,
                 request.yaw, "manual", now_ns(), request.expected_revision,
+                request.inspection_enabled, request.ptz_preset,
+                request.recognition_prompt,
             )
             response.point = self._to_ros_point(point)
             response.success = True
@@ -831,7 +881,8 @@ class PatrolNode(Node):
             x, y, yaw, stamp_ns = self._current_pose()
             point = self._store.upsert_point(
                 "", map_entry.map_id, request.name, x, y, yaw, "current_pose",
-                stamp_ns, 0,
+                stamp_ns, 0, request.inspection_enabled, request.ptz_preset,
+                request.recognition_prompt,
             )
             if request.request_id:
                 self._request_cache[request.request_id] = point
@@ -975,6 +1026,18 @@ class PatrolNode(Node):
         try:
             runs = self._store.list_runs(request.map_id, request.route_id, request.limit)
             response.runs = [self._to_ros_run(item) for item in runs]
+            response.success = True
+            response.message = "ok"
+        except PatrolError as error:
+            response.success = False
+            response.message = error.message
+        return response
+
+    def _on_get_inspection_results(self, request, response):
+        try:
+            results = self._store.list_inspection_results(
+                request.map_id, request.run_id, request.limit)
+            response.results = [self._to_ros_inspection_result(item) for item in results]
             response.success = True
             response.message = "ok"
         except PatrolError as error:
@@ -1167,6 +1230,7 @@ class PatrolNode(Node):
                 settle_timeout=float(self.get_parameter("settle_timeout_sec").value),
                 point_timeout=float(self.get_parameter("point_timeout_sec").value),
                 min_dispatch_interval=float(self.get_parameter("min_dispatch_interval_sec").value),
+                inspection_cb=self._inspection_client.run,
             )
             with self._run_lock:
                 safety_reason = self._safety_interrupt_reason

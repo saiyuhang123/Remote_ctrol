@@ -5,3 +5,6 @@ float64 x
 float64 y
 float64 yaw
 float64 dwell_seconds
+bool inspection_enabled
+uint8 ptz_preset
+string recognition_prompt

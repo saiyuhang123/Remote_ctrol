@@ -5,6 +5,9 @@ float64 x
 float64 y
 float64 yaw
 uint64 expected_revision
+bool inspection_enabled
+uint8 ptz_preset
+string recognition_prompt
 ---
 bool success
 string message

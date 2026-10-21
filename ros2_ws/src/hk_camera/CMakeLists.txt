@@ -40,6 +40,7 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "srv/CapturePicture.srv"
   "srv/SetPTZPose.srv"
   "srv/GetPTZPose.srv"
+  "srv/PTZPreset.srv"
   "srv/ControlPTZ.srv"
   "srv/RunMission.srv"
   DEPENDENCIES builtin_interfaces sensor_msgs geometry_msgs std_msgs

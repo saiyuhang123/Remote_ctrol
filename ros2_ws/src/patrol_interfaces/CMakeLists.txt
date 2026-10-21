@@ -10,6 +10,7 @@ find_package(std_msgs REQUIRED)
 rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/MapBinding.msg"
   "msg/PatrolPoint.msg"
+  "msg/InspectionResult.msg"
   "msg/RouteStep.msg"
   "msg/PatrolRoute.msg"
   "msg/PatrolStatus.msg"
@@ -28,6 +29,7 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "srv/DeleteRoute.srv"
   "srv/ControlRun.srv"
   "srv/GetRuns.srv"
+  "srv/GetInspectionResults.srv"
   "srv/ResetInterlock.srv"
   "srv/GetHomePoint.srv"
   "srv/SetHomePoint.srv"

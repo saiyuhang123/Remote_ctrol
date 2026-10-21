@@ -13,6 +13,7 @@ from .recorded_routes.storage import RoadStorage
 
 from .models import (
     HomePoint,
+    InspectionResult,
     InspectionSummary,
     MapBinding,
     PatrolError,
@@ -22,11 +23,12 @@ from .models import (
     RunRecord,
     new_id,
     now_ns,
+    validate_inspection_settings,
     validate_name,
     validate_route_steps,
 )
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 5
 
 
 class PatrolStore(RoadStorage):
@@ -45,7 +47,7 @@ class PatrolStore(RoadStorage):
                 self._conn.close()
                 raise RuntimeError('Database schema is newer than supported')
             if previous and int(previous[0]) < SCHEMA_VERSION:
-                backup = sqlite3.connect(self.path + f'.pre_v3.{time.time_ns()}.bak')
+                backup = sqlite3.connect(self.path + f'.pre_v{int(previous[0])}.{time.time_ns()}.bak')
                 try:
                     self._conn.backup(backup)
                 finally:
@@ -114,7 +116,10 @@ class PatrolStore(RoadStorage):
                     sampled_at INTEGER NOT NULL,
                     revision INTEGER NOT NULL DEFAULT 1,
                     created_at INTEGER NOT NULL,
-                    updated_at INTEGER NOT NULL
+                    updated_at INTEGER NOT NULL,
+                    inspection_enabled INTEGER NOT NULL DEFAULT 0,
+                    ptz_preset INTEGER NOT NULL DEFAULT 0,
+                    recognition_prompt TEXT NOT NULL DEFAULT ''
                 );
                 CREATE INDEX IF NOT EXISTS idx_points_map ON points(map_id);
 
@@ -196,6 +201,30 @@ class PatrolStore(RoadStorage):
                     updated_at INTEGER NOT NULL
                 );
 
+                CREATE TABLE IF NOT EXISTS inspection_results (
+                    result_id TEXT PRIMARY KEY,
+                    run_id TEXT NOT NULL REFERENCES runs(run_id) ON DELETE CASCADE,
+                    map_id TEXT NOT NULL,
+                    point_id TEXT NOT NULL,
+                    point_name TEXT NOT NULL DEFAULT '',
+                    loop_index INTEGER NOT NULL,
+                    step_index INTEGER NOT NULL,
+                    started_at INTEGER NOT NULL,
+                    finished_at INTEGER NOT NULL DEFAULT 0,
+                    ptz_preset INTEGER NOT NULL DEFAULT 0,
+                    prompt TEXT NOT NULL DEFAULT '',
+                    image_path TEXT NOT NULL DEFAULT '',
+                    text TEXT NOT NULL DEFAULT '',
+                    model TEXT NOT NULL DEFAULT '',
+                    success INTEGER NOT NULL DEFAULT 0,
+                    error_code TEXT NOT NULL DEFAULT '',
+                    message TEXT NOT NULL DEFAULT ''
+                );
+                CREATE INDEX IF NOT EXISTS idx_inspection_results_run
+                    ON inspection_results(run_id, started_at DESC);
+                CREATE INDEX IF NOT EXISTS idx_inspection_results_map
+                    ON inspection_results(map_id, started_at DESC);
+
                 CREATE TABLE IF NOT EXISTS inspection_summary (
                     run_id TEXT PRIMARY KEY,
                     inspection_date TEXT NOT NULL,
@@ -210,6 +239,7 @@ class PatrolStore(RoadStorage):
                     ON inspection_summary(inspection_date DESC, updated_at DESC);
                 """
             )
+            self._migrate_columns()
             row = self._conn.execute(
                 "SELECT version FROM schema_version ORDER BY rowid DESC LIMIT 1").fetchone()
             version = int(row["version"]) if row else 0
@@ -224,6 +254,30 @@ class PatrolStore(RoadStorage):
                 self._conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
             else:
                 self.initialize_roads()
+
+    def _migrate_columns(self) -> None:
+        """Additive migrations that preserve existing field data."""
+        columns = {
+            row["name"] for row in
+            self._conn.execute("PRAGMA table_info(points)").fetchall()
+        }
+        additions = {
+            "inspection_enabled": "INTEGER NOT NULL DEFAULT 0",
+            "ptz_preset": "INTEGER NOT NULL DEFAULT 0",
+            "recognition_prompt": "TEXT NOT NULL DEFAULT ''",
+        }
+        for name, declaration in additions.items():
+            if name not in columns:
+                self._conn.execute(
+                    f"ALTER TABLE points ADD COLUMN {name} {declaration}")
+        result_columns = {
+            row["name"] for row in
+            self._conn.execute("PRAGMA table_info(inspection_results)").fetchall()
+        }
+        if result_columns and "ptz_preset" not in result_columns:
+            self._conn.execute(
+                "ALTER TABLE inspection_results ADD COLUMN ptz_preset INTEGER "
+                "NOT NULL DEFAULT 0")
 
     @staticmethod
     def _map_from_row(row: sqlite3.Row) -> MapBinding:
@@ -248,6 +302,9 @@ class PatrolStore(RoadStorage):
             x=row["x"], y=row["y"], yaw=row["yaw"], source=row["source"],
             sampled_at_ns=row["sampled_at"], revision=row["revision"],
             created_at_ns=row["created_at"], updated_at_ns=row["updated_at"],
+            inspection_enabled=bool(row["inspection_enabled"]),
+            ptz_preset=int(row["ptz_preset"]),
+            recognition_prompt=str(row["recognition_prompt"] or ""),
         )
 
     @staticmethod
@@ -259,6 +316,19 @@ class PatrolStore(RoadStorage):
             error_code=row["error_code"], message=row["message"],
             route_revision=row["route_revision"], map_revision=row["map_revision"],
             started_at_ns=row["started_at"], finished_at_ns=row["finished_at"],
+        )
+
+    @staticmethod
+    def _inspection_from_row(row: sqlite3.Row) -> InspectionResult:
+        return InspectionResult(
+            result_id=row["result_id"], run_id=row["run_id"], map_id=row["map_id"],
+            point_id=row["point_id"], point_name=row["point_name"],
+            loop_index=row["loop_index"], step_index=row["step_index"],
+            started_at_ns=row["started_at"], finished_at_ns=row["finished_at"],
+            ptz_preset=int(row["ptz_preset"]),
+            prompt=row["prompt"], image_path=row["image_path"], text=row["text"],
+            model=row["model"], success=bool(row["success"]),
+            error_code=row["error_code"], message=row["message"],
         )
 
     @staticmethod
@@ -402,11 +472,15 @@ class PatrolStore(RoadStorage):
 
     def upsert_point(self, point_id: str, map_id: str, name: str, x: float, y: float,
                      yaw: float, source: str, sampled_at: int,
-                     expected_revision: int = 0) -> Point:
+                     expected_revision: int = 0, inspection_enabled: bool = False,
+                     ptz_preset: int = 0, recognition_prompt: str = "") -> Point:
         import math
         if not all(math.isfinite(float(v)) for v in (x, y, yaw)):
             raise PatrolError("INVALID_DATA", "点位坐标必须是有限数值")
         name = validate_name(name, "点位名称")
+        inspection_enabled, ptz_preset, recognition_prompt = \
+            validate_inspection_settings(inspection_enabled, ptz_preset,
+                                         recognition_prompt)
         self.get_map(map_id)
         now = now_ns()
         with self._transaction() as conn:
@@ -419,9 +493,11 @@ class PatrolStore(RoadStorage):
                 revision = int(row["revision"]) + 1
                 conn.execute(
                     """UPDATE points SET map_id=?,name=?,x=?,y=?,yaw=?,source=?,sampled_at=?,
-                       revision=?,updated_at=? WHERE point_id=?""",
+                       revision=?,updated_at=?,inspection_enabled=?,ptz_preset=?,
+                       recognition_prompt=? WHERE point_id=?""",
                     (map_id, name, float(x), float(y), float(yaw), source, int(sampled_at),
-                     revision, now, point_id),
+                     revision, now, 1 if inspection_enabled else 0, int(ptz_preset),
+                     recognition_prompt, point_id),
                 )
                 # A route's stored point_id is not enough to detect a changed
                 # point value. Bump every referencing route so an old preview
@@ -437,9 +513,12 @@ class PatrolStore(RoadStorage):
                 revision = 1
                 conn.execute(
                     """INSERT INTO points(point_id,map_id,name,x,y,yaw,source,sampled_at,
-                       revision,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
+                       revision,created_at,updated_at,inspection_enabled,ptz_preset,
+                       recognition_prompt) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                     (chosen_id, map_id, name, float(x), float(y), float(yaw), source,
-                     int(sampled_at), revision, now, now),
+                     int(sampled_at), revision, now, now,
+                     1 if inspection_enabled else 0, int(ptz_preset),
+                     recognition_prompt),
                 )
             row = conn.execute("SELECT * FROM points WHERE point_id = ?", (chosen_id,)).fetchone()
             return self._point_from_row(row)
@@ -464,7 +543,8 @@ class PatrolStore(RoadStorage):
     def _steps_for_route(self, conn: sqlite3.Connection, route_id: str) -> list[RouteStep]:
         rows = conn.execute(
             """SELECT s.step_id, s.step_order, s.point_id, s.dwell_seconds,
-                      p.name AS point_name, p.x, p.y, p.yaw
+                      p.name AS point_name, p.x, p.y, p.yaw,
+                      p.inspection_enabled, p.ptz_preset, p.recognition_prompt
                FROM route_steps s JOIN points p ON p.point_id=s.point_id
                WHERE s.route_id=? ORDER BY s.step_order""", (route_id,)
         ).fetchall()
@@ -473,6 +553,9 @@ class PatrolStore(RoadStorage):
                 point_id=row["point_id"], dwell_seconds=row["dwell_seconds"],
                 order=row["step_order"], step_id=row["step_id"],
                 point_name=row["point_name"], x=row["x"], y=row["y"], yaw=row["yaw"],
+                inspection_enabled=bool(row["inspection_enabled"]),
+                ptz_preset=int(row["ptz_preset"]),
+                recognition_prompt=str(row["recognition_prompt"] or ""),
             ) for row in rows
         ]
 
@@ -617,6 +700,41 @@ class PatrolStore(RoadStorage):
                  float(ayaw), 1 if actual_valid else 0, int(sampled_at), pos_error, yaw_error,
                  int(started_at), int(finished_at), result, error_code),
             )
+
+    def add_inspection_result(self, result: InspectionResult) -> None:
+        with self._transaction() as conn:
+            conn.execute(
+                """INSERT OR REPLACE INTO inspection_results(
+                   result_id,run_id,map_id,point_id,point_name,loop_index,step_index,
+                   started_at,finished_at,ptz_preset,prompt,image_path,
+                   text,model,success,error_code,message)
+                   VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (result.result_id, result.run_id, result.map_id, result.point_id,
+                 result.point_name, int(result.loop_index), int(result.step_index),
+                 int(result.started_at_ns), int(result.finished_at_ns),
+                 int(result.ptz_preset),
+                 result.prompt, result.image_path, result.text, result.model,
+                 1 if result.success else 0, result.error_code, result.message),
+            )
+
+    def list_inspection_results(self, map_id: str = "", run_id: str = "",
+                                limit: int = 100) -> list[InspectionResult]:
+        limit = max(1, min(int(limit or 100), 1000))
+        clauses = []
+        values: list[Any] = []
+        if map_id:
+            clauses.append("map_id=?")
+            values.append(map_id)
+        if run_id:
+            clauses.append("run_id=?")
+            values.append(run_id)
+        where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT * FROM inspection_results" + where +
+                " ORDER BY started_at DESC LIMIT ?", (*values, limit)
+            ).fetchall()
+        return [self._inspection_from_row(row) for row in rows]
 
     def list_runs(self, map_id: str = "", route_id: str = "", limit: int = 50) -> list[RunRecord]:
         limit = max(1, min(int(limit or 50), 500))

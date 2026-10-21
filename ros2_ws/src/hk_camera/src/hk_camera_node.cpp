@@ -201,6 +201,10 @@ void HKCameraNode::setupServices()
         "/hk_camera/get_ptz_pose",
         [this](const srv::GetPTZPose::Request::SharedPtr req,
                srv::GetPTZPose::Response::SharedPtr res) { onGetPTZPose(req, res); });
+    ptz_preset_srv_ = create_service<srv::PTZPreset>(
+        "/hk_camera/preset",
+        [this](const srv::PTZPreset::Request::SharedPtr req,
+               srv::PTZPreset::Response::SharedPtr res) { onPTZPreset(req, res); });
 
     set_ptz_pose_srv_ = create_service<srv::SetPTZPose>(
         "/hk_camera/set_ptz_pose",
@@ -672,6 +676,48 @@ void HKCameraNode::onGetPTZPose(
             res->tilt_min = *tmin; res->tilt_max = *tmax;
             res->zoom_min = *zmin; res->zoom_max = *zmax;
         }
+    }
+}
+
+void HKCameraNode::onPTZPreset(
+    const srv::PTZPreset::Request::SharedPtr req,
+    srv::PTZPreset::Response::SharedPtr res)
+{
+    if (user_id_ < 0) {
+        res->success = false;
+        res->message = "Not logged in";
+        return;
+    }
+    if (active_ptz_command_) {
+        res->success = false;
+        res->message = "Release manual PTZ control first";
+        return;
+    }
+    if (req->preset_no < 1 || req->preset_no > 255) {
+        res->success = false;
+        res->message = "Preset number must be 1..255";
+        return;
+    }
+    DWORD command = 0;
+    const char *verb = "";
+    switch (req->action) {
+        case 0: command = SET_PRESET; verb = "saved"; break;
+        case 1: command = GOTO_PRESET; verb = "goto requested"; break;
+        case 2: command = CLE_PRESET; verb = "cleared"; break;
+        default:
+            res->success = false;
+            res->message = "Invalid preset action (expected 0=set, 1=goto, 2=clear)";
+            return;
+    }
+    const bool ok = camera_->ptzPreset(user_id_, channel_, command, req->preset_no);
+    res->success = ok;
+    res->message = ok
+        ? std::string("Preset ") + std::to_string(req->preset_no) + " " + verb +
+              " (device-side position)"
+        : std::string("Preset command failed, SDK error=") +
+              std::to_string(camera_->getLastError());
+    if (ok) {
+        RCLCPP_INFO(get_logger(), "PTZ preset %u %s", req->preset_no, verb);
     }
 }
 

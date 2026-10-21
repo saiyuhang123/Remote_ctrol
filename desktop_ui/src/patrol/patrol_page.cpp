@@ -1,7 +1,9 @@
 #include "patrol/patrol_page.h"
 #include "patrol/patrol_ui_style.h"
+#include "adapters/ros_adapter.h"
 
 #include <QComboBox>
+#include <QCheckBox>
 #include <QDoubleSpinBox>
 #include <QFileInfo>
 #include <QFormLayout>
@@ -76,8 +78,9 @@ QTableWidgetItem *readOnlyItem(const QString &text) {
 PatrolPage::PatrolPage(PatrolClient *client, const QString &initialMapYaml,
                        const QString &backend, const QString &localizationFile,
                        const QString &profileName, bool offline,
-                       std::function<bool(QString *)> startPermission, QWidget *parent)
-    : QWidget(parent), client_(client), mapYaml_(initialMapYaml), backend_(backend),
+                       std::function<bool(QString *)> startPermission, QWidget *parent,
+                       RosAdapter *ros)
+    : QWidget(parent), client_(client), ros_(ros), mapYaml_(initialMapYaml), backend_(backend),
       localizationFile_(localizationFile), profileName_(profileName), offline_(offline),
       startPermission_(std::move(startPermission)) {
   Q_INIT_RESOURCE(console_icons);
@@ -89,10 +92,21 @@ PatrolPage::PatrolPage(PatrolClient *client, const QString &initialMapYaml,
   connect(client_, &PatrolClient::pointsChanged, this, &PatrolPage::onPointsChanged);
   connect(client_, &PatrolClient::routesChanged, this, &PatrolPage::onRoutesChanged);
   connect(client_, &PatrolClient::runsChanged, this, &PatrolPage::onRunsChanged);
+  connect(client_, &PatrolClient::inspectionResultsChanged, this,
+          &PatrolPage::onInspectionResultsChanged);
   connect(client_, &PatrolClient::homePointChanged, this, &PatrolPage::onHomePointChanged);
   connect(client_, &PatrolClient::statusChanged, this, &PatrolPage::onStatusChanged);
   connect(client_, &PatrolClient::operationFinished, this, &PatrolPage::showOperation);
   connect(client_, &PatrolClient::errorOccurred, this, &PatrolPage::showError);
+  if (ros_) {
+    connect(ros_, &RosAdapter::requestFinished, this,
+            [this](const QString &op, bool ok, const QString &detail) {
+              if (op == QStringLiteral("ptz_preset")) {
+                setMessage((ok ? QStringLiteral("云台预置位操作：")
+                               : QStringLiteral("云台预置位操作失败：")) + detail, !ok);
+              }
+            });
+  }
   client_->refreshMaps();
   auto *permissionTimer = new QTimer(this);
   permissionTimer->setInterval(500);
@@ -201,7 +215,7 @@ void PatrolPage::buildUi() {
   pointsTop->addStretch();
   pointsTop->addWidget(pointsCountLabel_);
   pointListLayout->addLayout(pointsTop);
-  pointsTable_ = table({"名称", "X (m)", "Y (m)", "朝向 (°)", "版本"}, pointList);
+  pointsTable_ = table({"名称", "X (m)", "Y (m)", "朝向 (°)", "巡检", "版本"}, pointList);
   pointsTable_->setObjectName("patrolPointsTable");
   pointListLayout->addWidget(pointsTable_, 1);
   pointListLayout->addWidget(patrolui::hint("选择点位查看或修改坐标。坐标均相对于当前地图。", pointList));
@@ -220,7 +234,47 @@ void PatrolPage::buildUi() {
   pointNameEdit_->setPlaceholderText("例如：设备间入口");
   pointFormLayout->addWidget(new QLabel("点位名称", pointForm));
   pointFormLayout->addWidget(pointNameEdit_);
-  saveCurrentPointButton_ = pageButton("保存当前位置为导航点", pointForm, "patrolSaveCurrentPoint");
+  auto *inspectionGroup = new QGroupBox("到点巡检动作", pointForm);
+  pointInspectionGroup_ = inspectionGroup;
+  auto *inspectionLayout = new QVBoxLayout(inspectionGroup);
+  inspectionLayout->setSpacing(7);
+  pointInspectionEnabled_ = new QCheckBox(
+      "到点后转到该云台位置、抓拍并在线识别", inspectionGroup);
+  pointInspectionEnabled_->setObjectName("patrolPointInspectionEnabled");
+  inspectionLayout->addWidget(pointInspectionEnabled_);
+  auto *inspectionForm = new QFormLayout;
+  inspectionForm->setSpacing(7);
+  pointPtzPreset_ = new QSpinBox(inspectionGroup);
+  pointPtzPreset_->setObjectName("patrolPointPtzPreset");
+  pointPtzPreset_->setRange(1, 89);
+  pointPtzPreset_->setValue(1);
+  pointPtzPreset_->setToolTip(
+      "巡检业务预置位 1～89；90～99 留给云台巡航。请先在右侧“相机”页把云台调到目标视角");
+  inspectionForm->addRow("云台预置位", pointPtzPreset_);
+  inspectionLayout->addLayout(inspectionForm);
+  auto *presetButtons = new QHBoxLayout;
+  pointSavePtzPreset_ = pageButton("当前云台存为此预置位", inspectionGroup,
+                                   "patrolSavePtzPreset");
+  pointGotoPtzPreset_ = pageButton("转到该预置位", inspectionGroup,
+                                   "patrolGotoPtzPreset");
+  presetButtons->addWidget(pointSavePtzPreset_);
+  presetButtons->addWidget(pointGotoPtzPreset_);
+  inspectionLayout->addLayout(presetButtons);
+  inspectionLayout->addWidget(patrolui::hint(
+      "本相机不能回读 pan/tilt 绝对角度，因此巡检点保存的是设备端预置位编号。"
+      "建议使用 1～89；预置位由相机固件定位，重启相机不丢失。", inspectionGroup));
+  inspectionLayout->addWidget(new QLabel("识别提示词（留空返回默认5行短结果）", inspectionGroup));
+  pointRecognitionPrompt_ = new QPlainTextEdit(inspectionGroup);
+  pointRecognitionPrompt_->setObjectName("patrolPointRecognitionPrompt");
+  pointRecognitionPrompt_->setPlaceholderText(
+      "留空默认：设备状态 / 仪表读数 / 指示灯 / 告警文字 / 明显异常；"
+      "可填写本点位专用要求。");
+  pointRecognitionPrompt_->setMaximumHeight(70);
+  inspectionLayout->addWidget(pointRecognitionPrompt_);
+  inspectionLayout->addWidget(patrolui::hint(
+      "路线执行到该点时会调用 GOTO_PRESET，等待云台稳定后自动抓拍并调用 DeepSeek 识别。", inspectionGroup));
+  pointFormLayout->addWidget(inspectionGroup);
+  saveCurrentPointButton_ = pageButton("保存当前位置为巡检点", pointForm, "patrolSaveCurrentPoint");
   saveCurrentPointButton_->setProperty("primary", true);
   pointFormLayout->addWidget(saveCurrentPointButton_);
   auto *coordinates = new QGroupBox("手动坐标 / 所选点位", pointForm);
@@ -338,7 +392,7 @@ void PatrolPage::buildUi() {
   addStepRow->addWidget(addStepDwell_);
   addStepRow->addWidget(addStepButton_);
   routeEditorLayout->addLayout(addStepRow);
-  stepsTable_ = table({"点位", "X (m)", "Y (m)", "停留 (s)"}, routeEditor);
+  stepsTable_ = table({"点位", "X (m)", "Y (m)", "停留 (s)", "巡检动作"}, routeEditor);
   stepsTable_->setObjectName("patrolStepsTable");
   stepsTable_->setMinimumHeight(118);
   routeEditorLayout->addWidget(stepsTable_, 1);
@@ -458,6 +512,23 @@ void PatrolPage::buildUi() {
   runsTable_->horizontalHeader()->setSectionResizeMode(6, QHeaderView::Stretch);
   runsLayout->addWidget(runsTable_, 1);
   runsLayout->addWidget(patrolui::hint("选中任务后，可查看沿录制道路行驶、等待障碍、绕行及停止等事件。", runsCard));
+  auto *inspectionHeader = new QHBoxLayout;
+  inspectionHeader->addWidget(patrolui::heading("巡检识别结果", runsCard));
+  inspectionHeader->addStretch();
+  refreshInspectionResultsButton_ = pageButton(
+      "刷新识别结果", runsCard, "patrolRefreshInspectionResults");
+  inspectionHeader->addWidget(refreshInspectionResultsButton_);
+  runsLayout->addLayout(inspectionHeader);
+  inspectionResultsTable_ = table(
+      {"时间", "点位", "识别结果", "图片", "状态"}, runsCard);
+  inspectionResultsTable_->setObjectName("patrolInspectionResultsTable");
+  inspectionResultsTable_->horizontalHeader()->setSectionResizeMode(
+      2, QHeaderView::Stretch);
+  inspectionResultsTable_->setColumnWidth(0, 130);
+  inspectionResultsTable_->setColumnWidth(1, 130);
+  inspectionResultsTable_->setColumnWidth(3, 220);
+  inspectionResultsTable_->setColumnWidth(4, 150);
+  runsLayout->addWidget(inspectionResultsTable_, 1);
   runsOuter->addWidget(runsCard);
   connect(roadEvents, &QPushButton::clicked, this, [this] {
     const int row = runsTable_->currentRow();
@@ -483,6 +554,26 @@ void PatrolPage::buildUi() {
   connect(pointsTable_, &QTableWidget::itemSelectionChanged, this, &PatrolPage::updatePointFormFromSelection);
   connect(saveCurrentPointButton_, &QPushButton::clicked, this, &PatrolPage::saveCurrentPoint);
   connect(upsertPointButton_, &QPushButton::clicked, this, &PatrolPage::upsertSelectedPoint);
+  connect(pointInspectionEnabled_, &QCheckBox::toggled, this,
+          [this](bool) { updateActionStates(); });
+  connect(pointSavePtzPreset_, &QPushButton::clicked, this, [this] {
+    if (!ros_ || offline_) {
+      setMessage(QStringLiteral("相机 ROS 适配器不可用，无法设置云台预置位"), true);
+      return;
+    }
+    const int preset = pointPtzPreset_->value();
+    ros_->setPtzPreset(0, preset);
+    setMessage(QStringLiteral("正在把当前云台姿态保存为预置位 %1…").arg(preset), false);
+  });
+  connect(pointGotoPtzPreset_, &QPushButton::clicked, this, [this] {
+    if (!ros_ || offline_) {
+      setMessage(QStringLiteral("相机 ROS 适配器不可用，无法调用云台预置位"), true);
+      return;
+    }
+    const int preset = pointPtzPreset_->value();
+    ros_->setPtzPreset(1, preset);
+    setMessage(QStringLiteral("正在转到云台预置位 %1…").arg(preset), false);
+  });
   connect(deletePointButton_, &QPushButton::clicked, this, &PatrolPage::deleteSelectedPoint);
   connect(routesTable_, &QTableWidget::itemSelectionChanged, this, [this] {
     const int row = routesTable_->currentRow();
@@ -521,6 +612,25 @@ void PatrolPage::buildUi() {
   });
   connect(refreshRunsButton_, &QPushButton::clicked, this, [this] {
     client_->refreshRuns(activeMapId_);
+  });
+  connect(inspectionResultsTable_, &QTableWidget::cellDoubleClicked, this,
+          [this](int row, int) {
+            if (!inspectionResultsTable_->item(row, 3)) return;
+            const QString path = inspectionResultsTable_->item(row, 3)
+                                     ->data(Qt::UserRole).toString();
+            if (!path.isEmpty()) setMessage(QStringLiteral("巡检图片：") + path, false);
+          });
+  connect(refreshInspectionResultsButton_, &QPushButton::clicked, this, [this] {
+    const int row = runsTable_->currentRow();
+    const QString runId = row >= 0 && runsTable_->item(row, 0)
+                              ? runsTable_->item(row, 0)->text() : QString();
+    client_->refreshInspectionResults(activeMapId_, runId, 200);
+  });
+  connect(runsTable_, &QTableWidget::itemSelectionChanged, this, [this] {
+    const int row = runsTable_->currentRow();
+    const QString runId = row >= 0 && runsTable_->item(row, 0)
+                              ? runsTable_->item(row, 0)->text() : QString();
+    client_->refreshInspectionResults(activeMapId_, runId, 200);
   });
   connect(routeNameEdit_, &QLineEdit::textChanged, this, [this] {
     if (!loadingRoute_) { routeDirty_ = true; updateActionStates(); }
@@ -646,6 +756,7 @@ void PatrolPage::refreshAll() {
     client_->refreshPoints(activeMapId_);
     client_->refreshRoutes(activeMapId_);
     client_->refreshRuns(activeMapId_);
+    client_->refreshInspectionResults(activeMapId_, QString(), 200);
     client_->refreshHomePoint(activeMapId_);
   }
   setMessage(QStringLiteral("已请求刷新本地巡航数据"), false);
@@ -665,11 +776,13 @@ void PatrolPage::onMapsChanged() {
     client_->refreshPoints(activeMapId_);
     client_->refreshRoutes(activeMapId_);
     client_->refreshRuns(activeMapId_);
+    client_->refreshInspectionResults(activeMapId_, QString(), 200);
     client_->refreshHomePoint(activeMapId_);
   } else {
     pointsTable_->setRowCount(0);
     routesTable_->setRowCount(0);
     runsTable_->setRowCount(0);
+    inspectionResultsTable_->setRowCount(0);
     updateEmptyTable(pointsTable_);
     updateEmptyTable(routesTable_);
     updateEmptyTable(runsTable_);
@@ -723,6 +836,8 @@ void PatrolPage::onRoutesChanged() {
 }
 
 void PatrolPage::onRunsChanged() { populateRuns(); }
+
+void PatrolPage::onInspectionResultsChanged() { populateInspectionResults(); }
 
 void PatrolPage::onHomePointChanged() {
   const auto home = client_->homePoint();
@@ -787,7 +902,11 @@ void PatrolPage::populatePoints() {
     pointsTable_->setItem(row, 1, readOnlyItem(QString::number(point.x, 'f', 3)));
     pointsTable_->setItem(row, 2, readOnlyItem(QString::number(point.y, 'f', 3)));
     pointsTable_->setItem(row, 3, readOnlyItem(QString::number(point.yaw * 180.0 / kPi, 'f', 2)));
-    pointsTable_->setItem(row, 4, readOnlyItem(QString::number(point.revision)));
+    const QString action = point.inspectionEnabled
+        ? QStringLiteral("预置位 %1 · 抓拍识别").arg(point.ptzPreset)
+        : QStringLiteral("仅导航");
+    pointsTable_->setItem(row, 4, readOnlyItem(action));
+    pointsTable_->setItem(row, 5, readOnlyItem(QString::number(point.revision)));
   }
   if (selectedRow >= 0 && selectedRow < pointsTable_->rowCount()) pointsTable_->selectRow(selectedRow);
   updateEmptyTable(pointsTable_);
@@ -846,6 +965,37 @@ void PatrolPage::populateRuns() {
   updateEmptyTable(runsTable_);
 }
 
+void PatrolPage::populateInspectionResults() {
+  const int selectedRow = inspectionResultsTable_->currentRow();
+  inspectionResultsTable_->setRowCount(0);
+  for (const auto &item : client_->inspectionResults()) {
+    const int row = inspectionResultsTable_->rowCount();
+    inspectionResultsTable_->insertRow(row);
+    inspectionResultsTable_->setItem(row, 0, readOnlyItem(item.startedAtText));
+    auto *point = readOnlyItem(item.pointName.isEmpty() ? item.pointId : item.pointName);
+    point->setToolTip(QStringLiteral("圈 %1 · 第 %2 点 · 云台预置位 %3")
+                          .arg(item.loopIndex).arg(item.stepIndex)
+                          .arg(item.ptzPreset));
+    inspectionResultsTable_->setItem(row, 1, point);
+    auto *text = readOnlyItem(item.success ? item.text : item.message);
+    text->setToolTip(item.prompt.isEmpty()
+                         ? text->text()
+                         : QStringLiteral("提示词：%1\n\n%2").arg(item.prompt, text->text()));
+    inspectionResultsTable_->setItem(row, 2, text);
+    auto *image = readOnlyItem(item.imagePath);
+    image->setData(Qt::UserRole, item.imagePath);
+    image->setToolTip(item.imagePath);
+    inspectionResultsTable_->setItem(row, 3, image);
+    inspectionResultsTable_->setItem(
+        row, 4, readOnlyItem(item.success
+                                 ? QStringLiteral("成功 · %1").arg(item.model)
+                                 : QStringLiteral("失败 · %1").arg(item.errorCode)));
+  }
+  updateEmptyTable(inspectionResultsTable_);
+  if (selectedRow >= 0 && selectedRow < inspectionResultsTable_->rowCount())
+    inspectionResultsTable_->selectRow(selectedRow);
+}
+
 void PatrolPage::loadRouteIntoEditor(const PatrolRouteInfo &route) {
   startAfterPlan_=false;
   loadingRoute_ = true;
@@ -889,6 +1039,10 @@ void PatrolPage::syncStepTable() {
     stepsTable_->setItem(row, 1, readOnlyItem(QString::number(step.x, 'f', 3)));
     stepsTable_->setItem(row, 2, readOnlyItem(QString::number(step.y, 'f', 3)));
     stepsTable_->setItem(row, 3, readOnlyItem(QString::number(step.dwellSeconds, 'f', 1)));
+    const QString action = step.inspectionEnabled
+        ? QStringLiteral("预置位 %1 · 抓拍识别").arg(step.ptzPreset)
+        : QStringLiteral("仅导航");
+    stepsTable_->setItem(row, 4, readOnlyItem(action));
   }
   updateEmptyTable(stepsTable_);
   updateRoutePreview();
@@ -914,13 +1068,18 @@ void PatrolPage::updateRoutePreview() {
     const auto &step = currentSteps_[i];
     const QPointF point(step.x * 100.0, -step.y * 100.0);
     if (i > 0) routePreviewScene_->addLine(QLineF(previous, point), linePen);
-    routePreviewScene_->addEllipse(point.x() - 9.0, point.y() - 9.0, 18.0, 18.0,
-                                   QPen(QColor("#2563eb"), 2.0), QBrush(Qt::white));
+    const bool inspection = step.inspectionEnabled;
+    routePreviewScene_->addEllipse(
+        point.x() - 9.0, point.y() - 9.0, 18.0, 18.0,
+        QPen(QColor(inspection ? "#059669" : "#2563eb"), 2.0),
+        QBrush(QColor(inspection ? "#ecfdf5" : "#ffffff")));
     auto *number = routePreviewScene_->addSimpleText(QString::number(i + 1));
-    number->setBrush(QColor("#1d4ed8"));
+    number->setBrush(QColor(inspection ? "#047857" : "#1d4ed8"));
     number->setPos(point.x() - 4.0, point.y() - 8.0);
-    auto *name = routePreviewScene_->addSimpleText(step.pointName.isEmpty() ? step.pointId : step.pointName);
-    name->setBrush(QColor("#334155"));
+    const QString label = (step.pointName.isEmpty() ? step.pointId : step.pointName) +
+                          (inspection ? QStringLiteral(" · 云台识别") : QString());
+    auto *name = routePreviewScene_->addSimpleText(label);
+    name->setBrush(QColor(inspection ? "#047857" : "#334155"));
     name->setPos(point.x() + 12.0, point.y() - 18.0);
     previous = point;
   }
@@ -945,6 +1104,10 @@ void PatrolPage::updatePointFormFromSelection() {
     pointX_->setValue(point.x);
     pointY_->setValue(point.y);
     pointYaw_->setValue(point.yaw * 180.0 / kPi);
+    pointInspectionEnabled_->setChecked(point.inspectionEnabled);
+    pointPtzPreset_->setValue(point.ptzPreset > 0 ? point.ptzPreset : 1);
+    pointRecognitionPrompt_->setPlainText(point.recognitionPrompt);
+    updateActionStates();
     return;
   }
 }
@@ -953,7 +1116,9 @@ void PatrolPage::saveCurrentPoint() {
   if (activeMapId_.isEmpty()) { setMessage(QStringLiteral("请先登记并设置活跃地图"), true); return; }
   QString name = pointNameEdit_->text().trimmed();
   if (name.isEmpty()) name = QStringLiteral("当前点");
-  client_->saveCurrentPoint(activeMapId_, name);
+  client_->saveCurrentPoint(
+      activeMapId_, name, pointInspectionEnabled_->isChecked(),
+      pointPtzPreset_->value(), pointRecognitionPrompt_->toPlainText().trimmed());
 }
 
 void PatrolPage::upsertSelectedPoint() {
@@ -968,7 +1133,9 @@ void PatrolPage::upsertSelectedPoint() {
   const QString name = pointNameEdit_->text().trimmed();
   if (name.isEmpty()) { setMessage(QStringLiteral("请填写点位名称"), true); return; }
   client_->upsertPoint(pointId, activeMapId_, name, pointX_->value(), pointY_->value(),
-                       pointYaw_->value() * kPi / 180.0, revision);
+                       pointYaw_->value() * kPi / 180.0, revision,
+                       pointInspectionEnabled_->isChecked(), pointPtzPreset_->value(),
+                       pointRecognitionPrompt_->toPlainText().trimmed());
 }
 
 void PatrolPage::deleteSelectedPoint() {
@@ -988,6 +1155,9 @@ void PatrolPage::addStepFromPoint() {
     step.pointId = point.pointId; step.pointName = point.name;
     step.x = point.x; step.y = point.y; step.yaw = point.yaw;
     step.dwellSeconds = addStepDwell_->value();
+    step.inspectionEnabled = point.inspectionEnabled;
+    step.ptzPreset = point.ptzPreset;
+    step.recognitionPrompt = point.recognitionPrompt;
     currentSteps_.push_back(step);
     routeDirty_ = true;
     syncStepTable();
@@ -1174,7 +1344,10 @@ void PatrolPage::showOperation(const QString &operation, bool success, const QSt
     routeDirty_ = false;
     client_->refreshRoutes(activeMapId_);
   }
-  if (operation.contains(QStringLiteral("巡航任务"))) client_->refreshRuns(activeMapId_);
+  if (operation.contains(QStringLiteral("巡航任务"))) {
+    client_->refreshRuns(activeMapId_);
+    client_->refreshInspectionResults(activeMapId_, QString(), 200);
+  }
   updateActionStates();
 }
 
@@ -1241,7 +1414,22 @@ void PatrolPage::updateActionStates() {
   refreshAllButton_->setEnabled(available);
   saveCurrentPointButton_->setEnabled(available && hasMap);
   upsertPointButton_->setEnabled(available && hasMap);
+  const bool inspectionChecked = pointInspectionEnabled_->isChecked();
+  pointInspectionEnabled_->setEnabled(available && hasMap);
+  pointPtzPreset_->setEnabled(inspectionChecked);
+  pointRecognitionPrompt_->setEnabled(inspectionChecked);
+  const bool cameraReady = !offline_ && ros_ && ros_->cameraAvailable() &&
+                            ros_->ptzPresetAvailable();
+  pointSavePtzPreset_->setEnabled(inspectionChecked && cameraReady && !activeRun);
+  pointGotoPtzPreset_->setEnabled(inspectionChecked && cameraReady && !activeRun);
+  const QString presetTip = cameraReady
+      ? QStringLiteral("预置位由相机设备保存和闭环定位；本机不读取绝对 pan/tilt")
+      : QStringLiteral("相机服务未就绪；先在右侧“相机”页启动相机");
+  pointSavePtzPreset_->setToolTip(presetTip);
+  pointGotoPtzPreset_->setToolTip(presetTip);
   deletePointButton_->setEnabled(available && hasMap && pointsTable_->currentRow() >= 0);
+  if (refreshInspectionResultsButton_)
+    refreshInspectionResultsButton_->setEnabled(available);
   addStepButton_->setEnabled(available && hasMap);
   updateDwellButton_->setEnabled(available && stepsTable_->currentRow() >= 0);
   removeStepButton_->setEnabled(available && stepsTable_->currentRow() >= 0);

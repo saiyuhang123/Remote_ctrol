@@ -9,6 +9,9 @@
   <buildtool_depend>ament_python</buildtool_depend>
   <depend>rclpy</depend>
   <depend>patrol_interfaces</depend>
+  <depend>hk_camera</depend>
+  <depend>ocr_interfaces</depend>
+  <depend>sensor_msgs</depend>
   <depend>nav2_msgs</depend>
   <depend>nav_msgs</depend>
   <depend>geometry_msgs</depend>
@@ -19,6 +22,7 @@
   <depend>tf2_ros</depend>
   <depend>python3-yaml</depend>
   <exec_depend>python3-pil</exec_depend>
+  <exec_depend>ocr_node</exec_depend>
   <exec_depend>launch</exec_depend>
   <exec_depend>launch_ros</exec_depend>
 

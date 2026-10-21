@@ -14,6 +14,7 @@
 #ifdef DESKTOP_HAS_HK_CAMERA
 #include <hk_camera/srv/capture_picture.hpp>
 #include <hk_camera/srv/set_ptz_pose.hpp>
+#include <hk_camera/srv/ptz_preset.hpp>
 #endif
 #ifdef DESKTOP_HAS_OCR_INTERFACES
 #include <ocr_interfaces/srv/recognize_text.hpp>
@@ -234,11 +235,14 @@ time.sleep(30)
   void cameraAndOcrRoundTrips() {
     FixtureExecutor fixture;
 #ifdef DESKTOP_HAS_HK_CAMERA
-    std::atomic_int pan{0};
+    std::atomic_int pan{0}, presetAction{0}, presetNumber{0};
     auto capture = mockService<hk_camera::srv::CapturePicture>(fixture.node, "/hk_camera/capture", [](auto q, auto r) {
       r->success = q->quality == 0 && q->save_path.empty(); r->image.width = 2; r->image.height = 1; r->image.step = 6; r->image.encoding = "rgb8"; r->image.data = {255, 0, 0, 0, 255, 0};
     });
     auto ptz = mockService<hk_camera::srv::SetPTZPose>(fixture.node, "/hk_camera/set_ptz_pose", [&pan](auto q, auto r) { pan = q->pan; r->success = q->zoom == 2 && q->tilt == 10; });
+    auto preset = mockService<hk_camera::srv::PTZPreset>(fixture.node, "/hk_camera/preset", [&](auto q, auto r) {
+      presetAction = q->action; presetNumber = q->preset_no; r->success = q->action == 1 && q->preset_no == 37;
+    });
 #endif
 #ifdef DESKTOP_HAS_OCR_INTERFACES
     auto ocr = mockService<ocr_interfaces::srv::RecognizeText>(fixture.node, "/ocr/recognize", [](auto, auto r) {
@@ -251,6 +255,7 @@ time.sleep(30)
     adapter.captureCamera(); QTRY_COMPARE(images.size(), 1); QVERIFY(results.last().at(1).toBool());
     auto image = qvariant_cast<QImage>(images.at(0).at(0)); QCOMPARE(image.size(), QSize(2, 1)); QCOMPARE(image.pixelColor(0, 0), QColor(Qt::red));
     int before = results.size(); adapter.setPtz(45, 10, 2); QTRY_COMPARE(results.size(), before + 1); QVERIFY(results.last().at(1).toBool()); QCOMPARE(pan.load(), 45);
+    before = results.size(); adapter.setPtzPreset(1, 37); QTRY_COMPARE(results.size(), before + 1); QVERIFY(results.last().at(1).toBool()); QCOMPARE(presetAction.load(), 1); QCOMPARE(presetNumber.load(), 37);
 #endif
 #ifdef DESKTOP_HAS_OCR_INTERFACES
     adapter.recognize(); QTRY_COMPARE(texts.size(), 1); QVERIFY(texts.at(0).at(0).toString().contains("12.34")); QVERIFY(results.last().at(1).toBool());

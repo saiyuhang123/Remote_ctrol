@@ -5,6 +5,8 @@
 #include <QFile>
 #include <QLabel>
 #include <QLineEdit>
+#include <QPlainTextEdit>
+#include <QDoubleSpinBox>
 #include <QPushButton>
 #include <QStringList>
 #include <QTableWidget>
@@ -181,7 +183,15 @@ private slots:
     auto *registerMap = page.findChild<QPushButton *>(QStringLiteral("patrolRegisterMap"));
     auto *saveCurrent = page.findChild<QPushButton *>(QStringLiteral("patrolSaveCurrentPoint"));
     auto *start = page.findChild<QPushButton *>(QStringLiteral("patrolStart"));
+    auto *inspectionEnabled = page.findChild<QCheckBox *>(QStringLiteral("patrolPointInspectionEnabled"));
+    auto *ptzPreset = page.findChild<QSpinBox *>(QStringLiteral("patrolPointPtzPreset"));
+    auto *savePreset = page.findChild<QPushButton *>(QStringLiteral("patrolSavePtzPreset"));
+    auto *gotoPreset = page.findChild<QPushButton *>(QStringLiteral("patrolGotoPtzPreset"));
+    auto *prompt = page.findChild<QPlainTextEdit *>(QStringLiteral("patrolPointRecognitionPrompt"));
+    auto *resultsTable = page.findChild<QTableWidget *>(QStringLiteral("patrolInspectionResultsTable"));
     QVERIFY(mapEdit && tabs && registerMap && saveCurrent && start);
+    QVERIFY(inspectionEnabled && ptzPreset && savePreset && gotoPreset && prompt);
+    QVERIFY(resultsTable);
     QCOMPARE(mapEdit->text(), yaml);
     QCOMPARE(tabs->count(), 3); // 固定路线录制页暂时从操作界面移除
     QVERIFY(registerMap->isEnabled());

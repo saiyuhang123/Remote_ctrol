@@ -1,0 +1,17 @@
+string result_id
+string run_id
+string map_id
+string point_id
+string point_name
+uint32 loop_index
+uint32 step_index
+builtin_interfaces/Time started_at
+builtin_interfaces/Time finished_at
+uint8 ptz_preset
+string prompt
+string image_path
+string text
+string model
+bool success
+string error_code
+string message

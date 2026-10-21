@@ -13,6 +13,7 @@ uint8 SUCCEEDED=10
 uint8 FAILED=11
 uint8 INTERRUPTED=12
 uint8 STOPPING=13
+uint8 INSPECTING=14
 
 string instance_id
 uint64 sequence

@@ -1,0 +1,10 @@
+# Online multimodal recognition for one captured image.
+# The image is sent to the configured vision model together with the prompt.
+sensor_msgs/Image image
+string prompt
+---
+bool success
+string message
+string text
+string model
+float32 processing_time_ms

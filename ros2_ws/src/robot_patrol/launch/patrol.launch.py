@@ -12,6 +12,7 @@ def generate_launch_description():
     share = Path(get_package_share_directory("robot_patrol"))
     parameters = str(share / "config" / "patrol.yaml")
     enable_guard = LaunchConfiguration("enable_guard")
+    start_deepseek_vision = LaunchConfiguration("start_deepseek_vision")
 
     patrol = Node(
         package="robot_patrol",
@@ -39,6 +40,16 @@ def generate_launch_description():
         output="screen",
         condition=IfCondition(enable_guard),
     )
+    deepseek_vision = Node(
+        package="ocr_node",
+        executable="deepseek_vision",
+        name="deepseek_vision",
+        parameters=[{
+            'config_path': LaunchConfiguration('deepseek_config_path'),
+        }],
+        output="screen",
+        condition=IfCondition(start_deepseek_vision),
+    )
     return LaunchDescription([
         DeclareLaunchArgument('enable_recorded_routes', default_value='false', choices=['true','false']),
         DeclareLaunchArgument('recorded_min_turning_radius', default_value='0.69'),
@@ -46,7 +57,14 @@ def generate_launch_description():
         DeclareLaunchArgument(
             "enable_guard", default_value="true", choices=["true", "false"],
             description="启动独立 patrol_guard；实车巡航必须保持 true"),
+        DeclareLaunchArgument(
+            "start_deepseek_vision", default_value="true", choices=["true", "false"],
+            description="启动 DeepSeek 在线图片识别服务"),
+        DeclareLaunchArgument(
+            "deepseek_config_path", default_value="/home/jkbot/dshapi",
+            description="本地 DeepSeek API 配置路径（不进入 git）"),
         patrol,
         recorder,
         guard,
+        deepseek_vision,
     ])

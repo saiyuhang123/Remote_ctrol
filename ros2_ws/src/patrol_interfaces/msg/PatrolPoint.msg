@@ -7,3 +7,6 @@ float64 yaw
 string source
 builtin_interfaces/Time sampled_at
 uint64 revision
+bool inspection_enabled
+uint8 ptz_preset
+string recognition_prompt

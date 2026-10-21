@@ -1,0 +1,8 @@
+# Hikvision device-side preset control. This device cannot report absolute
+# pan/tilt, so presets are the only repeatable position reference.
+# 0=SET current pose as preset, 1=GOTO preset, 2=CLEAR preset.
+uint8 action
+uint8 preset_no
+---
+bool success
+string message

@@ -421,8 +421,8 @@ def test_point_recording_speed_tolerances_do_not_relax_stopping(tmp_path):
         request.expected_map_revision = mapping.revision
         response = wait_future(home.call_async(request))
         assert not response.success and "仍在运动" in response.message
-        assert patrol.get_parameter("settle_linear_threshold").value == 0.03
-        assert patrol.get_parameter("settle_angular_threshold").value == 0.05
+        assert patrol.get_parameter("settle_linear_threshold").value == 0.10
+        assert patrol.get_parameter("settle_angular_threshold").value == 0.12
 
         # Allowing jitter does not exempt missing or expired odometry.
         fake.publish_odom = False

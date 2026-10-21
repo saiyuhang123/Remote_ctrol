@@ -20,11 +20,17 @@ struct PatrolPointInfo {
   QString pointId, mapId, name, source;
   double x = 0.0, y = 0.0, yaw = 0.0;
   quint64 revision = 0;
+  bool inspectionEnabled = false;
+  int ptzPreset = 0;
+  QString recognitionPrompt;
 };
 
 struct PatrolRouteStepInfo {
   QString stepId, pointId, pointName;
   double x = 0.0, y = 0.0, yaw = 0.0, dwellSeconds = 0.0;
+  bool inspectionEnabled = false;
+  int ptzPreset = 0;
+  QString recognitionPrompt;
 };
 
 struct PatrolRouteInfo {
@@ -51,6 +57,16 @@ struct PatrolRunInfo {
   quint64 routeRevision = 0, mapRevision = 0;
 };
 
+struct PatrolInspectionResultInfo {
+  QString resultId, runId, mapId, pointId, pointName, prompt, imagePath, text, model;
+  quint32 loopIndex = 0, stepIndex = 0;
+  int ptzPreset = 0;
+  bool success = false;
+  QString errorCode, message;
+  qint64 startedAtNs = 0, finishedAtNs = 0;
+  QString startedAtText;
+};
+
 struct PatrolStatusInfo {
   QString instanceId, runId, routeId, mapId, currentPointName, errorCode, message, currentGoalId;
   int state = 0;
@@ -75,9 +91,13 @@ public:
   void setActiveMap(const QString &mapId, quint64 expectedRevision);
   void refreshPoints(const QString &mapId = QString());
   void upsertPoint(const QString &pointId, const QString &mapId, const QString &name,
-                   double x, double y, double yaw, quint64 expectedRevision);
+                   double x, double y, double yaw, quint64 expectedRevision,
+                   bool inspectionEnabled = false, int ptzPreset = 0,
+                   const QString &recognitionPrompt = QString());
   void deletePoint(const QString &pointId, quint64 expectedRevision);
-  void saveCurrentPoint(const QString &mapId, const QString &name);
+  void saveCurrentPoint(const QString &mapId, const QString &name,
+                        bool inspectionEnabled = false, int ptzPreset = 0,
+                        const QString &recognitionPrompt = QString());
   void refreshRoutes(const QString &mapId = QString());
   void upsertRoute(const QString &routeId, const QString &mapId, const QString &name,
                    const QVector<PatrolRouteStepInfo> &steps, quint64 expectedRevision,
@@ -85,6 +105,8 @@ public:
                    quint64 networkRevision = 0);
   void deleteRoute(const QString &routeId, quint64 expectedRevision);
   void refreshRuns(const QString &mapId = QString(), const QString &routeId = QString());
+  void refreshInspectionResults(const QString &mapId = QString(),
+                                const QString &runId = QString(), quint32 limit = 100);
   void refreshHomePoint(const QString &mapId = QString());
   void saveCurrentPoseAsHome(const QString &mapId, quint64 expectedMapRevision);
   void clearHomePoint(const QString &mapId, quint64 expectedMapRevision);
@@ -108,6 +130,7 @@ public:
   QVector<PatrolPointInfo> points() const;
   QVector<PatrolRouteInfo> routes() const;
   QVector<PatrolRunInfo> runs() const;
+  QVector<PatrolInspectionResultInfo> inspectionResults() const;
   PatrolHomeInfo homePoint() const;
   PatrolStatusInfo status() const;
 
@@ -118,6 +141,7 @@ signals:
   void pointsChanged();
   void routesChanged();
   void runsChanged();
+  void inspectionResultsChanged();
   void homePointChanged();
   void statusChanged();
   void operationFinished(const QString &operation, bool success, const QString &message);

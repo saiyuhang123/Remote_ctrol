@@ -26,7 +26,8 @@ setup(
     tests_require=['pytest'],
     entry_points={
         'console_scripts': [
-            'ocr_node = ocr_node.ocr_node:main'
+            'ocr_node = ocr_node.ocr_node:main',
+            'deepseek_vision = ocr_node.deepseek_vision:main'
         ],
     },
 )

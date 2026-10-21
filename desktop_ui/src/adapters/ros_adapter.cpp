@@ -33,6 +33,7 @@
 #include <hk_camera/srv/set_ptz_pose.hpp>
 #include <hk_camera/srv/get_ptz_pose.hpp>
 #include <hk_camera/srv/control_ptz.hpp>
+#include <hk_camera/srv/ptz_preset.hpp>
 #endif
 #ifdef DESKTOP_HAS_OCR_INTERFACES
 #include <ocr_interfaces/srv/recognize_text.hpp>
@@ -124,6 +125,7 @@ struct RosAdapter::Impl {
     clients["/hk_camera/set_ptz_pose"] = node->create_client<hk_camera::srv::SetPTZPose>("/hk_camera/set_ptz_pose");
     clients["/hk_camera/get_ptz_pose"] = node->create_client<hk_camera::srv::GetPTZPose>("/hk_camera/get_ptz_pose");
     clients["/hk_camera/control_ptz"] = node->create_client<hk_camera::srv::ControlPTZ>("/hk_camera/control_ptz");
+    clients["/hk_camera/preset"] = node->create_client<hk_camera::srv::PTZPreset>("/hk_camera/preset");
 #endif
 #ifdef DESKTOP_HAS_OCR_INTERFACES
     clients["/ocr/recognize"] = node->create_client<ocr_interfaces::srv::RecognizeText>("/ocr/recognize");
@@ -434,6 +436,32 @@ void RosAdapter::setPtz(double pan, double tilt, double zoom) {
   emit requestFinished("ptz", false, "构建时未发现 hk_camera 消息包");
 #endif
 }
+void RosAdapter::setPtzPreset(int action, int presetNo) {
+#ifdef DESKTOP_HAS_HK_CAMERA
+  if (action < 0 || action > 2 || presetNo < 1 || presetNo > 255) {
+    emit requestFinished("ptz_preset", false, "预置位参数无效"); return;
+  }
+  auto req = std::make_shared<hk_camera::srv::PTZPreset::Request>();
+  req->action = static_cast<uint8_t>(action);
+  req->preset_no = static_cast<uint8_t>(presetNo);
+  impl_->request<hk_camera::srv::PTZPreset>("ptz_preset", "/hk_camera/preset", req,
+      [this](auto r) {
+        emit requestFinished("ptz_preset", r->success, QString::fromStdString(r->message));
+      });
+#else
+  Q_UNUSED(action); Q_UNUSED(presetNo);
+  emit requestFinished("ptz_preset", false, "构建时未发现 hk_camera 消息包");
+#endif
+}
+
+bool RosAdapter::ptzPresetAvailable() const {
+#ifdef DESKTOP_HAS_HK_CAMERA
+  return impl_->clients.at("/hk_camera/preset")->service_is_ready();
+#else
+  return false;
+#endif
+}
+
 bool RosAdapter::cameraAvailable() const {
   const auto client = impl_->clients.at("/hk_camera/login");
   return client->service_is_ready() && impl_->clients.at("/hk_camera/start_stream")->service_is_ready();

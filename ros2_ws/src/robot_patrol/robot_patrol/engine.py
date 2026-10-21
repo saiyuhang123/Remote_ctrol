@@ -24,6 +24,7 @@ STATE_SUCCEEDED = 10
 STATE_FAILED = 11
 STATE_INTERRUPTED = 12
 STATE_STOPPING = 13
+STATE_INSPECTING = 14
 
 
 class ControlFlags:
@@ -106,7 +107,7 @@ class PatrolEngine:
                  loop_count: int, owner_session_id: str, driver: Any,
                  status_cb: Callable[[dict[str, Any]], None],
                  settle_timeout: float = 10.0, point_timeout: float = 300.0,
-                 min_dispatch_interval: float = 0.5):
+                 min_dispatch_interval: float = 0.5, inspection_cb: Callable | None = None):
         self.store = store
         self.snapshot = snapshot
         self.run_id = run_id
@@ -117,6 +118,7 @@ class PatrolEngine:
         self.settle_timeout = max(0.1, float(settle_timeout))
         self.point_timeout = max(1.0, float(point_timeout))
         self.min_dispatch_interval = max(0.0, float(min_dispatch_interval))
+        self.inspection_cb = inspection_cb
         self.flags = ControlFlags()
         self._status_lock = threading.RLock()
         self._status: dict[str, Any] = {
@@ -319,6 +321,29 @@ class PatrolEngine:
                         actual = settle[1]
                         self._record_attempt(loop_index, step_index, attempt_index, step,
                                              "SUCCEEDED", actual, started_at)
+                        if bool(getattr(step, "inspection_enabled", False)) and self.inspection_cb:
+                            self._set_status(
+                                state=STATE_INSPECTING, loop_index=loop_index,
+                                step_index=step_index, current_point_name=step.point_name,
+                                message="到达巡检点，正在执行云台抓拍与识别")
+                            try:
+                                outcome = self.inspection_cb(
+                                    step, self.run_id, self.snapshot.map_id,
+                                    loop_index, step_index, self._set_status)
+                            except Exception as error:  # noqa: BLE001 - external services
+                                return self._failed(
+                                    completed_loops, completed_steps, "INSPECTION_FAILED",
+                                    f"巡检点动作异常：{error}")
+                            if not bool(getattr(outcome, "success", False)):
+                                code = str(getattr(outcome, "error_code", "") or
+                                           "INSPECTION_FAILED")
+                                detail = str(getattr(outcome, "message", "") or
+                                             "巡检点抓拍/识别失败")
+                                return self._failed(completed_loops, completed_steps, code,
+                                                    detail)
+                            detail = str(getattr(outcome, "text", "") or "识别完成")
+                            self._set_status(state=STATE_DWELLING,
+                                             message=f"识别完成：{detail[:300]}")
                         dwell_result = self._run_dwell(step, step.dwell_seconds)
                         if dwell_result == "CANCELED":
                             return self._canceled(completed_loops, completed_steps)

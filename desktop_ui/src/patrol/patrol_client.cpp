@@ -1,6 +1,7 @@
 #include "patrol/patrol_client.h"
 
 #include <QUuid>
+#include <QDateTime>
 #include <QJsonDocument>
 #include <algorithm>
 #include <atomic>
@@ -27,6 +28,8 @@
 #include <patrol_interfaces/srv/delete_route.hpp>
 #include <patrol_interfaces/srv/get_home_point.hpp>
 #include <patrol_interfaces/srv/get_runs.hpp>
+#include <patrol_interfaces/srv/get_inspection_results.hpp>
+#include <patrol_interfaces/msg/inspection_result.hpp>
 #include <patrol_interfaces/srv/list_maps.hpp>
 #include <patrol_interfaces/srv/list_points.hpp>
 #include <patrol_interfaces/srv/list_routes.hpp>
@@ -66,6 +69,9 @@ PatrolPointInfo pointInfo(const patrol_interfaces::msg::PatrolPoint &message) {
   info.x = message.x; info.y = message.y; info.yaw = message.yaw;
   info.source = QString::fromStdString(message.source);
   info.revision = message.revision;
+  info.inspectionEnabled = message.inspection_enabled;
+  info.ptzPreset = static_cast<int>(message.ptz_preset);
+  info.recognitionPrompt = QString::fromStdString(message.recognition_prompt);
   return info;
 }
 
@@ -85,6 +91,9 @@ PatrolRouteInfo routeInfo(const patrol_interfaces::msg::PatrolRoute &message) {
     step.pointName = QString::fromStdString(stepMessage.point_name);
     step.x = stepMessage.x; step.y = stepMessage.y; step.yaw = stepMessage.yaw;
     step.dwellSeconds = stepMessage.dwell_seconds;
+    step.inspectionEnabled = stepMessage.inspection_enabled;
+    step.ptzPreset = static_cast<int>(stepMessage.ptz_preset);
+    step.recognitionPrompt = QString::fromStdString(stepMessage.recognition_prompt);
     info.steps.push_back(step);
   }
   return info;
@@ -103,6 +112,31 @@ PatrolRunInfo runInfo(const patrol_interfaces::msg::RunRecord &message) {
   info.message = QString::fromStdString(message.message);
   info.routeRevision = message.route_revision;
   info.mapRevision = message.map_revision;
+  return info;
+}
+
+PatrolInspectionResultInfo inspectionResultInfo(
+    const patrol_interfaces::msg::InspectionResult &message) {
+  PatrolInspectionResultInfo info;
+  info.resultId = QString::fromStdString(message.result_id);
+  info.runId = QString::fromStdString(message.run_id);
+  info.mapId = QString::fromStdString(message.map_id);
+  info.pointId = QString::fromStdString(message.point_id);
+  info.pointName = QString::fromStdString(message.point_name);
+  info.loopIndex = message.loop_index; info.stepIndex = message.step_index;
+  info.ptzPreset = static_cast<int>(message.ptz_preset);
+  info.prompt = QString::fromStdString(message.prompt);
+  info.imagePath = QString::fromStdString(message.image_path);
+  info.text = QString::fromStdString(message.text);
+  info.model = QString::fromStdString(message.model);
+  info.success = message.success;
+  info.errorCode = QString::fromStdString(message.error_code);
+  info.message = QString::fromStdString(message.message);
+  const qint64 sec = static_cast<qint64>(message.started_at.sec);
+  info.startedAtNs = sec * 1000000000LL + message.started_at.nanosec;
+  info.startedAtText = QDateTime::fromSecsSinceEpoch(sec).toString("MM-dd HH:mm:ss");
+  const qint64 finishedSec = static_cast<qint64>(message.finished_at.sec);
+  info.finishedAtNs = finishedSec * 1000000000LL + message.finished_at.nanosec;
   return info;
 }
 
@@ -146,6 +180,7 @@ struct PatrolClient::Impl {
   rclcpp::Client<patrol_interfaces::srv::UpsertRoute>::SharedPtr upsertRoute;
   rclcpp::Client<patrol_interfaces::srv::DeleteRoute>::SharedPtr deleteRoute;
   rclcpp::Client<patrol_interfaces::srv::GetRuns>::SharedPtr getRuns;
+  rclcpp::Client<patrol_interfaces::srv::GetInspectionResults>::SharedPtr getInspectionResults;
   rclcpp::Client<patrol_interfaces::srv::GetHomePoint>::SharedPtr getHomePoint;
   rclcpp::Client<patrol_interfaces::srv::SetHomePoint>::SharedPtr setHomePoint;
   rclcpp::Client<patrol_interfaces::srv::ControlRun>::SharedPtr controlRun;
@@ -170,6 +205,7 @@ struct PatrolClient::Impl {
   QVector<PatrolPointInfo> pointsData;
   QVector<PatrolRouteInfo> routesData;
   QVector<PatrolRunInfo> runsData;
+  QVector<PatrolInspectionResultInfo> inspectionResultsData;
   PatrolHomeInfo homeData;
   PatrolStatusInfo statusData;
 
@@ -186,6 +222,8 @@ struct PatrolClient::Impl {
     upsertRoute = node->create_client<patrol_interfaces::srv::UpsertRoute>("/patrol/upsert_route");
     deleteRoute = node->create_client<patrol_interfaces::srv::DeleteRoute>("/patrol/delete_route");
     getRuns = node->create_client<patrol_interfaces::srv::GetRuns>("/patrol/get_runs");
+    getInspectionResults = node->create_client<patrol_interfaces::srv::GetInspectionResults>(
+        "/patrol/get_inspection_results");
     getHomePoint = node->create_client<patrol_interfaces::srv::GetHomePoint>("/patrol/get_home_point");
     setHomePoint = node->create_client<patrol_interfaces::srv::SetHomePoint>("/patrol/set_home_point");
     controlRun = node->create_client<patrol_interfaces::srv::ControlRun>("/patrol/control");
@@ -253,6 +291,7 @@ struct PatrolClient::Impl {
     else if constexpr (std::is_same_v<Service, patrol_interfaces::srv::UpsertRoute>) client = upsertRoute;
     else if constexpr (std::is_same_v<Service, patrol_interfaces::srv::DeleteRoute>) client = deleteRoute;
     else if constexpr (std::is_same_v<Service, patrol_interfaces::srv::GetRuns>) client = getRuns;
+    else if constexpr (std::is_same_v<Service, patrol_interfaces::srv::GetInspectionResults>) client = getInspectionResults;
     else if constexpr (std::is_same_v<Service, patrol_interfaces::srv::GetHomePoint>) client = getHomePoint;
     else if constexpr (std::is_same_v<Service, patrol_interfaces::srv::SetHomePoint>) client = setHomePoint;
     else if constexpr (std::is_same_v<Service, patrol_interfaces::srv::ControlRun>) client = controlRun;
@@ -346,6 +385,15 @@ QVector<PatrolRunInfo> PatrolClient::runs() const {
 #endif
 }
 
+QVector<PatrolInspectionResultInfo> PatrolClient::inspectionResults() const {
+#ifdef DESKTOP_HAS_PATROL_INTERFACES
+  std::lock_guard<std::mutex> lock(impl_->mutex);
+  return impl_->inspectionResultsData;
+#else
+  return {};
+#endif
+}
+
 PatrolHomeInfo PatrolClient::homePoint() const {
 #ifdef DESKTOP_HAS_PATROL_INTERFACES
   std::lock_guard<std::mutex> lock(impl_->mutex);
@@ -382,6 +430,7 @@ QString PatrolClient::stateName(int state) {
     case 11: return QStringLiteral("失败");
     case 12: return QStringLiteral("已中断");
     case 13: return QStringLiteral("停止中");
+    case 14: return QStringLiteral("云台巡检中");
     default: return QStringLiteral("未知");
   }
 }
@@ -471,12 +520,17 @@ void PatrolClient::refreshPoints(const QString &mapId) {
 }
 
 void PatrolClient::upsertPoint(const QString &pointId, const QString &mapId, const QString &name,
-                               double x, double y, double yaw, quint64 expectedRevision) {
+                               double x, double y, double yaw, quint64 expectedRevision,
+                               bool inspectionEnabled, int ptzPreset,
+                               const QString &recognitionPrompt) {
 #ifdef DESKTOP_HAS_PATROL_INTERFACES
   auto request = std::make_shared<patrol_interfaces::srv::UpsertPoint::Request>();
   request->point_id = pointId.toStdString(); request->map_id = mapId.toStdString();
   request->name = name.toStdString(); request->x = x; request->y = y; request->yaw = yaw;
   request->expected_revision = expectedRevision;
+  request->inspection_enabled = inspectionEnabled;
+  request->ptz_preset = static_cast<uint8_t>(std::clamp(ptzPreset, 0, 255));
+  request->recognition_prompt = recognitionPrompt.toStdString();
   impl_->call<patrol_interfaces::srv::UpsertPoint>(
       "/patrol/upsert_point", QStringLiteral("保存点位"), request,
       [this, mapId](const patrol_interfaces::srv::UpsertPoint::Response &response) {
@@ -487,7 +541,8 @@ void PatrolClient::upsertPoint(const QString &pointId, const QString &mapId, con
       });
 #else
   Q_UNUSED(pointId); Q_UNUSED(mapId); Q_UNUSED(name); Q_UNUSED(x); Q_UNUSED(y); Q_UNUSED(yaw);
-  Q_UNUSED(expectedRevision);
+  Q_UNUSED(expectedRevision); Q_UNUSED(inspectionEnabled); Q_UNUSED(ptzPreset);
+  Q_UNUSED(recognitionPrompt);
   PATROL_UNAVAILABLE(QStringLiteral("保存点位"));
 #endif
 }
@@ -511,11 +566,16 @@ void PatrolClient::deletePoint(const QString &pointId, quint64 expectedRevision)
 #endif
 }
 
-void PatrolClient::saveCurrentPoint(const QString &mapId, const QString &name) {
+void PatrolClient::saveCurrentPoint(const QString &mapId, const QString &name,
+                                    bool inspectionEnabled, int ptzPreset,
+                                    const QString &recognitionPrompt) {
 #ifdef DESKTOP_HAS_PATROL_INTERFACES
   auto request = std::make_shared<patrol_interfaces::srv::SaveCurrentPoint::Request>();
   request->map_id = mapId.toStdString(); request->name = name.toStdString();
   request->request_id = QUuid::createUuid().toString(QUuid::WithoutBraces).toStdString();
+  request->inspection_enabled = inspectionEnabled;
+  request->ptz_preset = static_cast<uint8_t>(std::clamp(ptzPreset, 0, 255));
+  request->recognition_prompt = recognitionPrompt.toStdString();
   impl_->call<patrol_interfaces::srv::SaveCurrentPoint>(
       "/patrol/save_current_point", QStringLiteral("保存当前位置为点位"), request,
       [this, mapId](const patrol_interfaces::srv::SaveCurrentPoint::Response &response) {
@@ -526,7 +586,8 @@ void PatrolClient::saveCurrentPoint(const QString &mapId, const QString &name) {
         refreshRoutes(mapId);
       });
 #else
-  Q_UNUSED(mapId); Q_UNUSED(name);
+  Q_UNUSED(mapId); Q_UNUSED(name); Q_UNUSED(inspectionEnabled); Q_UNUSED(ptzPreset);
+  Q_UNUSED(recognitionPrompt);
   PATROL_UNAVAILABLE(QStringLiteral("保存当前位置为点位"));
 #endif
 }
@@ -563,6 +624,9 @@ void PatrolClient::upsertRoute(const QString &routeId, const QString &mapId, con
     patrol_interfaces::msg::RouteStep step;
     step.point_id = stepInfo.pointId.toStdString();
     step.dwell_seconds = stepInfo.dwellSeconds;
+    step.inspection_enabled = stepInfo.inspectionEnabled;
+    step.ptz_preset = static_cast<uint8_t>(std::clamp(stepInfo.ptzPreset, 0, 255));
+    step.recognition_prompt = stepInfo.recognitionPrompt.toStdString();
     request->steps.push_back(step);
   }
   impl_->call<patrol_interfaces::srv::UpsertRoute>(
@@ -612,6 +676,31 @@ void PatrolClient::refreshRuns(const QString &mapId, const QString &routeId) {
 #else
   Q_UNUSED(mapId); Q_UNUSED(routeId);
   PATROL_UNAVAILABLE(QStringLiteral("刷新任务记录"));
+#endif
+}
+
+void PatrolClient::refreshInspectionResults(const QString &mapId, const QString &runId,
+                                            quint32 limit) {
+#ifdef DESKTOP_HAS_PATROL_INTERFACES
+  auto request = std::make_shared<patrol_interfaces::srv::GetInspectionResults::Request>();
+  request->map_id = mapId.toStdString(); request->run_id = runId.toStdString();
+  request->limit = limit;
+  impl_->call<patrol_interfaces::srv::GetInspectionResults>(
+      "/patrol/get_inspection_results", QStringLiteral("刷新巡检识别结果"), request,
+      [this](const patrol_interfaces::srv::GetInspectionResults::Response &response) {
+        if (!response.success) {
+          emit errorOccurred(QString::fromStdString(response.message)); return;
+        }
+        { std::lock_guard<std::mutex> lock(impl_->mutex);
+          impl_->inspectionResultsData.clear();
+          impl_->inspectionResultsData.reserve(response.results.size());
+          for (const auto &item : response.results)
+            impl_->inspectionResultsData.push_back(inspectionResultInfo(item)); }
+        emit inspectionResultsChanged();
+      });
+#else
+  Q_UNUSED(mapId); Q_UNUSED(runId); Q_UNUSED(limit);
+  PATROL_UNAVAILABLE(QStringLiteral("刷新巡检识别结果"));
 #endif
 }
 

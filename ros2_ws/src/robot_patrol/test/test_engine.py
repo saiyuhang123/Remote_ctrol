@@ -187,3 +187,63 @@ def test_unsafe_pause_cannot_redispatch_after_resume(tmp_path):
     assert result.error_code == "CANCEL_UNCONFIRMED"
     assert driver.calls == ["A"], "a second Nav2 goal was dispatched after unsafe resume"
     store.close()
+
+
+def test_inspection_runs_after_arrival_before_dwell(tmp_path):
+    from robot_patrol.engine import STATE_INSPECTING
+    store, mapping = make_store(tmp_path)
+    driver = FakeDriver()
+    run_id = "run-inspection"
+    route = snapshot(["A"], dwell=0.0)
+    route.map_id = mapping.map_id
+    route.steps[0].inspection_enabled = True
+    route.steps[0].ptz_preset = 90
+    route.steps[0].recognition_prompt = "读取仪表"
+    store.create_run(run_id, "route", mapping.map_id, 1, mapping.revision,
+                     route.as_dict(), 1, 1, 1)
+    statuses = []
+    calls = []
+
+    def inspection(step, run_id_, map_id, loop_index, step_index, status_cb):
+        calls.append((step.point_id, run_id_, map_id, loop_index, step_index))
+        status_cb(state=STATE_INSPECTING, message="云台巡检中")
+        return type("Outcome", (), {
+            "success": True, "text": "仪表读数 220V", "message": "ok",
+            "error_code": "", "image_path": "/tmp/result.jpg", "model": "deepseek-flash",
+        })()
+
+    engine = PatrolEngine(store, route, run_id, 1, "owner", driver, statuses.append,
+                          settle_timeout=1.0, point_timeout=1.0,
+                          min_dispatch_interval=0.0, inspection_cb=inspection)
+    result = engine.run()
+    assert result.success
+    assert calls == [("A", run_id, mapping.map_id, 1, 1)]
+    assert any(item["state"] == STATE_INSPECTING for item in statuses)
+    assert any("识别完成" in item.get("message", "") for item in statuses)
+    store.close()
+
+
+def test_inspection_failure_fails_route(tmp_path):
+    store, mapping = make_store(tmp_path)
+    driver = FakeDriver()
+    run_id = "run-inspection-fail"
+    route = snapshot(["A"], dwell=0.0)
+    route.steps[0].inspection_enabled = True
+    store.create_run(run_id, "route", mapping.map_id, 1, mapping.revision,
+                     route.as_dict(), 1, 1, 1)
+
+    def inspection(_step, _run_id, _map_id, _loop, _step_index, _status_cb):
+        return type("Outcome", (), {
+            "success": False, "text": "", "message": "云台服务未就绪",
+            "error_code": "INSPECTION_UNAVAILABLE", "image_path": "",
+            "model": "",
+        })()
+
+    engine = PatrolEngine(store, route, run_id, 1, "owner", driver, lambda _s: None,
+                          settle_timeout=1.0, point_timeout=1.0,
+                          min_dispatch_interval=0.0, inspection_cb=inspection)
+    result = engine.run()
+    assert not result.success
+    assert result.error_code == "INSPECTION_UNAVAILABLE"
+    assert "云台服务未就绪" in result.message
+    store.close()

@@ -78,6 +78,9 @@ class Point:
     revision: int
     created_at_ns: int = 0
     updated_at_ns: int = 0
+    inspection_enabled: bool = False
+    ptz_preset: int = 0
+    recognition_prompt: str = ""
 
 
 @dataclass
@@ -90,6 +93,9 @@ class RouteStep:
     x: float = 0.0
     y: float = 0.0
     yaw: float = 0.0
+    inspection_enabled: bool = False
+    ptz_preset: int = 0
+    recognition_prompt: str = ""
 
 
 @dataclass
@@ -150,6 +156,9 @@ class RouteSnapshot:
                     "yaw": step.yaw,
                     "dwell_seconds": step.dwell_seconds,
                     "order": step.order,
+                    "inspection_enabled": bool(getattr(step, "inspection_enabled", False)),
+                    "ptz_preset": int(getattr(step, "ptz_preset", 0)),
+                    "recognition_prompt": str(getattr(step, "recognition_prompt", "") or ""),
                 }
                 for step in self.steps
             ],
@@ -189,6 +198,39 @@ class InspectionSummary:
             "plates": list(self.plates),
             "updated_at": self.updated_at_ns / 1_000_000_000.0,
         }
+
+@dataclass
+class InspectionResult:
+    result_id: str
+    run_id: str
+    map_id: str
+    point_id: str
+    point_name: str
+    loop_index: int
+    step_index: int
+    started_at_ns: int
+    finished_at_ns: int
+    ptz_preset: int
+    prompt: str
+    image_path: str
+    text: str
+    model: str
+    success: bool
+    error_code: str = ""
+    message: str = ""
+
+
+def validate_inspection_settings(enabled: bool, preset: int,
+                                   prompt: str) -> tuple[bool, int, str]:
+    enabled = bool(enabled)
+    try:
+        preset = int(preset)
+    except (TypeError, ValueError) as error:
+        raise PatrolError("INVALID_DATA", "云台预置位编号必须是整数") from error
+    if enabled and not (1 <= preset <= 255):
+        raise PatrolError("INVALID_DATA", "启用巡检动作时必须选择 1～255 的云台预置位")
+    return enabled, preset, str(prompt or "")[:2000]
+
 
 def validate_point_values(x: float, y: float, yaw: float) -> tuple[float, float, float]:
     return (require_finite(x, "x"), require_finite(y, "y"), require_finite(yaw, "yaw"))

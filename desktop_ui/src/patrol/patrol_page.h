@@ -8,6 +8,8 @@
 
 class QComboBox;
 class QDoubleSpinBox;
+class QCheckBox;
+class QPlainTextEdit;
 class QLabel;
 class QLineEdit;
 class QPushButton;
@@ -17,6 +19,7 @@ class QTabWidget;
 class QGraphicsScene;
 class QGraphicsView;
 class QCloseEvent;
+class RosAdapter;
 
 class PatrolPage : public QWidget {
   Q_OBJECT
@@ -25,7 +28,7 @@ public:
              const QString &backend, const QString &localizationFile,
              const QString &profileName, bool offline = false,
              std::function<bool(QString *)> startPermission = {},
-             QWidget *parent = nullptr);
+             QWidget *parent = nullptr, RosAdapter *ros = nullptr);
 
   PatrolClient *client() const { return client_; }
   QString activeMapId() const { return activeMapId_; }
@@ -38,6 +41,7 @@ private slots:
   void onPointsChanged();
   void onRoutesChanged();
   void onRunsChanged();
+  void onInspectionResultsChanged();
   void onHomePointChanged();
   void onStatusChanged();
   void registerCurrentMap();
@@ -71,6 +75,7 @@ private:
   void populatePoints();
   void populateRoutes();
   void populateRuns();
+  void populateInspectionResults();
   void populateAvailablePoints();
   void loadRouteIntoEditor(const PatrolRouteInfo &route);
   void clearRouteEditor();
@@ -87,6 +92,7 @@ private:
   void dispatchRun();
 
   PatrolClient *client_ = nullptr;
+  RosAdapter *ros_ = nullptr;
   QString mapYaml_;
   QString backend_;
   QString localizationFile_;
@@ -123,6 +129,13 @@ private:
   QDoubleSpinBox *pointX_ = nullptr;
   QDoubleSpinBox *pointY_ = nullptr;
   QDoubleSpinBox *pointYaw_ = nullptr;
+  QCheckBox *pointInspectionEnabled_ = nullptr;
+  QPushButton *pointReadPtzButton_ = nullptr;
+  QSpinBox *pointPtzPreset_ = nullptr;
+  QPushButton *pointSavePtzPreset_ = nullptr;
+  QPushButton *pointGotoPtzPreset_ = nullptr;
+  QPlainTextEdit *pointRecognitionPrompt_ = nullptr;
+  QWidget *pointInspectionGroup_ = nullptr;
   QPushButton *saveCurrentPointButton_ = nullptr;
   QPushButton *upsertPointButton_ = nullptr;
   QPushButton *deletePointButton_ = nullptr;
@@ -162,5 +175,7 @@ private:
   QLabel *progressLabel_ = nullptr;
 
   QTableWidget *runsTable_ = nullptr;
+  QTableWidget *inspectionResultsTable_ = nullptr;
   QPushButton *refreshRunsButton_ = nullptr;
+  QPushButton *refreshInspectionResultsButton_ = nullptr;
 };

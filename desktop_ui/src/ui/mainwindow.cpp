@@ -446,7 +446,8 @@ void MainWindow::openPatrolPage() {
     return basePermission(reason);
   };
   patrolPage_ = new PatrolPage(patrolClient_, navYaml, profile().backend,
-                               localizationFile, profile().name, offline_, startPermission, dialog);
+                               localizationFile, profile().name, offline_, startPermission,
+                               dialog, ros_);
   patrolPage_->setResumePermission(resumePermission);
   layout->addWidget(patrolPage_);
   patrolWindow_ = dialog;

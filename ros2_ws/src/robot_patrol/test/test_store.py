@@ -168,3 +168,37 @@ def test_v1_database_is_migrated_without_losing_maps(tmp_path):
         assert {"home_points", "inspection_summary", "active_map_state"} <= names
     finally:
         migrated.close()
+
+
+def test_point_inspection_fields_and_result_history_round_trip(store):
+    from robot_patrol.models import InspectionResult
+    mapping = store.upsert_map(map_data())
+    point = store.upsert_point(
+        "", mapping.map_id, "仪表点", 1.0, 2.0, 0.3, "manual", 1,
+        inspection_enabled=True, ptz_preset=90,
+        recognition_prompt="读取电压")
+    assert point.inspection_enabled
+    assert point.ptz_preset == 90
+    assert point.recognition_prompt == "读取电压"
+    route = store.upsert_route(
+        "", mapping.map_id, "route",
+        [type("S", (), {"point_id": point.point_id, "dwell_seconds": 0})(),])
+    step = route.steps[0]
+    assert step.inspection_enabled
+    assert step.ptz_preset == 90
+    store.create_run("run-result", route.route_id, mapping.map_id, route.revision,
+                     mapping.revision, {'steps': []}, 1, 1, 1)
+    result = InspectionResult(
+        result_id="result-1", run_id="run-result", map_id=mapping.map_id,
+        point_id=point.point_id, point_name=point.name, loop_index=1, step_index=1,
+        started_at_ns=10, finished_at_ns=20, ptz_preset=90,
+        prompt="读取电压", image_path="/tmp/result.jpg",
+        text="220 V", model="deepseek-flash", success=True,
+    )
+    store.add_inspection_result(result)
+    loaded = store.list_inspection_results(mapping.map_id, "run-result", 10)
+    assert len(loaded) == 1
+    assert loaded[0].text == "220 V"
+    assert loaded[0].image_path == "/tmp/result.jpg"
+    assert loaded[0].ptz_preset == 90
+    assert loaded[0].success
