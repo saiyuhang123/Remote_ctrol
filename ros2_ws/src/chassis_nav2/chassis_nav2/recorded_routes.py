@@ -91,6 +91,7 @@ def nav2_overlay(executable, source_file, hw):
 
 
 def clearance_rewrites():
-    # Match normal Nav2's 10 cm inflation radius in recorded-route sessions.
-    # Full-body collision checks still decide whether a path can be executed.
-    return {'inflation_radius':'0.10','cost_scaling_factor':'3.0'}
+    # Do not let recorded-route enablement shrink the costmap safety margin.
+    # The padded footprint radius is about 0.33 m; 0.40 m keeps a real
+    # clearance band while still allowing normal doorway passage.
+    return {'inflation_radius':'0.40','cost_scaling_factor':'3.0'}

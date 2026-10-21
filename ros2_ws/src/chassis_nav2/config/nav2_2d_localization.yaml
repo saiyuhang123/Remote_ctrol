@@ -83,28 +83,28 @@ controller_server:
     general_goal_checker:
       stateful: true  # 进入容差即锁定成功，避免终点附近抖动反复判定
       plugin: nav2_controller::SimpleGoalChecker
-      # 位置容差 20cm；朝向容差放开（任意朝向均判到达，用户要求只管位置）
-      xy_goal_tolerance: 0.20
-      yaw_goal_tolerance: 6.283
+      # 自由导航：RPP 到点位置容差 10cm，朝向容差 50°。
+      xy_goal_tolerance: 0.10
+      yaw_goal_tolerance: 0.872664626
     FollowPath:
       plugin: nav2_regulated_pure_pursuit_controller::RegulatedPurePursuitController
-      desired_linear_vel: 0.5
-      # 前视距离随速度缩放：折返点（倒车→前进）前曲率大，regulated 减速会把前视压到 min，
-      # 换向发生在贴近折返点处，倒车段走得完整；固定 0.9 曾导致倒车不够就提前换前进，来回振荡
+      desired_linear_vel: 0.30
+      # 自由导航先采用前进-only：DUBIN 只规划前进路径，RPP 禁止倒车，
+      # 空间不足时规划失败停车，避免掉头时前进/倒车反复切换造成扭动。
       use_velocity_scaled_lookahead_dist: true
       lookahead_time: 1.5
-      min_lookahead_dist: 0.18
-      max_lookahead_dist: 0.7
+      min_lookahead_dist: 0.35
+      max_lookahead_dist: 0.80
       # 曲率减速阈值按本车最小转弯半径（0.5/tan24°≈1.12m）定：半径 <1.5m 的弯开始按比例减速，
       # 掉头/折返段实际车速更低 → 前视压向 min，换向更贴折返点（默认 0.9 对本车几乎不触发减速）
       use_regulated_linear_velocity_scaling: true
       regulated_linear_scaling_min_radius: 1.5
       rotate_to_heading_angular_vel: 0.5
       transform_tolerance: 0.5
-      xy_goal_tolerance: 0.20
+      xy_goal_tolerance: 0.10
       use_rotate_to_heading: false
       max_angular_accel: 1.5
-      allow_reversing: true
+      allow_reversing: false
 
 local_costmap:
   local_costmap:
@@ -120,13 +120,16 @@ local_costmap:
       height: 5
       resolution: 0.05
       footprint: '[ [0.50, 0.36], [0.50, -0.36], [-0.50, -0.36], [-0.50, 0.36] ]'
+      footprint_padding: 0.05
       plugins:
       - obstacle_layer
       - inflation_layer
       inflation_layer:
         plugin: nav2_costmap_2d::InflationLayer
-        cost_scaling_factor: 10.0  # 陡衰减：3cm 软带内代价就掉光，窄缝中心保持自由，通过性不受影响
-        inflation_radius: 0.10   # 按需求改为 10cm：已小于内切半径 0.29，软代价带基本消失，路径贴障、窄缝通过性最大；碰撞仅靠 footprint 对致命障碍格兜底
+        # Safety first: padded footprint radius is ~0.33m. Keep a real
+        # inflation band so the global path cannot hug walls/obstacles.
+        cost_scaling_factor: 3.0
+        inflation_radius: 0.40
       obstacle_layer:
         plugin: nav2_costmap_2d::ObstacleLayer
         enabled: true
@@ -153,6 +156,7 @@ global_costmap:
       robot_base_frame: base_link
       use_sim_time: false
       footprint: '[ [0.50, 0.36], [0.50, -0.36], [-0.50, -0.36], [-0.50, 0.36] ]'
+      footprint_padding: 0.05
       resolution: 0.05
       track_unknown_space: true
       plugins:
@@ -179,8 +183,10 @@ global_costmap:
         map_subscribe_transient_local: true
       inflation_layer:
         plugin: nav2_costmap_2d::InflationLayer
-        cost_scaling_factor: 10.0  # 陡衰减：3cm 软带内代价就掉光，窄缝中心保持自由，通过性不受影响
-        inflation_radius: 0.10   # 按需求改为 10cm：已小于内切半径 0.29，软代价带基本消失，路径贴障、窄缝通过性最大；碰撞仅靠 footprint 对致命障碍格兜底
+        # Safety first: padded footprint radius is ~0.33m. Keep a real
+        # inflation band so the global path cannot hug walls/obstacles.
+        cost_scaling_factor: 3.0
+        inflation_radius: 0.40
       always_send_full_costmap: true
 map_server:
   ros__parameters:
@@ -203,9 +209,9 @@ planner_server:
       plugin: nav2_smac_planner/SmacPlannerHybrid
       tolerance: 0.1
       use_astar: true
-      allow_unknown: true
+      allow_unknown: false
       minimum_turning_radius: 1.0
-      motion_model_for_search: REEDS_SHEPP
+      motion_model_for_search: DUBIN
       angle_quantization_bins: 72
       max_iterations: 1000000
       max_planning_time: 5.0

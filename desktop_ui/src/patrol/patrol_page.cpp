@@ -1,11 +1,15 @@
 #include "patrol/patrol_page.h"
-#include "patrol/recorded_road_page.h"
 #include "patrol/patrol_ui_style.h"
 
 #include <QComboBox>
 #include <QDoubleSpinBox>
 #include <QFileInfo>
 #include <QFormLayout>
+#include <QGraphicsScene>
+#include <QGraphicsSimpleTextItem>
+#include <QGraphicsView>
+#include <QBrush>
+#include <QPen>
 #include <QGroupBox>
 #include <QHBoxLayout>
 #include <QHeaderView>
@@ -304,7 +308,7 @@ void PatrolPage::buildUi() {
   navigationMode_ = new QComboBox(routeEditor);
   navigationMode_->setObjectName("patrolNavigationMode");
   navigationMode_->addItem("自由导航", "FREE_NAV");
-  navigationMode_->addItem("固定路线（沿录制路网）", "RECORDED_NETWORK");
+  navigationMode_->setToolTip("当前版本只启用自由导航：按点位顺序由 Nav2 导航到达");
   routeNameRow->addWidget(navigationMode_);
   routeEditorLayout->addLayout(routeNameRow);
   auto *modeRow = new QHBoxLayout;
@@ -315,6 +319,8 @@ void PatrolPage::buildUi() {
   previewRecorded_ = pageButton("预览实际路线", routeEditor, "patrolPreviewRecorded");
   modeRow->addWidget(routeNetwork_, 1);
   modeRow->addWidget(previewRecorded_);
+  routeNetwork_->hide();
+  previewRecorded_->hide();
   routeEditorLayout->addLayout(modeRow);
   auto *addStepRow = new QHBoxLayout;
   pointCombo_ = new QComboBox(routeEditor);
@@ -359,6 +365,22 @@ void PatrolPage::buildUi() {
   routeScroll->setWidget(routeEditor);
   editorCardLayout->addWidget(routeScroll, 1);
   routeRightLayout->addWidget(editorCard, 1);
+
+  auto *previewCard = patrolui::card(routeRight);
+  auto *previewLayout = new QVBoxLayout(previewCard);
+  previewLayout->setContentsMargins(14, 10, 14, 10);
+  previewLayout->setSpacing(6);
+  previewLayout->addWidget(patrolui::heading("点位预览（按路线顺序）", previewCard));
+  routePreviewScene_ = new QGraphicsScene(previewCard);
+  routePreview_ = new QGraphicsView(routePreviewScene_, previewCard);
+  routePreview_->setObjectName("patrolRoutePreview");
+  routePreview_->setMinimumHeight(130);
+  routePreview_->setMaximumHeight(190);
+  routePreview_->setRenderHints(QPainter::Antialiasing | QPainter::TextAntialiasing);
+  routePreview_->setBackgroundBrush(QColor("#f8fafc"));
+  routePreview_->setFrameShape(QFrame::StyledPanel);
+  previewLayout->addWidget(routePreview_);
+  routeRightLayout->addWidget(previewCard, 0);
 
   // Execution stays outside the editor's scroll area on shorter displays.
   auto *runGroup = patrolui::card(routeRight);
@@ -443,17 +465,10 @@ void PatrolPage::buildUi() {
     client_->roadCommand("EVENTS", {{"run_id", runsTable_->item(row, 0)->text()}});
   });
   tabs_->addTab(runsTab, "执行记录");
-  roadsPage_ = new RecordedRoadPage(client_, tabs_);
-  tabs_->addTab(roadsPage_, "录制路径");
-  connect(roadsPage_,&RecordedRoadPage::pathReady,this,[this](const QString &routeId){
-    if(routeId.isEmpty()) return;
-    if(!confirmDraftDiscard()) return;
-    routeDirty_=false;pendingPathRouteId_=routeId;planDigest_.clear();startAfterPlan_=false;
-    client_->refreshPoints(activeMapId_);client_->refreshRoutes(activeMapId_);client_->roadCommand("LIST");
-  });
+  // Fixed-route authoring/recorded-road UI is disabled in this build.
   root->addWidget(tabs_, 1);
 
-  messageLabel_ = patrolui::hint("在“录制路径”中手动录一遍并保存，即可选择路径开始巡检。也可自行编排已有导航点。", this);
+  messageLabel_ = patrolui::hint("当前只启用自由导航：在“点位管理”保存点位，在“路线与执行”加入点位并保存，开始后由 Nav2 导航到点。", this);
   messageLabel_->setObjectName("patrolMessage");
   messageLabel_->setTextFormat(Qt::PlainText);
   messageLabel_->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
@@ -579,7 +594,7 @@ void PatrolPage::buildUi() {
     if(!ok) {startAfterPlan_=false;planDigest_.clear();setMessage(message,true);updateActionStates();return;}
     if(data["route_id"].toString()!=currentRouteId_ || data["route_revision"].toVariant().toULongLong()!=currentRouteRevision_ ||
        data["loop_count"].toInt()!=loopCount_->value() || routeDirty_) return;
-    planDigest_=data["digest"].toString();roadsPage_->showPlan(data);
+    planDigest_=data["digest"].toString();
     QStringList parts;
     for(auto leg:data["legs"].toArray()) {auto l=leg.toObject();parts<<QString("%1 段录制道路").arg(l["edge_ids"].toArray().size());}
     setMessage(data["traversal"]=="SHUTTLE" ? "路径已验证：非闭环按趟往返，返程沿原轨迹倒车。"
@@ -790,8 +805,10 @@ void PatrolPage::populateAvailablePoints() {
 void PatrolPage::populateRoutes() {
   const int selectedRow = routesTable_->currentRow();
   routesTable_->setRowCount(0);
-  routesCountLabel_->setText(QStringLiteral("%1 条").arg(client_->routes().size()));
+  int visibleRoutes=0;
   for (const auto &route : client_->routes()) {
+    if (route.navigationMode=="RECORDED_NETWORK") continue;
+    ++visibleRoutes;
     const int row = routesTable_->rowCount();
     routesTable_->insertRow(row);
     auto *name = readOnlyItem(route.name);
@@ -801,6 +818,7 @@ void PatrolPage::populateRoutes() {
     routesTable_->setItem(row, 1, readOnlyItem(QString::number(route.steps.size())));
     routesTable_->setItem(row, 2, readOnlyItem(QString::number(route.revision)));
   }
+  routesCountLabel_->setText(QStringLiteral("%1 条").arg(visibleRoutes));
   for (int row = 0; row < routesTable_->rowCount(); ++row) {
     if (routesTable_->item(row, 0)->data(Qt::UserRole).toString() == currentRouteId_) {
       routesTable_->selectRow(row);
@@ -834,7 +852,7 @@ void PatrolPage::loadRouteIntoEditor(const PatrolRouteInfo &route) {
   currentRouteId_ = route.routeId;
   currentRouteRevision_ = route.revision;
   planDigest_.clear();
-  navigationMode_->setCurrentIndex(route.navigationMode=="RECORDED_NETWORK"?1:0);
+  navigationMode_->setCurrentIndex(0);
   int networkIndex=routeNetwork_->findData(route.networkId);
   if(networkIndex<0 && !route.networkId.isEmpty()) {
     routeNetwork_->addItem("已保存路网（待刷新）",route.networkId);networkIndex=routeNetwork_->count()-1;
@@ -873,6 +891,48 @@ void PatrolPage::syncStepTable() {
     stepsTable_->setItem(row, 3, readOnlyItem(QString::number(step.dwellSeconds, 'f', 1)));
   }
   updateEmptyTable(stepsTable_);
+  updateRoutePreview();
+}
+
+void PatrolPage::updateRoutePreview() {
+  if (!routePreview_ || !routePreviewScene_) return;
+  routePreviewScene_->clear();
+  if (currentSteps_.isEmpty()) {
+    auto *empty = routePreviewScene_->addSimpleText(QStringLiteral("尚未添加点位"));
+    empty->setBrush(QColor("#94a3b8"));
+    const QRectF rect(-100, -60, 200, 120);
+    routePreviewScene_->setSceneRect(rect);
+    routePreview_->fitInView(rect, Qt::KeepAspectRatio);
+    QTimer::singleShot(0, routePreview_, [view=routePreview_, rect] {
+      view->fitInView(rect, Qt::KeepAspectRatio);
+    });
+    return;
+  }
+  const QPen linePen(QColor("#94a3b8"), 2.0);
+  QPointF previous;
+  for (int i = 0; i < currentSteps_.size(); ++i) {
+    const auto &step = currentSteps_[i];
+    const QPointF point(step.x * 100.0, -step.y * 100.0);
+    if (i > 0) routePreviewScene_->addLine(QLineF(previous, point), linePen);
+    routePreviewScene_->addEllipse(point.x() - 9.0, point.y() - 9.0, 18.0, 18.0,
+                                   QPen(QColor("#2563eb"), 2.0), QBrush(Qt::white));
+    auto *number = routePreviewScene_->addSimpleText(QString::number(i + 1));
+    number->setBrush(QColor("#1d4ed8"));
+    number->setPos(point.x() - 4.0, point.y() - 8.0);
+    auto *name = routePreviewScene_->addSimpleText(step.pointName.isEmpty() ? step.pointId : step.pointName);
+    name->setBrush(QColor("#334155"));
+    name->setPos(point.x() + 12.0, point.y() - 18.0);
+    previous = point;
+  }
+  QRectF bounds = routePreviewScene_->itemsBoundingRect();
+  if (bounds.width() < 160.0) bounds.adjust(-80.0, 0.0, 80.0, 0.0);
+  if (bounds.height() < 80.0) bounds.adjust(0.0, -40.0, 0.0, 40.0);
+  const QRectF rect = bounds.adjusted(-24.0, -20.0, 24.0, 20.0);
+  routePreviewScene_->setSceneRect(rect);
+  routePreview_->fitInView(rect, Qt::KeepAspectRatio);
+  QTimer::singleShot(0, routePreview_, [view=routePreview_, rect] {
+    view->fitInView(rect, Qt::KeepAspectRatio);
+  });
 }
 
 void PatrolPage::updatePointFormFromSelection() {
@@ -995,12 +1055,7 @@ bool PatrolPage::confirmDraftDiscard() {
 void PatrolPage::closeEvent(QCloseEvent *event) {
   startAfterPlan_=false;planDigest_.clear();
   if(!confirmDraftDiscard()) {event->ignore();return;}
-  if(roadsPage_ && roadsPage_->hasDraft()) {
-    const auto choice=QMessageBox::question(this,"录制草稿","关闭前暂停录制并保留草稿，稍后可在“录制路径”中恢复。是否关闭？",
-                                           QMessageBox::Yes|QMessageBox::No,QMessageBox::No);
-    if(choice!=QMessageBox::Yes) {event->ignore();return;}
-    roadsPage_->pauseForClose();
-  }
+  // Fixed-route recording page is intentionally hidden in this build.
   QWidget::closeEvent(event);
 }
 
@@ -1220,7 +1275,8 @@ void PatrolPage::updateActionStates() {
   loopCount_->setToolTip(simple?"非闭环：1趟到另一端，2趟往返，3趟再去；可从任一端点开始，返程沿原轨迹倒车。闭环每次完整走一圈。0为持续执行。":"0 表示持续循环，其他数字表示执行圈数");
   if(fixed && planDigest_.isEmpty() && !simple) startBlockers << "固定路线尚未验证，请点击“预览实际路线”；缺路时需补录";
   if(startAfterPlan_) startBlockers << "正在检查路径，请稍候；可点击取消任务终止启动";
-  if(roadsPage_ && roadsPage_->hasDraft()) startBlockers << "录制草稿尚未保存或放弃";
+  // The recorded-road page is hidden in this build, so its stale draft must
+  // not block ordinary point-to-point navigation.
   if (activeRun) {
     startBlockers << (paused ? QStringLiteral("当前任务已暂停，请使用“继续”，或取消后再开始新任务")
                             : QStringLiteral("已有巡航或返航任务正在执行，请先取消并等待任务结束"));

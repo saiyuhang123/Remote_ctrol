@@ -14,7 +14,8 @@ class QPushButton;
 class QSpinBox;
 class QTableWidget;
 class QTabWidget;
-class RecordedRoadPage;
+class QGraphicsScene;
+class QGraphicsView;
 class QCloseEvent;
 
 class PatrolPage : public QWidget {
@@ -74,6 +75,7 @@ private:
   void loadRouteIntoEditor(const PatrolRouteInfo &route);
   void clearRouteEditor();
   void syncStepTable();
+  void updateRoutePreview();
   void updatePointFormFromSelection();
   void updateActionStates();
   void setMessage(const QString &message, bool error = false);
@@ -128,10 +130,11 @@ private:
   QTableWidget *routesTable_ = nullptr;
   QLineEdit *routeNameEdit_ = nullptr;
   QComboBox *pointCombo_ = nullptr;
+  QGraphicsView *routePreview_ = nullptr;
+  QGraphicsScene *routePreviewScene_ = nullptr;
   QComboBox *navigationMode_ = nullptr;
   QComboBox *routeNetwork_ = nullptr;
   QPushButton *previewRecorded_ = nullptr;
-  RecordedRoadPage *roadsPage_ = nullptr;
   QString planDigest_;
   QString pendingPathRouteId_;
   bool startAfterPlan_=false;

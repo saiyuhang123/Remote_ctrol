@@ -55,6 +55,36 @@ def test_recorded_routes_are_opt_in_and_have_independent_plugins():
         assert controller[progress+'.plugin']=='recorded_route_nav2::EntryProgressChecker'
 
 
+def test_free_navigation_uses_rpp_with_10cm_50deg_tolerance():
+    import xml.etree.ElementTree as ET
+    for name in ('navigate_to_pose_w_replanning_and_recovery.xml',
+                 'navigate_through_poses_w_replanning_and_recovery.xml'):
+        tree=ET.parse(SRC/'chassis_nav2/config/bt'/name)
+        nodes=[node for node in tree.iter('FollowPath')]
+        assert nodes and all(node.attrib.get('goal_checker_id')=='general_goal_checker' for node in nodes)
+    for name in ('nav2.yaml','nav2_2d_localization.yaml','nav2_carto_localization.yaml'):
+        controller=yaml.safe_load((SRC/'chassis_nav2/config'/name).read_text())['controller_server']['ros__parameters']
+        assert controller['controller_plugins']==['FollowPath']
+        assert controller['FollowPath']['plugin']=='nav2_regulated_pure_pursuit_controller::RegulatedPurePursuitController'
+        assert controller['general_goal_checker']['xy_goal_tolerance']==0.10
+        assert abs(controller['general_goal_checker']['yaw_goal_tolerance']-math.radians(50.0))<1e-9
+        assert controller['FollowPath']['xy_goal_tolerance']==0.10
+        document=yaml.safe_load((SRC/'chassis_nav2/config'/name).read_text())
+        planner=document['planner_server']['ros__parameters']['GridBased']
+        assert planner['allow_unknown'] is False
+        assert planner['motion_model_for_search']=='DUBIN'
+        assert controller['FollowPath']['allow_reversing'] is False
+        assert controller['FollowPath']['desired_linear_vel']==0.30
+        assert controller['FollowPath']['min_lookahead_dist']==0.35
+        assert controller['FollowPath']['max_lookahead_dist']==0.80
+        for costmap_name in ('local_costmap','global_costmap'):
+            costmap=document[costmap_name][costmap_name]['ros__parameters']
+            assert costmap['footprint_padding']>=0.05
+            assert costmap['inflation_layer']['inflation_radius']>=0.35
+    from chassis_nav2.recorded_routes import clearance_rewrites
+    assert clearance_rewrites()['inflation_radius']=='0.40'
+
+
 def test_desktop_recorded_markers_preserve_all_navigation_displays():
     for name in ('navigation','navigation_fastlio','navigation_amcl'):
         document=yaml.safe_load((ROOT/'desktop_ui/config/rviz'/f'{name}.rviz').read_text())

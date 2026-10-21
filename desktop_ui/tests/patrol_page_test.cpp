@@ -183,7 +183,7 @@ private slots:
     auto *start = page.findChild<QPushButton *>(QStringLiteral("patrolStart"));
     QVERIFY(mapEdit && tabs && registerMap && saveCurrent && start);
     QCOMPARE(mapEdit->text(), yaml);
-    QCOMPARE(tabs->count(), 4);
+    QCOMPARE(tabs->count(), 3); // 固定路线录制页暂时从操作界面移除
     QVERIFY(registerMap->isEnabled());
     QVERIFY(!saveCurrent->isEnabled()); // no active map yet
     QVERIFY(!start->isEnabled());
@@ -197,6 +197,7 @@ private slots:
   }
 
   void startReadinessTracksPermissionsBackendAndUnsavedRoute() {
+    QSKIP("固定路线导航 UI 已暂时禁用；当前版本只测试自由导航");
     using RunRoute = patrol_interfaces::action::RunRoute;
     auto node = std::make_shared<rclcpp::Node>("patrol_readiness_fixture");
     QTemporaryDir directory;
