@@ -1,0 +1,58 @@
+/**:
+  ros__parameters:
+    # Offline replay profile for bags/fastlio_z_20261021_160456.
+    # PointCloud2 fields: x y z intensity ring time; ring=0..15; time=seconds.
+    feature_extract_enable: false
+    point_filter_num: 4
+    max_iteration: 3
+    filter_size_surf: 0.5
+    filter_size_map: 0.5
+    cube_side_length: 1000.0
+    runtime_pos_log_enable: false
+    map_file_path: ''
+
+    lio_odom_frame: lio_odom
+    lio_body_frame: imu_link
+    runtime_log_dir: '/tmp/remote_ctrol_fast_lio_offline'
+
+    common:
+      lid_topic: /velodyne_points
+      imu_topic: /imu/data
+      time_sync_en: false
+      # LiDAR/IMU timestamps in the bag are both host/session timestamps.
+      # Keep 0 for baseline; sweep only after checking closure quality.
+      time_offset_lidar_to_imu: 0.0
+
+    preprocess:
+      lidar_type: 2          # Velodyne-style XYZIRT PointCloud2
+      scan_line: 16          # bag ring range is 0..15
+      blind: 1.5
+      timestamp_unit: 0      # 'time' field is seconds
+      scan_rate: 10
+
+    mapping:
+      acc_cov: 0.1
+      gyr_cov: 0.1
+      b_acc_cov: 0.0001
+      b_gyr_cov: 0.0001
+      fov_degree: 360.0
+      det_range: 100.0
+      extrinsic_est_en: false
+      # T_imu_lidar: LiDAR is 0.24 m above the IMU on the same x/y axis.
+      # Derived from hardware.yaml: inv(base_from_imu) * base_from_lidar.
+      extrinsic_T: [0.0, 0.0, 0.24]
+      extrinsic_R: [1.0, 0.0, 0.0,
+                    0.0, 1.0, 0.0,
+                    0.0, 0.0, 1.0]
+
+    publish:
+      path_en: true
+      effect_map_en: false
+      map_en: false          # /Laser_map would resend the accumulated map every second
+      scan_publish_en: true
+      dense_publish_en: true
+      scan_bodyframe_pub_en: true
+
+    pcd_save:
+      pcd_save_en: true
+      interval: -1
