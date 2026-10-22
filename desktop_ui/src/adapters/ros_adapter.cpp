@@ -275,7 +275,10 @@ struct RosAdapter::Impl {
     const auto id = pending.request_id;
     auto cancel = [client, done, id] { if (!done->exchange(true)) client->remove_pending_request(id); };
     cancelPending.emplace(key, cancel);
-    QTimer::singleShot(config.serviceTimeoutMs, owner, [this, client, done, id, operation, key] {
+    // Map refinement and export can take longer than ordinary device services.
+    const int timeoutMs = operation == "save_state" && name == "/loop_closure/save_map"
+        ? std::max(config.serviceTimeoutMs, 180000) : config.serviceTimeoutMs;
+    QTimer::singleShot(timeoutMs, owner, [this, client, done, id, operation, key] {
       if (!done->exchange(true)) { client->remove_pending_request(id); emit owner->requestFinished(operation, false, "服务响应超时，请检查节点日志和输出文件"); }
       cancelPending.erase(key);
     });
@@ -526,12 +529,9 @@ void RosAdapter::recognize() {
 void RosAdapter::saveState(const QString &backend, const QString &prefix) {
   if (backend == "fastlio") {
     auto req = std::make_shared<std_srvs::srv::Trigger::Request>();
-    // In mapping mode the live 6DoF backend overlaps FAST-LIO and writes the
-    // corrected map to the same prefix. Prefer it; fall back to raw FAST-LIO
-    // for older sessions or if the live backend is not running.
-    const QString save_service = impl_->clients.at("/loop_closure/save_map")->service_is_ready()
-        ? "/loop_closure/save_map" : "/map_save";
-    impl_->request<std_srvs::srv::Trigger>("save_state", save_service.toStdString(), req,
+    // The mapping backend validates overlaps before writing the final PCD.
+    // A missing backend must not silently export an unchecked raw map.
+    impl_->request<std_srvs::srv::Trigger>("save_state", "/loop_closure/save_map", req,
         [this](auto r) { emit requestFinished("save_state", r->success, QString::fromStdString(r->message)); });
   }
 #ifdef DESKTOP_HAS_SLAM_TOOLBOX

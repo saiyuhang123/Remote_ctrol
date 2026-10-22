@@ -1,484 +1,380 @@
 #!/usr/bin/env python3
-"""Live FAST-LIO 6DoF loop-closure backend.
-
-This node consumes the already-running FAST-LIO mapping outputs and never
-blocks the FAST-LIO callback path:
-  /Odometry              nav_msgs/Odometry
-  /cloud_registered_body sensor_msgs/PointCloud2
-
-It records spatial keyframes, runs ICP loop detection in a worker thread,
-optimizes a full 6DoF pose graph with Open3D, and exposes:
-  /loop_closure/save_map       std_srvs/Trigger  (write corrected PCD)
-  /loop_closure/corrected_map  sensor_msgs/PointCloud2
-  /loop_closure/corrected_path nav_msgs/Path
-  /loop_closure/status         std_msgs/String (JSON status)
-
-The corrected PCD is written to `output_map_path`. The normal FAST-LIO raw
-map can be configured to a different path so the UI save action can prefer
-the corrected map.
-"""
+"""Capture live FAST-LIO keyframes; validate and refine measured overlaps on save."""
 from __future__ import annotations
 
-from collections import deque
-from dataclasses import dataclass
+from collections import OrderedDict, deque
+from datetime import datetime
+import hashlib
 import json
 import math
+import os
 from pathlib import Path
 import threading
+import time
+
+os.environ.setdefault('OMP_NUM_THREADS', '3')
+os.environ.setdefault('OPENBLAS_NUM_THREADS', '1')
 
 import numpy as np
-import open3d as o3d
+from scipy.spatial.transform import Rotation
 import rclpy
-from rclpy.executors import ExternalShutdownException
+from rclpy.callback_groups import MutuallyExclusiveCallbackGroup
+from rclpy.executors import ExternalShutdownException, MultiThreadedExecutor
 from rclpy.node import Node
-from rclpy.qos import DurabilityPolicy, HistoryPolicy, QoSProfile, ReliabilityPolicy
+from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 from geometry_msgs.msg import PoseStamped
-from std_msgs.msg import Header
 from nav_msgs.msg import Odometry, Path as RosPath
-from sensor_msgs.msg import PointCloud2
+from sensor_msgs.msg import Imu, PointCloud2, PointField
 from sensor_msgs_py import point_cloud2
-from std_msgs.msg import String
+from std_msgs.msg import Header, String
 from std_srvs.srv import Trigger
 
-
-def inv(T: np.ndarray) -> np.ndarray:
-    out = np.eye(4, dtype=np.float64)
-    out[:3, :3] = T[:3, :3].T
-    out[:3, 3] = -out[:3, :3] @ T[:3, 3]
-    return out
+from .geometry import (Keyframe, atomic_json, build_map, level_rotation,
+                       overlap_is_usable, refine, register_overlap, voxel_indices, write_pcd)
 
 
-def yaw_of(T: np.ndarray) -> float:
-    return math.atan2(T[1, 0], T[0, 0])
+def stamp_ns(stamp):
+    return int(stamp.sec)*1_000_000_000 + int(stamp.nanosec)
 
 
-def relative_yaw(a: np.ndarray, b: np.ndarray) -> float:
-    return math.atan2(math.sin(yaw_of(b) - yaw_of(a)), math.cos(yaw_of(b) - yaw_of(a)))
+def valid_body_up(msg):
+    q = msg.orientation
+    quat = np.array([q.x, q.y, q.z, q.w])
+    a = msg.linear_acceleration
+    acceleration = np.array([a.x, a.y, a.z])
+    if (msg.orientation_covariance[0] < 0 or not np.isfinite(quat).all()
+            or not .95 <= np.linalg.norm(quat) <= 1.05
+            or not np.isfinite(acceleration).all() or not 9. <= np.linalg.norm(acceleration) <= 10.6):
+        return None
+    up = Rotation.from_quat(quat).inv().apply([0., 0., 1.])
+    if np.dot(up, acceleration/np.linalg.norm(acceleration)) < math.cos(math.radians(5.)):
+        return None
+    return up
 
 
-def yaw_only_initial(T: np.ndarray) -> np.ndarray:
-    """Useful for revisits outside: discard accumulated roll/pitch and z."""
-    yaw = yaw_of(T)
-    c, s = math.cos(yaw), math.sin(yaw)
-    out = np.eye(4)
-    out[:3, :3] = [[c, -s, 0.0], [s, c, 0.0], [0.0, 0.0, 1.0]]
-    out[:2, 3] = T[:2, 3]
-    return out
-
-
-def quat_xyzw(T: np.ndarray) -> tuple[float, float, float, float]:
-    m = T[:3, :3]
-    tr = float(np.trace(m))
-    if tr > 0:
-        s = math.sqrt(tr + 1.0) * 2.0
-        x = (m[2, 1] - m[1, 2]) / s
-        y = (m[0, 2] - m[2, 0]) / s
-        z = (m[1, 0] - m[0, 1]) / s
-        w = 0.25 * s
-    else:
-        i = int(np.argmax(np.diag(m)))
-        j, k = (i + 1) % 3, (i + 2) % 3
-        s = math.sqrt(max(0.0, 1.0 + m[i, i] - m[j, j] - m[k, k])) * 2.0
-        q = [0.0, 0.0, 0.0, 0.0]
-        q[i], q[j], q[k], q[3] = s / 4.0, (m[j, i] + m[i, j]) / s, (m[k, i] + m[i, k]) / s, (m[k, j] - m[j, k]) / s
-        x, y, z, w = q
-    n = math.sqrt(x*x + y*y + z*z + w*w)
-    return x/n, y/n, z/n, w/n
-
-
-def cloud_from_xyz(xyz: np.ndarray) -> o3d.geometry.PointCloud:
-    cloud = o3d.geometry.PointCloud()
-    cloud.points = o3d.utility.Vector3dVector(np.asarray(xyz, dtype=np.float64))
-    return cloud
-
-
-def try_icp(source: o3d.geometry.PointCloud, target: o3d.geometry.PointCloud,
-            initial: np.ndarray, max_corr: float):
-    target.estimate_normals(o3d.geometry.KDTreeSearchParamHybrid(
-        radius=max(0.5, max_corr * 2.0), max_nn=30))
-    return o3d.pipelines.registration.registration_icp(
-        source, target, max_corr, initial,
-        o3d.pipelines.registration.TransformationEstimationPointToPlane(),
-        o3d.pipelines.registration.ICPConvergenceCriteria(max_iteration=60))
-
-
-def write_pcd(path: Path, xyz: np.ndarray) -> None:
-    """Write PCL-compatible x y z intensity normals curvature binary PCD."""
-    n = len(xyz)
-    out = np.zeros((n, 8), dtype=np.float32)
-    out[:, :3] = xyz.astype(np.float32, copy=False)
-    header = (
-        '# .PCD v0.7 - Point Cloud Data file format\n'
-        'VERSION 0.7\n'
-        'FIELDS x y z intensity normal_x normal_y normal_z curvature\n'
-        'SIZE 4 4 4 4 4 4 4 4\n'
-        'TYPE F F F F F F F F\n'
-        'COUNT 1 1 1 1 1 1 1 1\n'
-        f'WIDTH {n}\nHEIGHT 1\nVIEWPOINT 0 0 0 1 0 0 0\n'
-        f'POINTS {n}\nDATA binary\n'
-    )
-    tmp = path.with_name(path.name + '.tmp')
-    with tmp.open('wb') as f:
-        f.write(header.encode('ascii'))
-        f.write(out.tobytes(order='C'))
-    tmp.replace(path)
-
-
-@dataclass
-class Keyframe:
-    index: int
-    stamp_ns: int
-    pose: np.ndarray
-    xyz: np.ndarray
-    intensity: np.ndarray
-    down: o3d.geometry.PointCloud
+def decode_cloud(msg):
+    raw = point_cloud2.read_points(msg, field_names=('x', 'y', 'z', 'intensity'), skip_nans=True)
+    xyz = np.column_stack((raw['x'], raw['y'], raw['z'])).astype(np.float32)
+    intensity = np.asarray(raw['intensity'], dtype=np.float32)
+    good = np.isfinite(xyz).all(axis=1) & np.isfinite(intensity)
+    xyz, intensity = xyz[good], intensity[good]
+    selected = voxel_indices(xyz, .15)
+    return xyz[selected], intensity[selected]
 
 
 class LiveLoopClosure(Node):
     def __init__(self):
         super().__init__('fastlio_loop_closure')
-        self.output_map_path = Path(str(self.declare_parameter(
-            'output_map_path', '/tmp/fastlio_loop_closed.pcd').value)).expanduser()
-        self.keyframe_distance = float(self.declare_parameter('keyframe_distance', 0.8).value)
-        self.keyframe_angle = math.radians(float(self.declare_parameter('keyframe_angle_deg', 12.0).value))
-        self.keyframe_max_gap = float(self.declare_parameter('keyframe_max_gap_sec', 2.0).value)
-        self.stationary_distance = float(self.declare_parameter('stationary_distance', 0.15).value)
-        self.stationary_angle = math.radians(float(self.declare_parameter('stationary_angle_deg', 2.0).value))
-        self.odom_tolerance = float(self.declare_parameter('odom_match_tolerance_sec', 0.08).value)
-        self.icp_voxel = float(self.declare_parameter('icp_voxel', 0.25).value)
-        self.target_voxel = float(self.declare_parameter('target_voxel', 0.20).value)
-        self.map_voxel = float(self.declare_parameter('map_voxel', 0.10).value)
-        self.search_radius = float(self.declare_parameter('search_radius', 12.0).value)
-        self.min_time_diff = float(self.declare_parameter('min_time_diff_sec', 300.0).value)
+        self.output_map_path = Path(self.declare_parameter('output_map_path', '/tmp/fastlio_map.pcd').value).expanduser()
+        self.keyframe_distance = float(self.declare_parameter('keyframe_distance', .8).value)
+        self.keyframe_angle = math.radians(float(self.declare_parameter('keyframe_angle_deg', 10.).value))
+        self.keyframe_max_gap = float(self.declare_parameter('keyframe_max_gap_sec', 2.).value)
+        self.stationary_distance = float(self.declare_parameter('stationary_distance', .12).value)
+        self.stationary_angle = math.radians(float(self.declare_parameter('stationary_angle_deg', 2.).value))
+        self.search_radius = float(self.declare_parameter('search_radius', 5.).value)
+        self.min_time_diff = float(self.declare_parameter('min_time_diff_sec', 300.).value)
         self.min_index_diff = int(self.declare_parameter('min_index_diff', 30).value)
-        self.submap_half = int(self.declare_parameter('submap_half_window', 5).value)
-        self.max_correspondence = float(self.declare_parameter('max_correspondence', 1.0).value)
-        self.min_fitness = float(self.declare_parameter('min_fitness', 0.35).value)
-        self.max_rmse = float(self.declare_parameter('max_rmse', 0.50).value)
-        self.max_loops = int(self.declare_parameter('max_loops', 20).value)
-        self.max_candidates = int(self.declare_parameter('max_candidates_per_key', 3).value)
-        self.save_keyframe_voxel = float(self.declare_parameter('save_keyframe_voxel', 0.10).value)
-        self.try_start_end_on_save = bool(self.declare_parameter('try_start_end_on_save', True).value)
-
-        self.odoms: deque[tuple[int, np.ndarray]] = deque(maxlen=300)
-        self.latest_cloud = None
-        self.latest_cloud_stamp_ns = 0
-        self.last_attempt_cloud_stamp_ns = 0
-        self.last_keyframe_pose = None
-        self.last_keyframe_stamp_ns = 0
-        self.keyframes: list[Keyframe] = []
-        self.loops: list[dict] = []
-        self.corrected_poses: np.ndarray | None = None
-        self.pending_index: int | None = None
+        self.submap_half = int(self.declare_parameter('submap_half_window', 3).value)
+        self.overlap_spacing = float(self.declare_parameter('overlap_spacing_m', 2.).value)
+        self.map_voxel = float(self.declare_parameter('map_voxel', .10).value)
+        self.frame = str(self.declare_parameter('lio_frame', 'lio_odom').value)
+        imu_topic = str(self.declare_parameter('imu_topic', '/imu/data').value)
+        self.session = self.output_map_path.with_name(
+            self.output_map_path.stem+'_session_'+datetime.now().strftime('%Y%m%d_%H%M%S')+f'_{os.getpid()}')
+        (self.session/'keyframes').mkdir(parents=True)
+        self.manifest = (self.session/'keyframes.jsonl').open('a', buffering=1)
+        self.trajectory = (self.session/'odometry.jsonl').open('a', buffering=1)
+        self.odoms = OrderedDict()
+        self.pending_clouds = OrderedDict()
+        self.imus = deque(maxlen=300)
+        self.keyframes = []
+        self.matches = []
+        self.rejected_matches = []
+        self.map_rotation = None
+        self.reference_up = None
+        self.tilt_errors = []
+        self.unmatched_clouds = 0
+        self.total_clouds = 0
+        self.last_cloud_stamp = 0
+        self.fatal_error = ''
+        self.processed = 0
+        self.last_overlap_position = None
+        self.lock = threading.RLock()
+        self.processing_lock = threading.Lock()
+        self.save_lock = threading.Lock()
         self.work_event = threading.Event()
         self.running = True
-        self.lock = threading.RLock()
-        self.save_lock = threading.Lock()
-        self.worker = threading.Thread(target=self._worker_loop, daemon=True)
+        self.callback_group = MutuallyExclusiveCallbackGroup()
+        sensor_qos = QoSProfile(depth=100, reliability=ReliabilityPolicy.BEST_EFFORT)
+        self.create_subscription(Odometry, '/Odometry', self.on_odom, 200)
+        self.create_subscription(PointCloud2, '/cloud_registered_body', self.on_cloud, sensor_qos)
+        self.create_subscription(Imu, imu_topic, self.on_imu, sensor_qos)
+        latched = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL,
+                            reliability=ReliabilityPolicy.RELIABLE)
+        self.map_pub = self.create_publisher(PointCloud2, '/loop_closure/corrected_map', latched)
+        self.path_pub = self.create_publisher(RosPath, '/loop_closure/corrected_path', latched)
+        self.status_pub = self.create_publisher(String, '/loop_closure/status', latched)
+        self.create_service(Trigger, '/loop_closure/save_map', self.save_callback,
+                            callback_group=self.callback_group)
+        self.create_service(Trigger, '/map_save', self.save_callback,
+                            callback_group=self.callback_group)
+        self.create_timer(5., self.publish_status)
+        self.worker = threading.Thread(target=self.worker_loop, daemon=True)
         self.worker.start()
+        atomic_json(self.session/'session.json', {'output': str(self.output_map_path),
+            'workflow': 'gravity_aided_frontend; measured_structural_overlaps; xyz_yaw_refinement',
+            'created': datetime.now().isoformat(), 'min_time_diff_sec': self.min_time_diff,
+            'search_radius_m': self.search_radius, 'overlap_spacing_m': self.overlap_spacing,
+            'no_start_end_identity_constraint': True})
+        self.get_logger().info(f'gravity-preserving mapping ready; session={self.session}')
 
-        cloud_qos = QoSProfile(depth=20, history=HistoryPolicy.KEEP_LAST,
-                               reliability=ReliabilityPolicy.BEST_EFFORT,
-                               durability=DurabilityPolicy.VOLATILE)
-        self.create_subscription(Odometry, '/Odometry', self.on_odom, 50)
-        self.create_subscription(PointCloud2, '/cloud_registered_body', self.on_cloud, cloud_qos)
-        self.map_pub = self.create_publisher(PointCloud2, '/loop_closure/corrected_map', 1)
-        self.path_pub = self.create_publisher(RosPath, '/loop_closure/corrected_path', 1)
-        self.status_pub = self.create_publisher(String, '/loop_closure/status', 10)
-        self.save_srv = self.create_service(Trigger, '/loop_closure/save_map', self.save_callback)
-        self.get_logger().info(f'live 6DoF loop-closure ready; corrected map -> {self.output_map_path}')
+    def on_imu(self, msg):
+        up = valid_body_up(msg)
+        if up is not None:
+            self.imus.append((stamp_ns(msg.header.stamp), up))
 
-    def on_odom(self, msg: Odometry) -> None:
+    def on_odom(self, msg):
         q = msg.pose.pose.orientation
         p = msg.pose.pose.position
-        n = q.x*q.x + q.y*q.y + q.z*q.z + q.w*q.w
-        if not math.isfinite(n) or n < 1e-12:
+        quat = np.array([q.x, q.y, q.z, q.w])
+        if not np.isfinite(quat).all() or np.linalg.norm(quat) < .5:
             return
-        s = 2.0 / n
-        T = np.eye(4)
-        T[:3, :3] = [
-            [1-s*(q.y*q.y+q.z*q.z), s*(q.x*q.y-q.z*q.w), s*(q.x*q.z+q.y*q.w)],
-            [s*(q.x*q.y+q.z*q.w), 1-s*(q.x*q.x+q.z*q.z), s*(q.y*q.z-q.x*q.w)],
-            [s*(q.x*q.z-q.y*q.w), s*(q.y*q.z+q.x*q.w), 1-s*(q.x*q.x+q.y*q.y)],
-        ]
-        T[:3, 3] = [p.x, p.y, p.z]
-        with self.lock:
-            self.odoms.append((int(msg.header.stamp.sec)*1_000_000_000 + int(msg.header.stamp.nanosec), T))
-        self._maybe_record_keyframe()
-
-    def on_cloud(self, msg: PointCloud2) -> None:
-        self.latest_cloud = msg
-        self.latest_cloud_stamp_ns = int(msg.header.stamp.sec)*1_000_000_000 + int(msg.header.stamp.nanosec)
-        self._maybe_record_keyframe()
-
-    def _find_pose(self, stamp_ns: int) -> np.ndarray | None:
-        with self.lock:
-            odoms = list(self.odoms)
-        best = None
-        for s, T in reversed(odoms):
-            dt = abs(s - stamp_ns) * 1e-9
-            if best is None or dt < best[0]:
-                best = (dt, T)
-        if best is None or best[0] > self.odom_tolerance:
-            return None
-        return best[1]
-
-    def _maybe_record_keyframe(self) -> None:
-        msg = self.latest_cloud
-        stamp = self.latest_cloud_stamp_ns
-        if msg is None or stamp == self.last_attempt_cloud_stamp_ns:
+        pose = np.eye(4)
+        pose[:3, :3] = Rotation.from_quat(quat).as_matrix()
+        pose[:3, 3] = [p.x, p.y, p.z]
+        if not np.isfinite(pose).all():
+            self.fatal_error = '前端出现无效位姿，请停止并检查数据'
             return
-        self.last_attempt_cloud_stamp_ns = stamp
-        T = self._find_pose(stamp)
-        if T is None:
+        stamp = stamp_ns(msg.header.stamp)
+        self.odoms[stamp] = pose
+        while len(self.odoms) > 300:
+            self.odoms.popitem(last=False)
+        self.trajectory.write(json.dumps({'stamp_ns': stamp, 'pose': pose.tolist()})+'\n')
+        pending = self.pending_clouds.pop(stamp, None)
+        if pending is not None:
+            self.record_keyframe(pending, pose)
+
+    def on_cloud(self, msg):
+        stamp = stamp_ns(msg.header.stamp)
+        if stamp <= self.last_cloud_stamp:
+            self.fatal_error = '检测到点云时间回退或重复；请新开建图会话'
             return
-        if self.last_keyframe_pose is not None:
-            moved = float(np.linalg.norm(T[:3, 3] - self.last_keyframe_pose[:3, 3]))
-            turned = abs(relative_yaw(self.last_keyframe_pose, T))
-            elapsed = (stamp - self.last_keyframe_stamp_ns) * 1e-9
-            if moved < self.keyframe_distance and turned < self.keyframe_angle:
-                if elapsed < self.keyframe_max_gap:
-                    return
-                if moved < self.stationary_distance and turned < self.stationary_angle:
-                    return
-        try:
-            raw = np.asarray(list(point_cloud2.read_points(
-                msg, field_names=('x', 'y', 'z', 'intensity'), skip_nans=True)))
-            if len(raw) < 100:
-                return
-            xyz = np.column_stack((raw['x'], raw['y'], raw['z'])).astype(np.float32)
-            intensity = np.asarray(raw['intensity'], dtype=np.float32)
-            down = cloud_from_xyz(xyz).voxel_down_sample(self.icp_voxel)
-        except Exception as exc:
-            self.get_logger().warn(f'keyframe decode failed: {exc}')
-            return
-        with self.lock:
-            kf = Keyframe(len(self.keyframes), stamp, T.copy(), xyz, intensity, down)
-            self.keyframes.append(kf)
-            self.last_keyframe_pose = T.copy()
-            self.last_keyframe_stamp_ns = stamp
-            self.pending_index = kf.index
-            self.work_event.set()
-        if kf.index % 20 == 0:
-            self.get_logger().info(f'keyframes={kf.index+1}, x={T[0,3]:.1f}, y={T[1,3]:.1f}, z={T[2,3]:.2f}')
-
-    def _target_submap(self, kfs: list[Keyframe], center: int, half: int) -> o3d.geometry.PointCloud:
-        lo, hi = max(0, center-half), min(len(kfs), center+half+1)
-        center_inv = inv(kfs[center].pose)
-        parts = []
-        for k in range(lo, hi):
-            xyz = kfs[k].xyz.astype(np.float64)
-            T = center_inv @ kfs[k].pose
-            parts.append(xyz @ T[:3, :3].T + T[:3, 3])
-        return cloud_from_xyz(np.concatenate(parts, axis=0)).voxel_down_sample(self.target_voxel)
-
-    def _candidate_loops(self, kfs: list[Keyframe], i: int) -> list[tuple[float, int]]:
-        poses = np.asarray([k.pose for k in kfs])
-        pos = poses[:, :3, 3]
-        d = np.linalg.norm(pos[:i, :2] - pos[i, :2], axis=1)
-        candidates = []
-        for j in np.where(d <= self.search_radius)[0]:
-            j = int(j)
-            if j >= i - self.min_index_diff:
-                continue
-            if (kfs[i].stamp_ns - kfs[j].stamp_ns) * 1e-9 < self.min_time_diff:
-                continue
-            candidates.append((float(d[j]), j))
-        candidates.sort()
-        return candidates[:self.max_candidates]
-
-    def _process_keyframe(self, i: int) -> None:
-        with self.lock:
-            kfs = list(self.keyframes)
-            existing = {(int(loop['source']), int(loop['target'])) for loop in self.loops}
-        if i >= len(kfs) or i < self.min_index_diff:
-            return
-        best = None
-        source = kfs[i].down
-        for _, j in self._candidate_loops(kfs, i):
-            if (i, j) in existing:
-                continue
-            target = self._target_submap(kfs, j, self.submap_half)
-            if len(target.points) < 200:
-                continue
-            initial_raw = inv(kfs[j].pose) @ kfs[i].pose
-            for initial in (initial_raw, yaw_only_initial(initial_raw)):
-                try:
-                    result = try_icp(source, target, initial, self.max_correspondence)
-                except Exception:
-                    continue
-                if result.fitness < self.min_fitness or result.inlier_rmse > self.max_rmse:
-                    continue
-                delta = inv(initial_raw) @ result.transformation
-                dt_xy = float(np.linalg.norm(delta[:2, 3]))
-                dt_z = abs(float(delta[2, 3]))
-                da = abs(relative_yaw(np.eye(4), delta))
-                # Long outdoor loops can have many metres of Z drift. Allow
-                # large vertical correction, but keep a tight horizontal/yaw
-                # gate so a nearby parallel corridor is not accepted.
-                if dt_xy > 5.0 or dt_z > 20.0 or da > math.radians(30.0):
-                    continue
-                score = result.fitness - 0.1 * result.inlier_rmse
-                if best is None or score > best[0]:
-                    best = (score, j, result.transformation, result.fitness, result.inlier_rmse, dt, da)
-        if best is None:
-            return
-        _, j, transform, fitness, rmse, dt, da = best
-        loop = {'source': i, 'target': j, 'transform': transform.tolist(),
-                'fitness': float(fitness), 'rmse': float(rmse),
-                'correction_translation': dt, 'correction_yaw_rad': da}
-        with self.lock:
-            if len(self.loops) >= self.max_loops:
-                return
-            self.loops.append(loop)
-            kfs = list(self.keyframes)
-            loops = list(self.loops)
-        self.get_logger().info(f'loop accepted {j}->{i}: fitness={fitness:.3f} rmse={rmse:.3f}')
-        try:
-            corrected = self._optimize(kfs, loops)
-            self._publish_result(kfs, corrected, loops)
-        except Exception as exc:
-            self.get_logger().warn(f'pose-graph optimization failed: {exc}')
-
-    def _optimize(self, kfs: list[Keyframe], loops: list[dict]) -> np.ndarray:
-        graph = o3d.pipelines.registration.PoseGraph()
-        for k in kfs:
-            graph.nodes.append(o3d.pipelines.registration.PoseGraphNode(k.pose))
-        odom_info = np.diag([100., 100., 40., 100., 100., 40.])
-        loop_info = np.diag([20., 20., 8., 20., 20., 8.])
-        for i in range(len(kfs)-1):
-            T_edge = inv(kfs[i+1].pose) @ kfs[i].pose
-            graph.edges.append(o3d.pipelines.registration.PoseGraphEdge(
-                i, i+1, T_edge, odom_info, uncertain=False))
-        for loop in loops:
-            graph.edges.append(o3d.pipelines.registration.PoseGraphEdge(
-                int(loop['source']), int(loop['target']),
-                np.asarray(loop['transform'], dtype=np.float64),
-                loop_info, uncertain=True))
-        method = o3d.pipelines.registration.GlobalOptimizationGaussNewton()
-        criteria = o3d.pipelines.registration.GlobalOptimizationConvergenceCriteria()
-        option = o3d.pipelines.registration.GlobalOptimizationOption(
-            max_correspondence_distance=0.35, edge_prune_threshold=0.25, reference_node=0)
-        o3d.pipelines.registration.global_optimization(graph, method, criteria, option)
-        return np.asarray([np.asarray(n.pose) for n in graph.nodes])
-
-    def _build_map(self, kfs: list[Keyframe], poses: np.ndarray, voxel: float) -> np.ndarray:
-        parts = []
-        for k, T in zip(kfs, poses):
-            xyz = k.xyz.astype(np.float64)
-            parts.append(xyz @ T[:3, :3].T + T[:3, 3])
-        merged = np.concatenate(parts, axis=0)
-        cloud = cloud_from_xyz(merged).voxel_down_sample(voxel)
-        return np.asarray(cloud.points)
-
-    def _publish_result(self, kfs: list[Keyframe], poses: np.ndarray, loops: list[dict]) -> None:
-        xyz = self._build_map(kfs, poses, self.map_voxel)
-        stamp = self.get_clock().now().to_msg()
-        header = Header()
-        header.stamp = stamp
-        header.frame_id = 'lio_odom'
-        self.map_pub.publish(point_cloud2.create_cloud_xyz32(header, xyz))
-        path = RosPath()
-        path.header = header
-        for k, T in zip(kfs, poses):
-            ps = PoseStamped()
-            ps.header = path.header
-            ps.pose.position.x, ps.pose.position.y, ps.pose.position.z = map(float, T[:3, 3])
-            x, y, z, w = quat_xyzw(T)
-            ps.pose.orientation.x, ps.pose.orientation.y, ps.pose.orientation.z, ps.pose.orientation.w = x, y, z, w
-            path.poses.append(ps)
-        self.path_pub.publish(path)
-        status = {
-            'keyframes': len(kfs), 'loops': len(loops),
-            'corrected_points': int(len(xyz)),
-            'start_end_xy': float(np.linalg.norm(poses[-1][:2,3]-poses[0][:2,3])),
-            'start_end_z': float(poses[-1][2,3]-poses[0][2,3]),
-        }
-        self.status_pub.publish(String(data=json.dumps(status, ensure_ascii=False)))
-        with self.lock:
-            self.corrected_poses = poses.copy()
-
-    def _save(self) -> tuple[bool, str]:
-        with self.lock:
-            kfs = list(self.keyframes)
-            loops = list(self.loops)
-            poses = self.corrected_poses.copy() if self.corrected_poses is not None else None
-        if len(kfs) < 2:
-            return False, 'no keyframes recorded'
-        if self.try_start_end_on_save and not loops:
-            try:
-                loop = self._manual_start_end(kfs)
-            except Exception as exc:
-                self.get_logger().warn(f'start/end attempt failed: {exc}')
-                loop = None
-            if loop is not None:
-                with self.lock:
-                    self.loops.append(loop)
-                    loops = list(self.loops)
-        # New keyframes may have arrived after the last online optimization.
-        # Re-optimize at save time so the saved map contains the full session.
-        if loops:
-            poses = self._optimize(kfs, loops)
-            self._publish_result(kfs, poses, loops)
+        self.last_cloud_stamp = stamp
+        self.total_clouds += 1
+        pose = self.odoms.get(stamp)
+        if pose is None:
+            self.pending_clouds[stamp] = msg
+            while len(self.pending_clouds) > 30:
+                self.pending_clouds.popitem(last=False)
+                self.unmatched_clouds += 1
         else:
-            poses = np.asarray([k.pose for k in kfs])
-        xyz = self._build_map(kfs, poses, self.save_keyframe_voxel)
-        self.output_map_path.parent.mkdir(parents=True, exist_ok=True)
-        write_pcd(self.output_map_path, xyz)
-        return True, f'saved {len(xyz)} corrected points to {self.output_map_path}'
+            self.record_keyframe(msg, pose)
 
-    def _manual_start_end(self, kfs: list[Keyframe]) -> dict | None:
-        i, j = len(kfs)-1, 0
-        target = self._target_submap(kfs, j, 10)
-        initial_raw = inv(kfs[j].pose) @ kfs[i].pose
-        initial = yaw_only_initial(initial_raw)
-        result = try_icp(kfs[i].down, target, initial, max(1.0, self.max_correspondence))
-        self.get_logger().info(
-            f'manual start/end ICP fitness={result.fitness:.3f} rmse={result.inlier_rmse:.3f}')
-        if result.fitness < 0.35 or result.inlier_rmse > 0.55:
-            return None
-        delta = inv(initial_raw) @ result.transformation
-        return {'source': i, 'target': j, 'transform': result.transformation.tolist(),
-                'fitness': float(result.fitness), 'rmse': float(result.inlier_rmse),
-                'correction_translation': float(np.linalg.norm(delta[:3,3])),
-                'correction_yaw_rad': abs(relative_yaw(np.eye(4), delta)),
-                'manual_start_end': True}
+    def record_keyframe(self, msg, pose):
+        stamp = stamp_ns(msg.header.stamp)
+        if self.imus:
+            imu_stamp, up = min(self.imus, key=lambda item: abs(item[0]-stamp))
+            if abs(imu_stamp-stamp) < 40_000_000:
+                if self.map_rotation is None:
+                    self.reference_up = pose[:3, :3] @ up
+                    self.map_rotation = level_rotation(self.reference_up)
+                    atomic_json(self.session/'gravity_reference.json',
+                        {'stamp_ns': stamp, 'map_from_lio_rotation': self.map_rotation.tolist()})
+                predicted = pose[:3, :3].T @ self.reference_up
+                self.tilt_errors.append(float(np.rad2deg(np.arccos(np.clip(np.dot(up, predicted), -1., 1.)))))
+        if self.keyframes:
+            last = self.keyframes[-1]
+            if stamp <= last.stamp_ns:
+                return
+            distance = np.linalg.norm(pose[:3, 3]-last.pose[:3, 3])
+            angle = Rotation.from_matrix(last.pose[:3, :3].T @ pose[:3, :3]).magnitude()
+            if distance < self.keyframe_distance and angle < self.keyframe_angle:
+                if (stamp-last.stamp_ns)*1e-9 < self.keyframe_max_gap:
+                    return
+                if distance < self.stationary_distance and angle < self.stationary_angle:
+                    return
+        try:
+            xyz, intensity = decode_cloud(msg)
+            if len(xyz) < 100:
+                return
+            with self.lock:
+                key = Keyframe(len(self.keyframes), stamp, pose.copy(), xyz, intensity)
+                filename = f'{key.index:05d}.npz'
+                np.savez(self.session/'keyframes'/filename, xyz=xyz, intensity=intensity,
+                         pose=pose, stamp_ns=stamp)
+                self.manifest.write(json.dumps({'index': key.index, 'stamp_ns': stamp,
+                    'file': filename, 'points': len(xyz)})+'\n')
+                self.keyframes.append(key)
+                self.work_event.set()
+            if key.index % 50 == 0:
+                self.get_logger().info(f'keyframes={key.index+1}, xyz={np.round(pose[:3, 3], 2)}')
+        except Exception as exc:
+            self.fatal_error = f'关键帧保存失败：{exc}'
+            self.get_logger().error(self.fatal_error)
+
+    def process_keyframe(self, kfs, i):
+        if i < self.min_index_diff:
+            return
+        current = kfs[i]
+        stamps = np.array([k.stamp_ns for k in kfs[:i]])
+        eligible_end = min(i-self.min_index_diff,
+                           int(np.searchsorted(stamps, current.stamp_ns-int(self.min_time_diff*1e9), side='right')))
+        if eligible_end <= 0:
+            return
+        positions = np.array([k.pose[:2, 3] for k in kfs[:eligible_end]])
+        distances = np.linalg.norm(positions-current.pose[:2, 3], axis=1)
+        target = int(np.argmin(distances))
+        if distances[target] > self.search_radius:
+            return
+        if self.last_overlap_position is not None and np.linalg.norm(
+                current.pose[:2, 3]-self.last_overlap_position) < self.overlap_spacing:
+            return
+        self.last_overlap_position = current.pose[:2, 3].copy()
+        match = register_overlap(kfs, i, target, eligible_end, self.submap_half)
+        if overlap_is_usable(match):
+            self.matches.append(match)
+            self.get_logger().info(f'overlap {i}->{target}: fitness={match["fitness"]:.3f}, rmse={match["rmse_m"]:.3f} m')
+        elif match is not None:
+            self.rejected_matches.append(match)
+
+    def process_through(self, kfs):
+        while self.processed < len(kfs):
+            self.process_keyframe(kfs, self.processed)
+            self.processed += 1
+
+    def worker_loop(self):
+        while self.running:
+            self.work_event.wait(timeout=.5)
+            self.work_event.clear()
+            try:
+                with self.processing_lock:
+                    with self.lock:
+                        kfs = list(self.keyframes)
+                    self.process_through(kfs)
+            except Exception as exc:
+                self.fatal_error = f'重叠匹配失败：{exc}'
+                self.get_logger().error(self.fatal_error)
+
+    def publish_status(self):
+        with self.lock:
+            status = {'workflow': 'gravity_preserving_measured_overlaps', 'keyframes': len(self.keyframes),
+                'qualified_overlaps': len(self.matches), 'processed_keyframes': self.processed,
+                'gravity_reference_ready': self.map_rotation is not None,
+                'unmatched_clouds': self.unmatched_clouds, 'error': self.fatal_error,
+                'session': str(self.session)}
+        self.status_pub.publish(String(data=json.dumps(status, ensure_ascii=False)))
 
     def save_callback(self, request, response):
-        with self.save_lock:
-            ok, message = self._save()
-        response.success = ok
-        response.message = message
-        self.get_logger().info(message)
+        if not self.save_lock.acquire(blocking=False):
+            response.success, response.message = False, '地图正在优化保存，请等待当前任务完成'
+            return response
+        try:
+            response.success, response.message = self.save()
+        except Exception as exc:
+            response.success, response.message = False, f'地图未通过检查或保存失败：{exc}；关键帧保留于 {self.session}'
+            self.get_logger().error(response.message)
+        finally:
+            self.save_lock.release()
         return response
 
-    def _worker_loop(self) -> None:
-        while self.running:
-            self.work_event.wait(timeout=0.5)
-            self.work_event.clear()
+    def save(self):
+        begin = time.monotonic()
+        with self.processing_lock:
             with self.lock:
-                i = self.pending_index
-                self.pending_index = None
-            if i is not None:
-                try:
-                    self._process_keyframe(i)
-                except Exception as exc:
-                    self.get_logger().warn(f'loop worker error: {exc}')
+                kfs = list(self.keyframes)
+                error = self.fatal_error
+                rotation = None if self.map_rotation is None else self.map_rotation.copy()
+                tilt_errors = list(self.tilt_errors)
+                unmatched = self.unmatched_clouds
+                total_clouds = self.total_clouds
+            if len(kfs) < 2:
+                raise ValueError('尚无足够关键帧')
+            if error:
+                raise ValueError(error)
+            if rotation is None or len(tilt_errors) < 10:
+                raise ValueError('没有足够的有效 IMU 倾角观测')
+            if np.percentile(tilt_errors, 95) > 3.:
+                raise ValueError('前端倾角与 IMU 不一致，请检查倾角约束是否启用')
+            if unmatched > max(5, total_clouds*.01):
+                raise ValueError('点云与里程计时间匹配缺失过多')
+            self.get_logger().info(f'finishing overlaps and refining {len(kfs)} keyframes')
+            self.process_through(kfs)
+            matches = list(self.matches)
+            rejected = list(self.rejected_matches)
+        poses = np.array([k.pose for k in kfs])
+        poses[:, :3, :3] = rotation @ poses[:, :3, :3]
+        poses[:, :3, 3] = poses[:, :3, 3] @ rotation.T
+        report = {'status': 'REJECTED', 'keyframes': len(kfs), 'qualified_overlaps': len(matches),
+            'overlap_measurements': matches, 'rejected_overlap_measurements': rejected,
+            'map_from_lio_rotation': rotation.tolist(), 'last_keyframe_stamp_ns': kfs[-1].stamp_ns,
+            'tilt_error_p95_deg': float(np.percentile(tilt_errors, 95)),
+            'session': str(self.session), 'voxel_m': self.map_voxel}
+        try:
+            corrected, validation = refine(poses, matches)
+            report.update(validation)
+            if not validation['geometry_checks_passed']:
+                raise ValueError('优化变形或留出重叠残差超过阈值')
+        except Exception as exc:
+            report['reason'] = str(exc)
+            atomic_json(self.session/'validation.json', report)
+            candidate = self.output_map_path.with_name(self.output_map_path.stem+'_UNVERIFIED.pcd')
+            write_pcd(candidate, build_map(kfs, poses, self.map_voxel))
+            return False, f'地图未通过几何检查：{exc}。候选图保留于 {candidate}；会话 {self.session}'
+        points = build_map(kfs, corrected, self.map_voxel)
+        report.update(status='GEOMETRY_CHECKS_PASSED_NEEDS_REAL_VEHICLE_LOCALIZATION_CHECK',
+            points=len(points), pcd=str(self.output_map_path), elapsed_save_sec=time.monotonic()-begin,
+            frame='gravity-aligned local map; origin at initial IMU position')
+        np.save(self.session/'poses.npy', corrected)
+        atomic_json(self.session/'validation.json', report)
+        # The final filename is replaced only after optimization and validation succeed.
+        write_pcd(self.output_map_path, points)
+        report['sha256'] = hashlib.sha256(self.output_map_path.read_bytes()).hexdigest()
+        atomic_json(self.output_map_path.with_suffix('.validation.json'), report)
+        atomic_json(self.session/'validation.json', report)
+        self.publish_result(kfs, corrected, points, rotation)
+        return True, (f'已保存几何检查通过的 PCD：{self.output_map_path}（{len(points)} 点，'
+                      f'{len(matches)} 处重叠）；上车后仍需验证定位。报告：{self.output_map_path.with_suffix(".validation.json")}')
 
-    def shutdown(self) -> None:
+    def publish_result(self, kfs, poses, points, rotation):
+        # Keep the live visualization in the frontend frame. The PCD is levelled.
+        header = Header(stamp=self.get_clock().now().to_msg(), frame_id=self.frame)
+        display = points.copy()
+        display[:, :3] = display[:, :3] @ rotation
+        fields = [PointField(name=name, offset=k*4, datatype=PointField.FLOAT32, count=1)
+                  for k, name in enumerate(('x', 'y', 'z', 'intensity'))]
+        message = PointCloud2(header=header, height=1, width=len(display), fields=fields,
+            is_bigendian=False, point_step=16, row_step=len(display)*16,
+            data=np.ascontiguousarray(display, dtype='<f4').tobytes(), is_dense=True)
+        self.map_pub.publish(message)
+        path = RosPath(header=header)
+        for key, pose in zip(kfs, poses):
+            ps = PoseStamped(header=Header(stamp=rclpy.time.Time(nanoseconds=key.stamp_ns).to_msg(), frame_id=self.frame))
+            pos = rotation.T @ pose[:3, 3]
+            q = Rotation.from_matrix(rotation.T @ pose[:3, :3]).as_quat()
+            ps.pose.position.x, ps.pose.position.y, ps.pose.position.z = map(float, pos)
+            ps.pose.orientation.x, ps.pose.orientation.y, ps.pose.orientation.z, ps.pose.orientation.w = map(float, q)
+            path.poses.append(ps)
+        self.path_pub.publish(path)
+
+    def shutdown(self):
         self.running = False
         self.work_event.set()
-        self.worker.join(timeout=2.0)
+        self.worker.join(timeout=5.)
+        self.manifest.close()
+        self.trajectory.close()
 
 
-def main() -> int:
+def main():
     rclpy.init()
     node = LiveLoopClosure()
+    executor = MultiThreadedExecutor(num_threads=2)
+    executor.add_node(node)
     try:
-        rclpy.spin(node)
+        executor.spin()
     except (KeyboardInterrupt, ExternalShutdownException):
         pass
     finally:
+        executor.shutdown()
         node.shutdown()
         node.destroy_node()
         rclpy.try_shutdown()

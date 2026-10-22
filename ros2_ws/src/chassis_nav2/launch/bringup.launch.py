@@ -20,6 +20,8 @@ def generate_launch_description():
                               description='与 PCD 坐标一致的 Nav2 YAML 地图（固定 maps/fastlio/map.yaml）'),
         DeclareLaunchArgument('nav2_params', default_value=str(nav/'config/nav2.yaml')),
         DeclareLaunchArgument('start_sensors', default_value='true', choices=['true', 'false']),
+        DeclareLaunchArgument('use_sim_time', default_value='false', choices=['true', 'false'],
+                              description='仅在 rosbag --clock 回放时设为 true'),
         DeclareLaunchArgument('start_chassis', default_value='false', choices=['true', 'false']),
         DeclareLaunchArgument('enable_control', default_value='false', choices=['true', 'false']),
         DeclareLaunchArgument('enable_recorded_routes', default_value='false', choices=['true', 'false']),

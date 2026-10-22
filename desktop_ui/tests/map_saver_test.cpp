@@ -43,7 +43,7 @@ struct MappingFixture {
   std::atomic_int requests{0};
   rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr service;
   MappingFixture(const QString &prefix) {
-    service = node->create_service<std_srvs::srv::Trigger>("/map_save",
+    service = node->create_service<std_srvs::srv::Trigger>("/loop_closure/save_map",
       [this, prefix](std::shared_ptr<std_srvs::srv::Trigger::Request>,
                      std::shared_ptr<std_srvs::srv::Trigger::Response> response) {
         ++requests;

@@ -2,7 +2,7 @@
 <package format="3">
   <name>fastlio_loop_closure</name>
   <version>0.1.0</version>
-  <description>Live 6DoF keyframe loop closure and corrected PCD backend for FAST-LIO.</description>
+  <description>Gravity-preserving measured-overlap refinement and validated PCD export for FAST-LIO.</description>
   <maintainer email="jkbot@example.com">jkbot</maintainer>
   <license>Proprietary</license>
 
@@ -17,6 +17,7 @@
   <exec_depend>sensor_msgs_py</exec_depend>
   <exec_depend>python3-numpy</exec_depend>
   <exec_depend>python3-open3d</exec_depend>
+  <exec_depend>python3-scipy</exec_depend>
 
   <export>
     <build_type>ament_python</build_type>

@@ -156,17 +156,16 @@ private slots:
     QTRY_VERIFY_WITH_TIMEOUT(!process.running(), 3000);
     QCOMPARE(finished.size(), 1);
   }
-  void mapSaveTimeoutIgnoresLateResponse() {
+  void mapSaveAllowsRefinementBeyondDeviceTimeout() {
     FixtureExecutor fixture;
-    auto service = mockService<std_srvs::srv::Trigger>(fixture.node, "/map_save", [](auto, auto response) {
+    auto service = mockService<std_srvs::srv::Trigger>(fixture.node, "/loop_closure/save_map", [](auto, auto response) {
       std::this_thread::sleep_for(std::chrono::milliseconds(1500)); response->success = true;
     }); fixture.start();
     auto c = config(); c.serviceTimeoutMs = 1000;
     RosAdapter adapter(c); QSignalSpy results(&adapter, &RosAdapter::requestFinished);
     QTest::qWait(300); adapter.saveState("fastlio", "/tmp/unused");
     QTRY_COMPARE_WITH_TIMEOUT(results.size(), 1, 3000);
-    QCOMPARE(results.at(0).at(1).toBool(), false);
-    QVERIFY(results.at(0).at(2).toString().contains("超时"));
+    QCOMPARE(results.at(0).at(1).toBool(), true);
     QTest::qWait(700); QCOMPARE(results.size(), 1);
   }
   void stopLetsLauncherForwardOneInterruptToChild() {
@@ -232,9 +231,24 @@ time.sleep(30)
     QCOMPARE(corrected_calls.load(), 1);
   }
 
+  void mapSaveDoesNotFallBackToUncheckedRawMap() {
+    FixtureExecutor fixture;
+    std::atomic_int raw_calls{0};
+    auto raw = mockService<std_srvs::srv::Trigger>(fixture.node, "/map_save", [&raw_calls](auto, auto r) {
+      ++raw_calls; r->success = true;
+    });
+    fixture.start(); RosAdapter adapter(config()); QSignalSpy results(&adapter, &RosAdapter::requestFinished);
+    QTest::qWait(400);
+    adapter.saveState("fastlio", "/tmp/desktop_map");
+    QTRY_COMPARE_WITH_TIMEOUT(results.size(), 1, 3000);
+    QVERIFY(!results.last().at(1).toBool());
+    QVERIFY(results.last().at(2).toString().contains("未就绪"));
+    QCOMPARE(raw_calls.load(), 0);
+  }
+
   void mapSaveUsesBackendServiceTypes() {
     FixtureExecutor fixture;
-    auto trigger = mockService<std_srvs::srv::Trigger>(fixture.node, "/map_save", [](auto, auto r) { r->success = true; r->message = "mock PCD saved"; });
+    auto trigger = mockService<std_srvs::srv::Trigger>(fixture.node, "/loop_closure/save_map", [](auto, auto r) { r->success = true; r->message = "mock PCD saved"; });
 #ifdef DESKTOP_HAS_SLAM_TOOLBOX
     auto slam = mockService<slam_toolbox::srv::SerializePoseGraph>(fixture.node, "/slam_toolbox/serialize_map", [](auto q, auto r) { r->result = q->filename == "/tmp/desktop_map" ? 0 : 255; });
 #endif

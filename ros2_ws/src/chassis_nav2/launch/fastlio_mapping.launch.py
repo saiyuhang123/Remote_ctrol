@@ -19,7 +19,7 @@ def configure_mapping(context):
     bringup = Path(get_package_share_directory('chassis_nav2')) / 'launch/bringup.launch.py'
     return [
         LogInfo(msg=f'FAST-LIO PCD 保存路径：{output}（若已存在旧图会自动备份为 名称_时间戳.pcd）'),
-        LogInfo(msg="建图后在另一个终端保存：ros2 service call /map_save std_srvs/srv/Trigger '{}'"),
+        LogInfo(msg="建图结束后优化并保存：ros2 service call /loop_closure/save_map std_srvs/srv/Trigger '{}'"),
         IncludeLaunchDescription(
             PythonLaunchDescriptionSource(str(bringup)),
             launch_arguments={
@@ -28,6 +28,7 @@ def configure_mapping(context):
                 'lidar_config': args['lidar_config'],
                 'pcd_map': str(output),
                 'start_sensors': args['start_sensors'],
+                'use_sim_time': args['use_sim_time'],
                 'start_chassis': 'false',
                 'enable_control': 'false',
                 'odom_source': 'lio',
@@ -53,6 +54,7 @@ def generate_launch_description():
                               description='指定 PCD 保存路径；留空时保存为 map_dir/map.pcd'),
         DeclareLaunchArgument('start_sensors', default_value='true', choices=['true', 'false'],
                               description='同时启动雷达和 IMU；驱动已运行时设为 false'),
+        DeclareLaunchArgument('use_sim_time', default_value='false', choices=['true', 'false']),
         DeclareLaunchArgument('rviz', default_value='true', choices=['true', 'false'],
                               description='打开 FAST-LIO 建图界面'),
         OpaqueFunction(function=configure_mapping),

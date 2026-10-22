@@ -1,4 +1,4 @@
-# 新车外参由 chassis_nav2/hardware.yaml 经统一启动覆盖；此处零值仅为占位。
+# JD03 Helios-16P 建图。外参由 chassis_nav2/hardware.yaml 经统一启动覆盖。
 /**:
   ros__parameters:
     feature_extract_enable: false
@@ -16,7 +16,7 @@
       time_offset_lidar_to_imu: 0.0
     preprocess:
       lidar_type: 2
-      scan_line: 32
+      scan_line: 16
       scan_rate: 10
       timestamp_unit: 0
       # 盲区半径(m)：1.5 = 滤掉车身及近场残影（实测车身最远点 0.8m，仍见残影故继续扩大）。
@@ -48,8 +48,13 @@
     publish:
       path_en: false
       scan_publish_en: true
-      dense_publish_en: true
+      dense_publish_en: false
       scan_bodyframe_pub_en: true
     pcd_save:
       pcd_save_en: true
       interval: -1
+    # WIT 姿态只提供重力方向，不融合设备 yaw；数值是优化权重，并非 IMU 精度。
+    # 与 2026-10-22 园区 bag 验证的前端配置一致；定位配置不启用此项。
+    gravity_aid:
+      enable: true
+      sigma_deg: 0.005

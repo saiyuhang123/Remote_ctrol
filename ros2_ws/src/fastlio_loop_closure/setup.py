@@ -13,7 +13,7 @@ setup(
     zip_safe=True,
     maintainer='jkbot',
     maintainer_email='jkbot@example.com',
-    description='Live 6DoF keyframe loop closure backend for FAST-LIO',
+    description='Gravity-preserving measured-overlap map refinement for FAST-LIO',
     license='Proprietary',
     entry_points={
         'console_scripts': [

@@ -65,10 +65,19 @@
 #include <filesystem>
 #include "atomic_map_save.h"
 #include "preprocess.h"
+#include "gravity_observation.hpp"
 #include <ikd-Tree/ikd_Tree.h>
 
 #define INIT_TIME           (0.1)
 #define LASER_POINT_COV     (0.001)
+
+// Device tilt prior. Mapping profiles opt in; localization keeps the default disabled.
+bool gravity_aid_enabled = false;
+double gravity_aid_sigma_deg = 0.10;
+bool gravity_aid_valid = false, gravity_reference_set = false;
+Eigen::Vector3d gravity_reference_up = Eigen::Vector3d::UnitZ();
+Eigen::Vector3d gravity_measured_up = Eigen::Vector3d::UnitZ();
+size_t gravity_aid_frames = 0, gravity_aid_rejected = 0;
 #define MAXN                (720000)
 #define PUBFRAME_PERIOD     (20)
 
@@ -746,8 +755,9 @@ void h_share_model(state_ikfom &s, esekfom::dyn_share_datastruct<double> &ekfom_
     double solve_start_  = omp_get_wtime();
 
     /*** Computation of Measuremnt Jacobian matrix H and measurents vector ***/
-    ekfom_data.h_x = MatrixXd::Zero(effct_feat_num, 12); //23
-    ekfom_data.h.resize(effct_feat_num);
+    const int gravity_rows = gravity_aid_valid ? 3 : 0;
+    ekfom_data.h_x = MatrixXd::Zero(effct_feat_num + gravity_rows, 12);
+    ekfom_data.h.resize(effct_feat_num + gravity_rows);
 
     for (int i = 0; i < effct_feat_num; i++)
     {
@@ -779,6 +789,16 @@ void h_share_model(state_ikfom &s, esekfom::dyn_share_datastruct<double> &ekfom_
         /*** Measuremnt: distance to the closest surface/corner ***/
         ekfom_data.h(i) = -norm_p.intensity;
     }
+    if (gravity_aid_valid) {
+        const Eigen::Matrix3d R = s.rot.toRotationMatrix();
+        const Eigen::Vector3d predicted = R.transpose() * gravity_reference_up;
+        const double sigma = gravity_aid_sigma_deg * M_PI / 180.0;
+        const double scale = std::sqrt(LASER_POINT_COV) / sigma;
+        ekfom_data.h_x.block<3,3>(effct_feat_num, 3) =
+            scale * fast_lio_gravity::upJacobian(R, gravity_reference_up);
+        ekfom_data.h.segment<3>(effct_feat_num) =
+            scale * (gravity_measured_up - predicted);
+    }
     solve_time += omp_get_wtime() - solve_start_;
 }
 
@@ -795,6 +815,10 @@ public:
         this->declare_parameter<bool>("publish.scan_bodyframe_pub_en", true);
         this->declare_parameter<int>("max_iteration", 4);
         this->declare_parameter<string>("map_file_path", "");
+        gravity_aid_enabled = this->declare_parameter<bool>("gravity_aid.enable", false);
+        gravity_aid_sigma_deg = this->declare_parameter<double>("gravity_aid.sigma_deg", 0.10);
+        if (gravity_aid_sigma_deg <= 0 || !std::isfinite(gravity_aid_sigma_deg))
+            throw std::runtime_error("gravity_aid.sigma_deg must be positive");
         lio_odom_frame = this->declare_parameter<string>("lio_odom_frame", "lio_odom");
         lio_body_frame = this->declare_parameter<string>("lio_body_frame", "imu_link");
         root_dir = this->declare_parameter<string>("runtime_log_dir", "/tmp/remote_ctrol_fast_lio");
@@ -975,6 +999,44 @@ private:
             {
                 RCLCPP_WARN(this->get_logger(), "No point, skip this scan!\n");
                 return;
+            }
+
+            gravity_aid_valid = false;
+            if (gravity_aid_enabled) {
+                std::vector<Eigen::Vector3d> valid_up;
+                for (const auto &imu : Measures.imu) {
+                    const auto &o = imu->orientation;
+                    Eigen::Quaterniond q(o.w, o.x, o.y, o.z);
+                    const auto &acc = imu->linear_acceleration;
+                    const Eigen::Vector3d a(acc.x, acc.y, acc.z);
+                    if (imu->orientation_covariance[0] < 0 ||
+                        !q.coeffs().allFinite() || q.norm() < .95 || q.norm() > 1.05 ||
+                        !a.allFinite() || a.norm() < 9.0 || a.norm() > 10.6) continue;
+                    const Eigen::Vector3d n = fast_lio_gravity::bodyUp(q);
+                    if (n.dot(a.normalized()) < std::cos(5.0*M_PI/180.0)) continue;
+                    valid_up.push_back(n);
+                }
+                if (valid_up.size() >= 3) {
+                    // Component medians suppress occasional device-angle spikes.
+                    Eigen::Vector3d observed;
+                    for (int j=0; j<3; ++j) {
+                        std::vector<double> v;
+                        for (const auto &n : valid_up) v.push_back(n[j]);
+                        auto middle = v.begin()+v.size()/2;
+                        std::nth_element(v.begin(), middle, v.end());
+                        observed[j] = *middle;
+                    }
+                    observed.normalize();
+                    if (!gravity_reference_set) {
+                        gravity_reference_up = state_point.rot * observed;
+                        gravity_reference_set = true;
+                    }
+                    gravity_measured_up = observed;
+                    gravity_aid_valid = true;
+                    ++gravity_aid_frames;
+                } else ++gravity_aid_rejected;
+                if ((gravity_aid_frames+gravity_aid_rejected)%500 == 0)
+                    RCLCPP_INFO(this->get_logger(), "Gravity observations accepted=%zu rejected=%zu", gravity_aid_frames, gravity_aid_rejected);
             }
 
             flg_EKF_inited = (Measures.lidar_beg_time - first_lidar_time) < INIT_TIME ? \

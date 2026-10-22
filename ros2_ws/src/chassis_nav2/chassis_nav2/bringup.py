@@ -282,12 +282,13 @@ def configure(context):
             nodes.append(patrol_launch(True, hw) if recorded else patrol_launch())
     if not active:
         return nodes
+    use_sim_time = args.get('use_sim_time', 'false').lower() == 'true'
     description = (share('chassis_description')/'urdf/chassis.urdf').read_text()
     nodes.append(Node(package='robot_state_publisher', executable='robot_state_publisher',
-                      parameters=[{'robot_description': description, 'use_sim_time': False}], output='screen'))
+                      parameters=[{'robot_description': description, 'use_sim_time': use_sim_time}], output='screen'))
     profile = 'velodyne.yaml' if mode == 'mapping' else 'velodyne_test.yaml'
     profile_path = str(share('fast_lio_localization')/'config'/profile)
-    fast = {'use_sim_time': False, 'lio_odom_frame': 'lio_odom', 'lio_body_frame': 'imu_link',
+    fast = {'use_sim_time': use_sim_time, 'lio_odom_frame': 'lio_odom', 'lio_body_frame': 'imu_link',
             'mapping.extrinsic_T': body_lidar[:3, 3].tolist(),
             'mapping.extrinsic_R': body_lidar[:3, :3].reshape(-1).tolist(),
             'common.time_offset_lidar_to_imu': float(hw['sensor_calibration']['time_offset_lidar_to_imu']),
@@ -302,34 +303,40 @@ def configure(context):
             raise ValueError('建图需要 pcd_map:=/绝对路径/site.pcd 作为保存路径')
         output = Path(args['pcd_map']).expanduser().resolve()
         output.parent.mkdir(parents=True, exist_ok=True)
+        stamp = f"{datetime.now():%Y%m%d_%H%M%S}"
         if output.exists():
-            backup = output.with_name(f"{output.stem}_{datetime.now():%Y%m%d_%H%M%S}{output.suffix}")
+            backup = output.with_name(f"{output.stem}_{stamp}{output.suffix}")
             output.rename(backup)
             print(f'[bringup] 旧地图已备份为 {backup.name}，本次建图保存到 {output.name}')
-        # FAST-LIO's own PCD is the raw incremental map. The live loop-closure
-        # node owns the final path and writes the 6DoF-corrected map there.
+        # Keep a previous validation report paired with its PCD backup; a stale
+        # PASS report must not survive next to a rejected or never-written map.
+        stale_report = output.with_suffix('.validation.json')
+        if stale_report.exists():
+            report_backup = output.with_name(f"{output.stem}_{stamp}.validation.json")
+            stale_report.rename(report_backup)
+            print(f'[bringup] 旧验证报告已同步备份为 {report_backup.name}')
+        # The backend owns the final path. It exports only after measured
+        # structural overlaps and gravity-preserving refinement pass checks.
         raw_output = output.with_name(f'{output.stem}_fastlio_raw{output.suffix}')
         fast['map_file_path'] = str(raw_output)
         loop_closure_node = Node(
             package='fastlio_loop_closure', executable='live_loop_closure',
             name='fastlio_loop_closure', output='screen',
+            additional_env={'OPENBLAS_NUM_THREADS': '1', 'OMP_NUM_THREADS': '3'},
             parameters=[{
+                'use_sim_time': use_sim_time,
                 'output_map_path': str(output),
                 'keyframe_distance': 0.8,
-                'keyframe_angle_deg': 12.0,
+                'keyframe_angle_deg': 10.0,
                 'keyframe_max_gap_sec': 2.0,
-                'stationary_distance': 0.15,
+                'stationary_distance': 0.12,
                 'stationary_angle_deg': 2.0,
-                'search_radius': 12.0,
+                'search_radius': 5.0,
                 'min_time_diff_sec': 300.0,
                 'min_index_diff': 30,
-                'submap_half_window': 5,
-                'min_fitness': 0.35,
-                'max_rmse': 0.50,
-                'max_loops': 20,
-                'try_start_end_on_save': True,
+                'submap_half_window': 3,
+                'overlap_spacing_m': 2.0,
                 'map_voxel': 0.10,
-                'save_keyframe_voxel': 0.10,
             }],
         )
     else:
@@ -337,11 +344,13 @@ def configure(context):
         if Path(fast['map_file_path']).stat().st_size == 0:
             raise ValueError(f"定位 PCD 地图为空：{fast['map_file_path']}；请重新建图保存，或选择同一地图对应的有效 PCD/PGM/YAML，不能只使用栅格文件")
     nodes.append(Node(package='fast_lio_localization', executable='fastlio_mapping', name='fast_lio_mapping',
-                      parameters=[profile_path, fast], output='screen'))
+                      parameters=[profile_path, fast], output='screen',
+                      remappings=[('/map_save', '/fastlio/raw_map_save')] if mode == 'mapping' else []))
     if loop_closure_node is not None:
         nodes.append(loop_closure_node)
     nodes.append(Node(package='chassis_nav2', executable='lio_odometry.py',
         parameters=[{'base_from_body_matrix': base_body.reshape(-1).tolist(),
+                     'use_sim_time': use_sim_time,
                      'odom_topic': '/odom' if source == 'lio' else '/odom_lio',
                      'odom_frame': 'odom' if source == 'lio' else 'lio_odom',
                      'comparison_topic': '/odom_lio' if source == 'lio' else '',

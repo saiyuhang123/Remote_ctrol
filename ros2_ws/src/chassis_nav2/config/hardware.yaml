@@ -8,7 +8,7 @@ sensor_calibration:
     rpy: [0.0, 0.0, 0.0]  # 水平安装，雷达 X 轴与车头方向一致
   base_from_imu:
     translation: [0.32, 0.0, 0.22]  # 相对 base_link：前方 32 cm，上方 22 cm；位于雷达正下方 24 cm
-    rpy: [0.0, 0.0, 0.0]  # 水平安装，IMU X 轴朝车头方向
+    rpy: [0.0, 0.0, -1.5707963267948966]  # 2026-10-22 用户核对轴标：IMU Y+ 与雷达 X+/车前同向，Z+ 朝上
   time_offset_lidar_to_imu: 0.0  # 尚未测量，需实测确认时间偏差
 
 imu:
