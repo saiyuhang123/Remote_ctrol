@@ -8,6 +8,13 @@
 请优先使用 `ros2 launch chassis_nav2 mapping.launch.py` 或 `localization.launch.py`，
 显式传入 `pcd_map`。下文保留上游算法说明；低层 launch 和零值配置不代表新车已标定。
 
+JD03 的统一建图和定位/导航配置均启用 WIT 倾角辅助（`gravity_aid.enable: true`），
+只观测重力方向，设备 yaw 不参与融合，车辆在坡道上的真实 roll/pitch 会保留。
+`sigma_deg: 0.005` 是园区数据回放验证的滤波权重，并非 IMU 精度声明；
+配置使用实际 16 线雷达，雷达→IMU 的 Rz(+90°) 外参由统一硬件配置覆盖。
+当前 UI 默认地图、备份、切片与定位回放记录见
+[导航倾角辅助部署记录](../../../docs/FASTLIO_NAVIGATION_TILT_20261022.md)。
+
 PCD 保存采用同目录临时文件写完后替换。成功调用 `/map_save` 后，退出建图保留该快照，避免覆盖基于它生成的 PGM/YAML；继续建图后需要再次调用保存来更新快照。未显式保存时，退出仍尝试自动保存 PCD。Qt 的保存按钮另外负责自动生成配套栅格。
 
 保存与退出回归（构建并 source 工作空间后，从项目根目录执行）：

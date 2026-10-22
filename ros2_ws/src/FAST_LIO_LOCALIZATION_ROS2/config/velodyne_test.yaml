@@ -33,7 +33,7 @@
       time_offset_lidar_to_imu: 0.0
     preprocess:
       lidar_type: 2
-      scan_line: 32
+      scan_line: 16
       scan_rate: 10
       timestamp_unit: 0
       # 盲区半径(m)：1.5 = 滤掉车身及近场残影（实测车身最远点 0.8m，仍见残影故继续扩大）。
@@ -70,3 +70,8 @@
     pcd_save:
       pcd_save_en: false
       interval: -1
+    # JD03 / WIT：与已验证的建图前端使用相同重力方向观测，不融合设备 yaw。
+    # 0.005° 是滤波优化权重，不代表 IMU 精度；由 IMU 的真实倾角保留坡度。
+    gravity_aid:
+      enable: true
+      sigma_deg: 0.005
