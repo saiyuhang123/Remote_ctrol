@@ -88,13 +88,15 @@ controller_server:
       yaw_goal_tolerance: 0.872664626
     FollowPath:
       plugin: nav2_regulated_pure_pursuit_controller::RegulatedPurePursuitController
-      desired_linear_vel: 0.30
-      # 自由导航先采用前进-only：DUBIN 只规划前进路径，RPP 禁止倒车，
-      # 空间不足时规划失败停车，避免掉头时前进/倒车反复切换造成扭动。
+      desired_linear_vel: 0.50
+      # 自由导航允许倒车：REEDS_SHEPP 规划 + RPP 执行。前进-only DUBIN 对个别
+      # "位置+目标朝向"组合存在规划死区（2026-10-22 巡航实测规划 23 连败），回退倒车版。
+      # 前视距离沿用倒车调参值 0.18/0.7：折返点（倒车→前进）前曲率大，regulated 减速会把前视压到 min，
+      # 换向发生在贴近折返点处，倒车段走得完整；固定 0.9 曾导致倒车不够就提前换前进，来回振荡
       use_velocity_scaled_lookahead_dist: true
       lookahead_time: 1.5
-      min_lookahead_dist: 0.35
-      max_lookahead_dist: 0.80
+      min_lookahead_dist: 0.18
+      max_lookahead_dist: 0.7
       # 曲率减速阈值按本车最小转弯半径（0.5/tan24°≈1.12m）定：半径 <1.5m 的弯开始按比例减速，
       # 掉头/折返段实际车速更低 → 前视压向 min，换向更贴折返点（默认 0.9 对本车几乎不触发减速）
       use_regulated_linear_velocity_scaling: true
@@ -104,7 +106,7 @@ controller_server:
       xy_goal_tolerance: 0.10
       use_rotate_to_heading: false
       max_angular_accel: 1.5
-      allow_reversing: false
+      allow_reversing: true
 
 local_costmap:
   local_costmap:
@@ -211,9 +213,10 @@ planner_server:
       use_astar: true
       allow_unknown: false
       minimum_turning_radius: 1.0
-      motion_model_for_search: DUBIN
+      motion_model_for_search: REEDS_SHEPP
       angle_quantization_bins: 72
-      max_iterations: 1000000
+      # 搜索预算放宽到 1000 万次，由 max_planning_time 5s 兜底最坏耗时。
+      max_iterations: 10000000
       max_planning_time: 5.0
 smoother_server:
   ros__parameters:

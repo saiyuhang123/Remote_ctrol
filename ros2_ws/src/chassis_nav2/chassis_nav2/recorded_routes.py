@@ -56,7 +56,7 @@ def nav2_overlay(executable, source_file, hw):
     if executable != 'controller_server':
         return {}
     cfg = original['controller_server']['ros__parameters']
-    speed = min(0.2, float(hw['chassis']['max_speed']))
+    speed = min(0.5, float(hw['chassis']['max_speed']))
     result = {'controller_plugins': list(dict.fromkeys(cfg['controller_plugins']+['RecordedRoute','RecordedEntryRoute'])),
               'goal_checker_plugins': list(dict.fromkeys(cfg['goal_checker_plugins']+['recorded_goal_checker','recorded_stop_checker','recorded_entry_checker']))}
     progress=cfg.get('progress_checker_plugin','progress_checker')

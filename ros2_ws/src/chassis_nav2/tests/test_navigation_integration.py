@@ -47,7 +47,7 @@ def test_recorded_routes_are_opt_in_and_have_independent_plugins():
         assert controller['recorded_entry_checker.yaw_goal_tolerance']==.08
         assert controller['recorded_entry_checker.controller_id']=='RecordedEntryRoute'
         assert controller['RecordedEntryRoute.max_lookahead_dist']<controller['RecordedRoute.max_lookahead_dist']
-        assert controller['RecordedEntryRoute.desired_linear_vel']==.20
+        assert controller['RecordedEntryRoute.desired_linear_vel']==.50
         assert controller['RecordedEntryRoute.min_approach_linear_velocity']==.05
         assert controller['RecordedEntryRoute.approach_velocity_scaling_dist']==.12
         assert controller['RecordedEntryRoute.regulated_linear_scaling_min_radius']==planners['RecordedEntry.minimum_turning_radius']
@@ -72,11 +72,11 @@ def test_free_navigation_uses_rpp_with_10cm_50deg_tolerance():
         document=yaml.safe_load((SRC/'chassis_nav2/config'/name).read_text())
         planner=document['planner_server']['ros__parameters']['GridBased']
         assert planner['allow_unknown'] is False
-        assert planner['motion_model_for_search']=='DUBIN'
-        assert controller['FollowPath']['allow_reversing'] is False
-        assert controller['FollowPath']['desired_linear_vel']==0.30
-        assert controller['FollowPath']['min_lookahead_dist']==0.35
-        assert controller['FollowPath']['max_lookahead_dist']==0.80
+        assert planner['motion_model_for_search']=='REEDS_SHEPP'
+        assert controller['FollowPath']['allow_reversing'] is True
+        assert controller['FollowPath']['desired_linear_vel']==0.50
+        assert controller['FollowPath']['min_lookahead_dist']==0.18
+        assert controller['FollowPath']['max_lookahead_dist']==0.7
         for costmap_name in ('local_costmap','global_costmap'):
             costmap=document[costmap_name][costmap_name]['ros__parameters']
             assert costmap['footprint_padding']>=0.05
