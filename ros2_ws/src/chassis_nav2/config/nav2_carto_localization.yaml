@@ -1,5 +1,5 @@
 # 2D 纯定位专用（cartographer）：map->odom 由 cartographer（pure_localization）提供，map_server 加载 2D 栅格地图。
-# 与 3D 管线的 nav2.yaml 独立，互不改用。footprint 与转弯半径由 hardware.yaml 覆盖，初始速度 0.3m/s。
+# 与 3D 管线的 nav2.yaml 独立，互不改用。footprint 与转弯半径由 hardware.yaml 覆盖，普通导航直线指令上限 0.6m/s，倒车 0.3m/s。
 bt_navigator:
   ros__parameters:
     use_sim_time: false
@@ -66,7 +66,7 @@ bt_navigator_navigate_to_pose_rclcpp_node:
 controller_server:
   ros__parameters:
     use_sim_time: false
-    controller_frequency: 10.0
+    controller_frequency: 20.0
     min_x_velocity_threshold: 0.001
     min_y_velocity_threshold: 0.001
     min_theta_velocity_threshold: 0.001
@@ -78,7 +78,7 @@ controller_server:
     - FollowPath
     progress_checker:
       plugin: nav2_controller::SimpleProgressChecker
-      required_movement_radius: 0.5
+      required_movement_radius: 0.2
       movement_time_allowance: 20.0
     general_goal_checker:
       stateful: true  # 进入容差即锁定成功，避免终点附近抖动反复判定
@@ -87,26 +87,37 @@ controller_server:
       xy_goal_tolerance: 0.10
       yaw_goal_tolerance: 0.872664626
     FollowPath:
-      plugin: nav2_regulated_pure_pursuit_controller::RegulatedPurePursuitController
-      desired_linear_vel: 0.50
-      # 自由导航允许倒车：REEDS_SHEPP 规划 + RPP 执行。前进-only DUBIN 对个别
-      # "位置+目标朝向"组合存在规划死区（2026-10-22 巡航实测规划 23 连败），回退倒车版。
-      # 前视距离沿用倒车调参值 0.18/0.7：折返点（倒车→前进）前曲率大，regulated 减速会把前视压到 min，
-      # 换向发生在贴近折返点处，倒车段走得完整；固定 0.9 曾导致倒车不够就提前换前进，来回振荡
+      # RPP 保留障碍减速与足迹碰撞检测；按路径顺序执行前进/倒车段，折返点停稳再换向。
+      plugin: chassis_nav2::AckermannPursuitController
+      desired_linear_vel: 0.60
+      max_reverse_speed: 0.30
+      minimum_turning_radius: 0.69  # launch 按 hardware.yaml 实测值覆盖
+      max_angular_vel: 0.8
       use_velocity_scaled_lookahead_dist: true
-      lookahead_time: 1.5
-      min_lookahead_dist: 0.18
-      max_lookahead_dist: 0.7
-      # 曲率减速阈值按本车最小转弯半径（0.5/tan24°≈1.12m）定：半径 <1.5m 的弯开始按比例减速，
-      # 掉头/折返段实际车速更低 → 前视压向 min，换向更贴折返点（默认 0.9 对本车几乎不触发减速）
+      lookahead_time: 1.8
+      min_lookahead_dist: 0.45
+      max_lookahead_dist: 1.0
+      use_interpolation: true
+      # 4WS 实测最小半径 0.69m；弯道减速，低速仍保持足够前视，避免短周期左右纠偏。
       use_regulated_linear_velocity_scaling: true
-      regulated_linear_scaling_min_radius: 1.5
-      rotate_to_heading_angular_vel: 0.5
+      regulated_linear_scaling_min_radius: 1.2
+      regulated_linear_scaling_min_speed: 0.08
+      use_cost_regulated_linear_velocity_scaling: true
+      inflation_cost_scaling_factor: 3.0
+      use_collision_detection: true
+      max_allowed_time_to_collision_up_to_carrot: 2.0
+      approach_velocity_scaling_dist: 0.6
+      min_approach_linear_velocity: 0.05
       transform_tolerance: 0.5
       xy_goal_tolerance: 0.10
       use_rotate_to_heading: false
-      max_angular_accel: 1.5
       allow_reversing: true
+      cusp_tolerance: 0.06
+      terminal_lookahead_dist: 0.18
+      cusp_heading_tolerance: 0.25
+      cusp_deceleration: 0.4
+      stopped_speed: 0.03
+      cusp_stop_duration: 0.25
 
 local_costmap:
   local_costmap:
@@ -212,7 +223,7 @@ planner_server:
       tolerance: 0.1
       use_astar: true
       allow_unknown: false
-      minimum_turning_radius: 1.0
+      minimum_turning_radius: 0.85  # 规划保留转向余量；控制器仍可用实测 0.69m 纠偏
       motion_model_for_search: REEDS_SHEPP
       angle_quantization_bins: 72
       # 搜索预算放宽到 1000 万次，由 max_planning_time 5s 兜底最坏耗时。
@@ -292,24 +303,24 @@ velocity_smoother:
   ros__parameters:
     use_sim_time: false
     smoothing_frequency: 20.0
-    scale_velocities: false
+    scale_velocities: true
     feedback: OPEN_LOOP
     max_velocity:
-    - 0.5
+    - 0.6
     - 0.0
     - 0.8
     min_velocity:
-    - -0.2
+    - -0.3
     - 0.0
     - -0.8
     max_accel:
-    - 0.5
+    - 0.4
     - 0.0
     - 0.8
     max_decel:
-    - -0.5
+    - -0.6
     - 0.0
-    - -0.8
+    - -1.2
     odom_topic: odom
     odom_duration: 0.1
     deadband_velocity:

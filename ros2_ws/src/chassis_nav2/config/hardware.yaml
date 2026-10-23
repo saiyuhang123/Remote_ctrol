@@ -66,13 +66,15 @@ chassis:
   confirmed: true            # eno1 通信参数已核对，底盘反馈已收到；转向和速度按厂家协议转换
   command_steering_sign: -1.0
   feedback_steering_sign: -1.0 # 厂商 wheelAngle() 右转为正，ROS yaw 左转为正
-  max_speed: 0.5
+  max_speed: 0.6             # 普通导航直线指令上限；弯道/障碍物/终点仍由控制器减速
+  max_reverse_speed: 0.3     # 倒车单独限速，限速时同比缩放 v/w，保留转弯曲率
   cmd_timeout: 0.5
   four_wheel_steering: true # 双阿克曼反相四轮转向；若实测后轮与前轮同向偏（蟹行），把 rear_steering_sign 改为 -1.0
   rear_steering_sign: 1.0    # 实车验证(2026-10-14)：R 通道与前轮同号时几何反向（反相转弯）
   four_wheel_curvature_gain: 1.63 # 实测：满转角内圈直径 0.82m，中心半径 0.41+0.28=0.69m；κ = gain·tanδ/L
   steering_rate_dps: 45.0  # 舵机转角速率上限（度/秒）；防止控制器输出抖动时舵机疯狂摆动
-  min_turning_radius: 0.69   # 实测(2026-10-14) 4WS 满转角内圈直径 0.82m 换算的车中心半径；规划器和精细接近按此限曲率
+  min_turning_radius: 0.69   # 实测(2026-10-14) 4WS 满转角内圈直径 0.82m 换算的车中心半径；底盘曲率极限
+  navigation_turning_radius: 0.85  # 普通导航规划留出纠偏余量，避免整段满舵后无法修正误差
   driver:
     canbus_type: 1
     main_can_id: 1

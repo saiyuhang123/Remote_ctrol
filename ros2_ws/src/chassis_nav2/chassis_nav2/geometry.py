@@ -46,7 +46,10 @@ def ackermann_command(v, w, wheel_base, max_steering_deg, max_speed,
     """Twist (m/s, rad/s) to JD03 Ecu (km/h, degrees, gear, brake)."""
     if not all(math.isfinite(float(a)) for a in (v, w)):
         return 0., 0., 1, True
-    v = max(-max_speed, min(max_speed, v))
+    # Limit speed without changing curvature w/v.
+    if abs(v) > max_speed:
+        scale = max_speed / abs(v)
+        v, w = v * scale, w * scale
     if abs(v) < .01:
         return 0., 0., 1, True
     angle = math.degrees(math.atan(wheel_base * w / v))
@@ -71,7 +74,9 @@ def ackermann_command_4ws(v, w, wheel_base, max_steering_deg, max_speed,
     """
     if not all(math.isfinite(float(a)) for a in (v, w)):
         return 0., 0., 0., 1, True
-    v = max(-max_speed, min(max_speed, v))
+    if abs(v) > max_speed:
+        scale = max_speed / abs(v)
+        v, w = v * scale, w * scale
     if abs(v) < .01:
         return 0., 0., 0., 1, True
     angle = math.degrees(math.atan(wheel_base * w / (curvature_gain * v)))

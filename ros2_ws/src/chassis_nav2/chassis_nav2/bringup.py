@@ -154,7 +154,9 @@ def bridge_node(hw):
                   four_wheel_steering=bool(chassis_cfg.get('four_wheel_steering', False)),
                   rear_steering_sign=float(chassis_cfg.get('rear_steering_sign', -1.)),
                   four_wheel_curvature_gain=float(chassis_cfg.get('four_wheel_curvature_gain', 2.)),
-                  steering_rate_dps=float(chassis_cfg.get('steering_rate_dps', 45.)))
+                  steering_rate_dps=float(chassis_cfg.get('steering_rate_dps', 45.)),
+                  max_reverse_speed=float(chassis_cfg.get('max_reverse_speed', .3)),
+                  feedback_speed_scale=float(hw['wheel_odometry']['speed_scale']))
     return Node(package='chassis_nav2', executable='jd03_bridge.py', parameters=[params], output='screen')
 
 
@@ -189,6 +191,12 @@ def navigation_nodes(map_yaml, hw, params_file, use_map_server=True, localizatio
         halves = 2. if hw['chassis'].get('four_wheel_steering', False) else 1.
         turning_radius = base / (halves * math.tan(math.radians(angle)))
     rewrites={'footprint':json.dumps(footprint),'minimum_turning_radius':str(turning_radius),'use_sim_time':'false'}
+    planning_radius=float(hw['chassis'].get('navigation_turning_radius',turning_radius*1.23))
+    if not math.isfinite(planning_radius) or planning_radius<turning_radius:
+        raise ValueError('navigation_turning_radius 必须不小于底盘实测最小转弯半径')
+    # The controller retains the physical limit for corrections. The free
+    # planner needs steering reserve; recorded paths keep their own geometry.
+    rewrites['planner_server.ros__parameters.GridBased.minimum_turning_radius']=str(planning_radius)
     if enable_recorded_routes:
         from .recorded_routes import clearance_rewrites
         rewrites.update(clearance_rewrites())

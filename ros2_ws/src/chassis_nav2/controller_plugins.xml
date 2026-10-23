@@ -1,0 +1,5 @@
+<library path="chassis_ackermann_pursuit">
+  <class type="chassis_nav2::AckermannPursuitController" base_class_type="nav2_core::Controller">
+    <description>RPP with ordered forward/reverse legs and physical 4WS limits.</description>
+  </class>
+</library>

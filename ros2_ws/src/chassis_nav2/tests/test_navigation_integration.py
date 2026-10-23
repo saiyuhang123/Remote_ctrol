@@ -16,6 +16,7 @@ from geometry_msgs.msg import PoseWithCovarianceStamped, Twist
 from nav_msgs.msg import Odometry
 from std_msgs.msg import Bool
 from chassis_nav2.geometry import transform, inverse, quaternion, ackermann_command, ackermann_command_4ws
+from chassis_nav2.drive_control import GearInterlock
 from chassis_nav2.final_approach_logic import FinalApproachLogic
 from chassis_nav2.wheel_odometry import WheelOdometry
 from chassis_nav2 import bringup
@@ -65,7 +66,7 @@ def test_free_navigation_uses_rpp_with_10cm_50deg_tolerance():
     for name in ('nav2.yaml','nav2_2d_localization.yaml','nav2_carto_localization.yaml'):
         controller=yaml.safe_load((SRC/'chassis_nav2/config'/name).read_text())['controller_server']['ros__parameters']
         assert controller['controller_plugins']==['FollowPath']
-        assert controller['FollowPath']['plugin']=='nav2_regulated_pure_pursuit_controller::RegulatedPurePursuitController'
+        assert controller['FollowPath']['plugin']=='chassis_nav2::AckermannPursuitController'
         assert controller['general_goal_checker']['xy_goal_tolerance']==0.10
         assert abs(controller['general_goal_checker']['yaw_goal_tolerance']-math.radians(50.0))<1e-9
         assert controller['FollowPath']['xy_goal_tolerance']==0.10
@@ -74,9 +75,14 @@ def test_free_navigation_uses_rpp_with_10cm_50deg_tolerance():
         assert planner['allow_unknown'] is False
         assert planner['motion_model_for_search']=='REEDS_SHEPP'
         assert controller['FollowPath']['allow_reversing'] is True
-        assert controller['FollowPath']['desired_linear_vel']==0.50
-        assert controller['FollowPath']['min_lookahead_dist']==0.18
-        assert controller['FollowPath']['max_lookahead_dist']==0.7
+        assert controller['FollowPath']['desired_linear_vel']==0.60
+        assert controller['FollowPath']['max_reverse_speed']==0.30
+        assert controller['FollowPath']['min_lookahead_dist']==0.45
+        assert controller['FollowPath']['max_lookahead_dist']==1.0
+        smoother=document['velocity_smoother']['ros__parameters']
+        assert smoother['scale_velocities']
+        assert smoother['max_velocity'][0]>=controller['FollowPath']['desired_linear_vel']
+        assert -smoother['min_velocity'][0]>=controller['FollowPath']['max_reverse_speed']
         for costmap_name in ('local_costmap','global_costmap'):
             costmap=document[costmap_name][costmap_name]['ros__parameters']
             assert costmap['footprint_padding']>=0.05
@@ -97,7 +103,9 @@ def test_desktop_recorded_markers_preserve_all_navigation_displays():
 
 
 def load(path):
-    spec = importlib.util.spec_from_file_location(path.stem, path)
+    # Package modules may use relative imports; standalone ROS scripts do not.
+    name=f'{path.parent.name}.{path.stem}' if (path.parent/'__init__.py').exists() else path.stem
+    spec = importlib.util.spec_from_file_location(name, path)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
@@ -206,6 +214,8 @@ class IntegrationTests(unittest.TestCase):
         node.command_steering_sign, node.cmd_timeout, node.estopped = -1., .5, False
         node.four_wheel_steering, node.rear_steering_sign = False, -1.
         node.steering_rate_dps, node.last_steer, node.last_rear = 45., 0., 0.
+        node.gear_interlock, node.feedback_speed, node.max_reverse_speed = GearInterlock(), .1, .3
+        node.feedback_steer, node.steering_ready_tolerance_deg = 0., 3.
         node.ecu_pub, node.feedback_time = Capture(), time.monotonic()
         node.command = time.monotonic(), .2, .1
         node.get_clock = lambda: SimpleNamespace(now=lambda: SimpleNamespace(to_msg=lambda: Time()))
@@ -229,6 +239,8 @@ class IntegrationTests(unittest.TestCase):
         node.command_steering_sign, node.cmd_timeout, node.estopped = -1., .5, False
         node.four_wheel_steering, node.rear_steering_sign = False, -1.
         node.steering_rate_dps, node.last_steer, node.last_rear = 45., 0., 0.
+        node.gear_interlock, node.feedback_speed, node.max_reverse_speed = GearInterlock(), 0., .3
+        node.feedback_steer, node.steering_ready_tolerance_deg = 0., 3.
         node.ecu_pub, node.feedback_time = Capture(), time.monotonic()
         node.command = time.monotonic(), .05, 1.0  # 低速大转角：期望打满 27°
         node.get_clock = lambda: SimpleNamespace(now=lambda: SimpleNamespace(to_msg=lambda: Time()))
@@ -244,6 +256,49 @@ class IntegrationTests(unittest.TestCase):
         node.send()
         third = node.ecu_pub.messages[-1].steer
         self.assertLessEqual(abs(third - second), 2.25 + 1e-9)
+
+    def test_jd03_reverse_stop_keeps_gear_and_steering_and_brakes_before_forward(self):
+        cls = load(SRC/'chassis_nav2/scripts/jd03_bridge.py').JD03Bridge
+        node = cls.__new__(cls)
+        node.wheel_base, node.max_steering_deg, node.max_speed = .5, 24., .6
+        node.command_steering_sign, node.cmd_timeout, node.estopped = -1., .5, False
+        node.four_wheel_steering, node.rear_steering_sign = True, 1.
+        node.four_wheel_curvature_gain = 1.63
+        node.steering_rate_dps, node.last_steer, node.last_rear = 45., -8., -8.
+        node.gear_interlock, node.feedback_speed, node.max_reverse_speed = GearInterlock(), -.15, .3
+        node.feedback_steer, node.steering_ready_tolerance_deg = -8., 3.
+        node.gear_interlock.gear = 3
+        node.ecu_pub, node.feedback_time = Capture(), time.monotonic()
+        node.get_clock = lambda: SimpleNamespace(now=lambda: SimpleNamespace(to_msg=lambda: Time()))
+        node.command = time.monotonic(), 0., 0.
+        node.send()
+        stopped = node.ecu_pub.messages[-1]
+        self.assertEqual((stopped.motor, stopped.shift, stopped.brake), (0., 3, True))
+        self.assertEqual((stopped.steer, stopped.rear_steer), (-8., -8.))
+        node.command = time.monotonic(), .2, .1
+        node.send()
+        changing = node.ecu_pub.messages[-1]
+        self.assertEqual((changing.motor, changing.shift, changing.brake), (0., 3, True))
+
+    def test_jd03_stationary_start_waits_for_measured_steering(self):
+        cls = load(SRC/'chassis_nav2/scripts/jd03_bridge.py').JD03Bridge
+        node = cls.__new__(cls)
+        node.wheel_base, node.max_steering_deg, node.max_speed = .5, 24., .6
+        node.command_steering_sign, node.cmd_timeout, node.estopped = -1., .5, False
+        node.four_wheel_steering, node.rear_steering_sign = True, 1.
+        node.four_wheel_curvature_gain = 1.63
+        node.steering_rate_dps, node.last_steer, node.last_rear = 45., 0., 0.
+        node.gear_interlock, node.feedback_speed, node.max_reverse_speed = GearInterlock(), 0., .3
+        node.feedback_steer, node.steering_ready_tolerance_deg = 0., 3.
+        node.ecu_pub, node.feedback_time = Capture(), time.monotonic()
+        node.get_clock = lambda: SimpleNamespace(now=lambda: SimpleNamespace(to_msg=lambda: Time()))
+        node.command = time.monotonic(), .2, .2
+        node.send()
+        self.assertTrue(node.ecu_pub.messages[-1].brake)
+        self.assertLess(node.ecu_pub.messages[-1].steer, 0.)
+        node.feedback_steer = -math.degrees(math.atan(.5/1.63))
+        node.send()
+        self.assertFalse(node.ecu_pub.messages[-1].brake)
 
     def test_wheel_odometry_straight_reverse_and_exact_turn(self):
         straight = WheelOdometry(.5, [0., 0.])
