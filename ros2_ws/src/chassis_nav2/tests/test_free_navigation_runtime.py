@@ -236,7 +236,8 @@ def test_straight_tracking_at_higher_speed_with_heading_error_and_jitter(runtime
     assert directions(rt.sim.raw)==[1]
     settled=[abs(row[2]) for row in rt.sim.history if .8<row[1]<2.5]
     assert max(settled)<.08
-    assert max(row[4] for row in rt.sim.history)>.55
+    assert .75<max(row[4] for row in rt.sim.history)<.81
+    assert max(v for _,v,_ in rt.sim.raw)<=.800001
     assert math.hypot(rt.sim.x-3.,rt.sim.y)<.12
 
 

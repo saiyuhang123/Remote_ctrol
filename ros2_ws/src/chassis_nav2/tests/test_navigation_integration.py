@@ -58,6 +58,7 @@ def test_recorded_routes_are_opt_in_and_have_independent_plugins():
 
 def test_free_navigation_uses_rpp_with_10cm_50deg_tolerance():
     import xml.etree.ElementTree as ET
+    hardware=yaml.safe_load((SRC/'chassis_nav2/config/hardware.yaml').read_text())
     for name in ('navigate_to_pose_w_replanning_and_recovery.xml',
                  'navigate_through_poses_w_replanning_and_recovery.xml'):
         tree=ET.parse(SRC/'chassis_nav2/config/bt'/name)
@@ -75,7 +76,8 @@ def test_free_navigation_uses_rpp_with_10cm_50deg_tolerance():
         assert planner['allow_unknown'] is False
         assert planner['motion_model_for_search']=='REEDS_SHEPP'
         assert controller['FollowPath']['allow_reversing'] is True
-        assert controller['FollowPath']['desired_linear_vel']==0.60
+        assert controller['FollowPath']['desired_linear_vel']==0.80
+        assert hardware['chassis']['max_speed']>=controller['FollowPath']['desired_linear_vel']
         assert controller['FollowPath']['max_reverse_speed']==0.30
         assert controller['FollowPath']['min_lookahead_dist']==0.45
         assert controller['FollowPath']['max_lookahead_dist']==1.0

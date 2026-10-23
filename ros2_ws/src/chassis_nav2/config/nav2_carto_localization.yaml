@@ -1,5 +1,5 @@
 # 2D 纯定位专用（cartographer）：map->odom 由 cartographer（pure_localization）提供，map_server 加载 2D 栅格地图。
-# 与 3D 管线的 nav2.yaml 独立，互不改用。footprint 与转弯半径由 hardware.yaml 覆盖，普通导航直线指令上限 0.6m/s，倒车 0.3m/s。
+# 与 3D 管线的 nav2.yaml 独立，互不改用。footprint 与转弯半径由 hardware.yaml 覆盖，普通导航直线指令上限 0.8m/s，倒车 0.3m/s。
 bt_navigator:
   ros__parameters:
     use_sim_time: false
@@ -89,7 +89,7 @@ controller_server:
     FollowPath:
       # RPP 保留障碍减速与足迹碰撞检测；按路径顺序执行前进/倒车段，折返点停稳再换向。
       plugin: chassis_nav2::AckermannPursuitController
-      desired_linear_vel: 0.60
+      desired_linear_vel: 0.80
       max_reverse_speed: 0.30
       minimum_turning_radius: 0.69  # launch 按 hardware.yaml 实测值覆盖
       max_angular_vel: 0.8
@@ -310,7 +310,7 @@ velocity_smoother:
     scale_velocities: true
     feedback: OPEN_LOOP
     max_velocity:
-    - 0.6
+    - 0.8
     - 0.0
     - 0.8
     min_velocity:

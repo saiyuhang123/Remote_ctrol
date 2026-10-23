@@ -66,7 +66,7 @@ chassis:
   confirmed: true            # eno1 通信参数已核对，底盘反馈已收到；转向和速度按厂家协议转换
   command_steering_sign: -1.0
   feedback_steering_sign: -1.0 # 厂商 wheelAngle() 右转为正，ROS yaw 左转为正
-  max_speed: 0.6             # 普通导航直线指令上限；弯道/障碍物/终点仍由控制器减速
+  max_speed: 0.8             # 普通导航直线指令上限；弯道/障碍物/终点仍由控制器减速
   max_reverse_speed: 0.3     # 倒车单独限速，限速时同比缩放 v/w，保留转弯曲率
   cmd_timeout: 0.5
   four_wheel_steering: true # 双阿克曼反相四轮转向；若实测后轮与前轮同向偏（蟹行），把 rear_steering_sign 改为 -1.0
