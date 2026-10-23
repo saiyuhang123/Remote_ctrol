@@ -8,10 +8,13 @@
   <license>MIT</license>
 
   <depend>rclpy</depend>
+  <exec_depend>rosidl_runtime_py</exec_depend>
+  <exec_depend>python3-sounddevice</exec_depend>
   <depend>geometry_msgs</depend>
   <depend>nav_msgs</depend>
   <depend>sensor_msgs</depend>
   <depend>std_msgs</depend>
+  <depend>yunle_msgs</depend>
   <depend>std_srvs</depend>
   <depend>nav2_msgs</depend>
   <depend>rcl_interfaces</depend>

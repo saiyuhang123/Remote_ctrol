@@ -17,7 +17,8 @@ DEFAULT_DB = (Path(os.environ.get("XDG_DATA_HOME", Path.home() / ".local/share")
 DB_PATH = Path(os.environ.get("ROBOT_PATROL_DB", str(DEFAULT_DB))).expanduser()
 WEB_MAP_DIR = Path(os.environ.get("ROBOT_WEB_MAP_DIR",
                                   str(PROJECT_ROOT / "web" / "maps"))).expanduser()
-SUPPORTED_SCHEMA_VERSION = 3
+SUPPORTED_SCHEMA_VERSION = 6
+SUPPORTED_SCHEMA_VERSIONS = frozenset(range(2, SUPPORTED_SCHEMA_VERSION + 1))
 
 _local = threading.local()
 
@@ -59,7 +60,7 @@ def schema_version() -> int:
     if row is None:
         raise DatabaseUnavailable("数据库缺少 schema_version 记录")
     version = int(row["version"])
-    if version not in (2, SUPPORTED_SCHEMA_VERSION):
+    if version not in SUPPORTED_SCHEMA_VERSIONS:
         raise DatabaseUnavailable(
             f"数据库 schema={version}，网页支持 2～{SUPPORTED_SCHEMA_VERSION}；请升级匹配的软件，不要删除业务数据库")
     return version

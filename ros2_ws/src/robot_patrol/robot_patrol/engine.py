@@ -107,7 +107,9 @@ class PatrolEngine:
                  loop_count: int, owner_session_id: str, driver: Any,
                  status_cb: Callable[[dict[str, Any]], None],
                  settle_timeout: float = 10.0, point_timeout: float = 300.0,
-                 min_dispatch_interval: float = 0.5, inspection_cb: Callable | None = None):
+                 min_dispatch_interval: float = 0.5, inspection_cb: Callable | None = None,
+                 inspection_depart_cb: Callable | None = None,
+                 inspection_finish_cb: Callable | None = None):
         self.store = store
         self.snapshot = snapshot
         self.run_id = run_id
@@ -119,6 +121,8 @@ class PatrolEngine:
         self.point_timeout = max(1.0, float(point_timeout))
         self.min_dispatch_interval = max(0.0, float(min_dispatch_interval))
         self.inspection_cb = inspection_cb
+        self.inspection_depart_cb = inspection_depart_cb
+        self.inspection_finish_cb = inspection_finish_cb
         self.flags = ControlFlags()
         self._status_lock = threading.RLock()
         self._status: dict[str, Any] = {
@@ -234,6 +238,7 @@ class PatrolEngine:
         completed_loops = 0
         completed_steps = 0
         loop_index = 0
+        finished_successfully = False
         try:
             if not self.snapshot.steps:
                 raise PatrolError("INVALID_DATA", "路线没有可执行步骤")
@@ -264,6 +269,17 @@ class PatrolEngine:
                                 completed_loops, completed_steps, "CANCEL_UNCONFIRMED",
                                 "上一导航目标尚未确认终止，禁止继续派发新目标")
                         attempt_index += 1
+                        if self.inspection_depart_cb:
+                            try:
+                                self.inspection_depart_cb(flags=self.flags)
+                            except PatrolError as error:
+                                if self.flags.cancel_requested:
+                                    return self._canceled(completed_loops, completed_steps)
+                                if self.flags.pause_requested or error.code == 'PAUSED':
+                                    if self._pause_and_wait(STATE_PAUSED) == 'CANCELED':
+                                        return self._canceled(completed_loops, completed_steps)
+                                    continue
+                                raise
                         started_at = now_ns()
                         self._set_status(state=STATE_DISPATCHING, loop_index=loop_index,
                                          step_index=step_index, current_point_name=step.point_name,
@@ -329,11 +345,19 @@ class PatrolEngine:
                             try:
                                 outcome = self.inspection_cb(
                                     step, self.run_id, self.snapshot.map_id,
-                                    loop_index, step_index, self._set_status)
+                                    loop_index, step_index, self._set_status, flags=self.flags)
                             except Exception as error:  # noqa: BLE001 - external services
                                 return self._failed(
                                     completed_loops, completed_steps, "INSPECTION_FAILED",
                                     f"巡检点动作异常：{error}")
+                            if self.flags.cancel_requested:
+                                return self._canceled(completed_loops, completed_steps)
+                            if self.flags.pause_requested or getattr(outcome, "error_code", "") == "PAUSED":
+                                if self._pause_and_wait(STATE_PAUSED) == "CANCELED":
+                                    return self._canceled(completed_loops, completed_steps)
+                                # Reconfirm navigation/standstill before retrying
+                                # the interrupted inspection of this same point.
+                                continue
                             if not bool(getattr(outcome, "success", False)):
                                 code = str(getattr(outcome, "error_code", "") or
                                            "INSPECTION_FAILED")
@@ -365,6 +389,7 @@ class PatrolEngine:
                 if self.loop_count != 0 and completed_loops >= self.loop_count:
                     self._set_status(state=STATE_SUCCEEDED, active=False,
                                      message=f"完成 {completed_loops} {'趟' if self.snapshot.recorded_plan.get('traversal') == 'SHUTTLE' else '圈'}")
+                    finished_successfully = True
                     return EngineResult(True, STATE_SUCCEEDED, self.run_id,
                                         completed_loops, completed_steps)
                 if self.flags.cancel_requested:
@@ -373,6 +398,12 @@ class PatrolEngine:
             return self._failed(completed_loops, completed_steps, error.code, error.message)
         except Exception as error:  # noqa: BLE001 - state machine boundary
             return self._failed(completed_loops, completed_steps, "INTERRUPTED", str(error))
+        finally:
+            if self.inspection_finish_cb:
+                try:
+                    self.inspection_finish_cb(success=finished_successfully)
+                except Exception:
+                    pass  # Cleanup must not mask cancellation; the PTZ lease fails closed.
 
     def _canceled(self, loops: int, steps: int) -> EngineResult:
         reason = self.flags.cancel_reason

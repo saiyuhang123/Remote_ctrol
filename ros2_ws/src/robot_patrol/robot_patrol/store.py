@@ -28,7 +28,7 @@ from .models import (
     validate_route_steps,
 )
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 
 class PatrolStore(RoadStorage):
@@ -237,6 +237,11 @@ class PatrolStore(RoadStorage):
                 );
                 CREATE INDEX IF NOT EXISTS idx_inspection_date
                     ON inspection_summary(inspection_date DESC, updated_at DESC);
+                CREATE TABLE IF NOT EXISTS inspection_reports (
+                    run_id TEXT PRIMARY KEY REFERENCES runs(run_id) ON DELETE CASCADE,
+                    generated_at INTEGER NOT NULL,
+                    payload_json TEXT NOT NULL
+                );
                 """
             )
             self._migrate_columns()
@@ -254,6 +259,11 @@ class PatrolStore(RoadStorage):
                 self._conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
             else:
                 self.initialize_roads()
+            # Backfill historical terminal tasks during the additive migration.
+            for item in self._conn.execute(
+                    'SELECT run_id FROM runs WHERE finished_at>0 AND run_id NOT IN '
+                    '(SELECT run_id FROM inspection_reports)').fetchall():
+                self._write_report(self._conn, item['run_id'])
 
     def _migrate_columns(self) -> None:
         """Additive migrations that preserve existing field data."""
@@ -678,6 +688,17 @@ class PatrolStore(RoadStorage):
                 (int(state), 1 if success else 0, int(completed_loops), int(completed_steps),
                  error_code, message, int(finished_at), run_id),
             )
+            self._write_report(conn, run_id)
+
+    @staticmethod
+    def _write_report(conn, run_id):
+        from .reporting import build_report
+        report = build_report(conn, run_id)
+        if report is not None:
+            conn.execute(
+                'INSERT INTO inspection_reports(run_id,generated_at,payload_json) VALUES(?,?,?) '
+                'ON CONFLICT(run_id) DO UPDATE SET generated_at=excluded.generated_at,payload_json=excluded.payload_json',
+                (run_id, report['generated_at_ns'], json.dumps(report, ensure_ascii=False, allow_nan=False)))
 
     def add_attempt(self, attempt_id: str, run_id: str, loop_index: int, step_index: int,
                     attempt_index: int, goal_uuid: str, target: tuple[float, float, float],
@@ -873,6 +894,9 @@ class PatrolStore(RoadStorage):
             )
             row = conn.execute(
                 "SELECT * FROM inspection_summary WHERE run_id = ?", (run_id,)).fetchone()
+            # The recorder can deliver the last counts after the task's terminal
+            # callback. Keep the persisted report in sync with those counts.
+            self._write_report(conn, run_id)
             return self._summary_from_row(row)
 
     def list_inspection_summaries(self, limit: int = 100) -> list[InspectionSummary]:

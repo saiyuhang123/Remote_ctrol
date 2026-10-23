@@ -10,7 +10,7 @@
 </head>
 <body class="tasks-page">
 <header class="page-header">
-  <div class="page-title"><h1>巡检任务</h1><p>选择已有路线，执行巡航或返回待命点</p></div>
+  <div class="page-title"><h1>巡检任务</h1><p>维护巡检点与路线，预览并执行任务</p></div>
   <nav><a href="/monitor.html">监控台</a><a href="/records.html">巡检记录</a></nav>
   <div class="header-status">
     <span id="status" class="bad">未连接</span><span id="controlTag">未取得控制权</span>
@@ -21,18 +21,43 @@
   <section>
     <div class="card">
       <h2><span class="section-title"><span class="icon" data-icon="route"></span>选择巡检路线</span><span class="tag">本地路线</span></h2>
-      <p class="card-description">路线由本地桌面设置，选中后即可执行。</p>
+      <p class="card-description">自由路线可立即执行；固定路线先预览，再按确认的道路启动。</p>
       <div class="table-wrap">
         <table><thead><tr><th style="width:36px"><span class="muted">选</span></th><th>路线名称</th><th>版本</th><th>巡检点</th><th>状态</th></tr></thead><tbody id="routeBody"></tbody></table>
       </div>
-      <div id="routeEmpty" class="empty-state"><span class="icon" data-icon="route"></span><span>暂无可选路线</span><p>请先在本地桌面创建路线并关联当前地图</p></div>
+      <div id="routeEmpty" class="empty-state"><span class="icon" data-icon="route"></span><span>暂无可选路线</span><p>可在下方新增点位并保存路线</p></div>
       <div class="route-controls">
         <label class="loop-label" for="loopCount">巡航圈数<input id="loopCount" type="number" min="0" max="100000" value="1" title="0 表示持续循环"></label>
+        <button class="btn gray" id="btnPreview" disabled>预览固定路线</button>
         <button class="btn success" id="btnStart" disabled><span class="icon" data-icon="play"></span>立即执行</button>
         <button class="btn gray" id="btnPause" disabled>暂停</button><button class="btn gray" id="btnResume" disabled>继续</button><button class="btn danger" id="btnCancel" disabled>取消任务</button>
       </div>
       <p class="form-hint">圈数设为 0 时持续循环，任务状态以本地执行器反馈为准。</p>
     </div>
+    <section class="card business-editor">
+      <div class="toolbar"><h2>点位与路线管理</h2><button class="btn gray" id="refreshEditor">刷新资料</button></div>
+      <p id="editorMessage" class="form-hint" role="status">选择点位进行编辑，或新增点位。</p>
+      <details open><summary>巡检点</summary>
+        <label>选择点位<select id="editPoint"><option value="">新增点位</option></select></label>
+        <label>名称<input id="editPointName" maxlength="128" placeholder="例如：配电柜 A"></label>
+        <div class="coordinate-fields"><label>X (m)<input id="editPointX" type="number" step="0.01"></label><label>Y (m)<input id="editPointY" type="number" step="0.01"></label><label>朝向 (°)<input id="editPointYaw" type="number" value="0" step="1"></label></div>
+        <button class="btn gray" id="pickEditPoint">地图选点与朝向</button>
+        <label class="toggleRow"><span>到点抓拍识别</span><input id="editPointInspect" type="checkbox"></label>
+        <label>云台预置位<input id="editPointPreset" type="number" min="1" max="255" value="1"></label>
+        <label>识别要求<textarea id="editPointPrompt" maxlength="2000" rows="2"></textarea></label>
+        <div class="control-buttons"><button class="btn" id="savePoint" disabled>保存点位</button><button class="btn gray" id="newPoint">新增点位</button><button class="btn danger" id="deletePoint" disabled>删除点位</button></div>
+      </details>
+      <details><summary>巡检路线</summary>
+        <label>选择路线<select id="editRoute"><option value="">新增路线</option></select></label>
+        <label>名称<input id="editRouteName" maxlength="128" placeholder="例如：每日设备巡检"></label>
+        <label>导航方式<select id="editRouteMode"><option value="FREE_NAV">自由导航</option><option value="RECORDED_NETWORK">录制路网</option></select></label>
+        <label id="networkField">已发布路网<select id="editNetwork"><option value="">请选择路网</option></select></label>
+        <div class="toolbar"><label>添加点位<select id="addStepPoint"></select></label><button class="btn gray" id="addStep">加入路线</button></div>
+        <div id="editSteps" class="route-step-list"></div>
+        <p class="form-hint">按顺序访问，可重复添加；停留时间以秒计。固定路线的点位需已绑定所选路网。</p>
+        <div class="control-buttons"><button class="btn" id="saveRoute" disabled>保存路线</button><button class="btn gray" id="newRoute">新增路线</button><button class="btn danger" id="deleteRoute" disabled>删除路线</button></div>
+      </details>
+    </section>
     <div class="card">
       <h2><span class="section-title"><span class="icon" data-icon="monitor"></span>执行状态</span><span class="tag">实时反馈</span></h2>
       <div class="task-heading"><span class="icon" data-icon="compass"></span><div><small>当前任务</small><div class="taskState" id="taskState">空闲</div></div></div>
@@ -54,6 +79,8 @@
       <div class="row"><span>ID / 版本</span><b id="mapRevision">—</b></div>
       <div class="row"><span>待命返航点</span><b id="homeText">—</b></div>
       <div class="row"><span>路线数量</span><b id="routeCount">0</b></div>
+      <canvas id="businessMap" width="600" height="400" aria-label="点位与固定路线预览地图"></canvas>
+      <p id="previewMessage" class="form-hint" role="status">固定路线预览后显示实际道路；地图选点时按住拖动设置朝向。</p>
     </div>
     <div class="card">
       <h2><span class="section-title"><span class="icon" data-icon="shield"></span>控制状态</span></h2>
@@ -79,8 +106,8 @@ const app = {
 const TASK_NAMES = {idle:'空闲', validating:'校验任务', dispatching:'派发目标', navigating:'导航中',
   settling:'确认停稳', dwelling:'点位停留', pausing:'暂停中', paused:'已暂停',
   canceling:'取消中', canceled:'已取消', succeeded:'已完成', failed:'失败',
-  interrupted:'已中断', stopping:'停车中'};
-const CONTROL_NAMES = {idle:'无控制者', manual:'网页手动', route:'网页路线', 'return':'网页返航'};
+  interrupted:'已中断', stopping:'停车中', inspecting:'抓拍识别中'};
+const CONTROL_NAMES = {idle:'无控制者', manual:'网页手动', route:'网页路线', point:'网页到点巡检', 'return':'网页返航'};
 function requestId(prefix) { return `${prefix}_${Date.now()}_${Math.random().toString(16).slice(2, 9)}`; }
 function sendRaw(value) {
   if (!app.ws || app.ws.readyState !== 1) return false;
@@ -273,9 +300,11 @@ function updateUi() {
   $('estopText').className = control.estop_known !== true ? 'warning' :
     (control.estopped ? 'dangerText' : 'good');
   $('btnStart').disabled = !owner || !sync || !selected || running;
-  $('btnPause').disabled = !owner || !running || t.kind !== 'route';
-  $('btnResume').disabled = !owner || !running || t.kind !== 'route';
-  $('btnCancel').disabled = !owner || !running || t.kind !== 'route';
+  if (selected?.requires_preview && !window.previewIsCurrent?.()) $('btnStart').disabled = true;
+  $('btnPreview').disabled = !owner || !sync || !selected?.requires_preview || running;
+  $('btnPause').disabled = !owner || !running || !['route','point'].includes(t.kind);
+  $('btnResume').disabled = !owner || !running || !['route','point'].includes(t.kind);
+  $('btnCancel').disabled = !owner || !running || !['route','point'].includes(t.kind);
   $('btnReturn').disabled = !owner || !sync || !home || t.kind === 'return' ||
     Boolean(t.pending_return);
   $('btnReturnCancel').disabled = !owner ||
@@ -283,6 +312,7 @@ function updateUi() {
   // Route pause/resume are valid only in their matching state; keep the
   // buttons available for the service to return an explicit reason.
   if (manual || !running) updateTask(app.lastPatrol);
+  window.refreshBusiness?.();
 }
 
 function updateTask(status) {
@@ -334,6 +364,7 @@ $('btnStart').onclick = () => {
   if (!app.state || !app.state.active_map) { setMessage('没有有效活跃地图', true); return; }
   const route = app.routes.find(item => item.route_id === app.selectedRouteId && item.valid);
   if (!route) { setMessage('请选择有效路线', true); return; }
+  if (route.requires_preview && !window.previewIsCurrent?.()) { setMessage('请先预览当前固定路线和圈数', true); return; }
   const loopsText = $('loopCount').value.trim();
   const loops = Number(loopsText);
   if (!loopsText || !Number.isInteger(loops) || loops < 0 || loops > 100000) {
@@ -347,6 +378,7 @@ $('btnStart').onclick = () => {
     route_id: route.route_id,
     route_revision: Number(route.revision),
     loop_count: loops,
+    plan_digest: route.requires_preview ? app.recordedPreview.digest : '',
   })) return;
   app.pendingStart = id; setMessage('正在提交路线任务…'); updateUi();
   setTimeout(() => {
@@ -370,5 +402,7 @@ $('btnReturnCancel').onclick = () => sendControl('return_cancel');
 setInterval(loadState, 5000);
 loadState(); loadRecords();
 </script>
+<script src="map-loader.js"></script>
+<script src="business-editor.js"></script>
 </body>
 </html>

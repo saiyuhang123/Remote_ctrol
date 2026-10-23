@@ -1,0 +1,25 @@
+# One-off map target, executed by the same patrol engine and independent guard.
+string request_id
+string owner_session_id
+string map_id
+uint64 map_revision
+# A saved point uses its immutable revision and configured inspection action.
+# Empty point_id uses x/y/yaw and the action settings below.
+string point_id
+uint64 point_revision
+float64 x
+float64 y
+float64 yaw
+bool inspection_enabled
+uint16 ptz_preset
+string recognition_prompt
+---
+bool success
+uint8 final_state
+string run_id
+uint32 completed_loops
+uint64 completed_steps
+string error_code
+string message
+---
+PatrolStatus status

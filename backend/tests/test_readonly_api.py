@@ -3,7 +3,7 @@ import os
 from pathlib import Path
 import sys
 
-from fastapi.testclient import TestClient
+from asgi_client import ASGIClient
 from PIL import Image
 
 
@@ -53,7 +53,7 @@ def _build_fixture(tmp_path, monkeypatch):
     for name in [name for name in sys.modules if name == "backend" or name.startswith("backend.")]:
         del sys.modules[name]
     from backend.main import app
-    return TestClient(app), mapping, route
+    return ASGIClient(app), mapping, route
 
 
 def test_read_only_local_state_and_old_write_routes_absent(tmp_path, monkeypatch):
@@ -115,7 +115,7 @@ def test_read_only_local_state_and_old_write_routes_absent(tmp_path, monkeypatch
     assert client.get("/api/audio").status_code in (404, 405)
 
 
-def test_fixed_routes_are_typed_and_cannot_be_started_as_free_web_routes(tmp_path, monkeypatch):
+def test_fixed_routes_are_selectable_and_require_a_fresh_preview(tmp_path, monkeypatch):
     client, mapping, _ = _build_fixture(tmp_path, monkeypatch)
     from robot_patrol.store import PatrolStore
     from robot_patrol.recorded_routes.geometry import motion_blocks
@@ -134,5 +134,9 @@ def test_fixed_routes_are_typed_and_cannot_be_started_as_free_web_routes(tmp_pat
     value=next(item for item in items if item['route_id']==fixed.route_id)
     assert value['navigation_mode']=='RECORDED_NETWORK'
     assert value['network_id']==net['network_id']
-    assert value['valid'] is False
-    assert '本地客户端' in value['invalid_reason']
+    assert value['valid'] is True and value['requires_preview'] is True
+    assert not value['invalid_reason']
+    with __import__('sqlite3').connect(tmp_path/'patrol.sqlite3') as connection:
+        connection.execute('UPDATE road_networks SET published=0')
+    value=next(item for item in client.get('/api/local/state').json()['routes'] if item['route_id']==fixed.route_id)
+    assert not value['valid'] and '路网' in value['invalid_reason']

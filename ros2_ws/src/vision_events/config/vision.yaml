@@ -4,5 +4,5 @@ vision_events:
     max_pose_age_sec: 0.3
     map_id: ''
     map_revision: ''
-    upload_enabled: false
+    upload_enabled: true
     backend_url: http://127.0.0.1:8888

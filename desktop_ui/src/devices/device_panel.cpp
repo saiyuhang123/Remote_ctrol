@@ -341,6 +341,8 @@ void DevicePanel::refresh() {
   v.speed->setEnabled(!v.ptzBlocked); v.seconds->setEnabled(!v.ptzBlocked); v.bounds->setEnabled(!v.ptzBlocked);
   v.minimum->setEnabled(!v.ptzBlocked && v.bounds->isChecked()); v.maximum->setEnabled(!v.ptzBlocked && v.bounds->isChecked());
   QString ptzState = offline_ ? "离线预览" : !ptzFresh ? "状态未知"
+      : v.ptz.value("state").toString() == "inspection_stopping" ? "巡检停转中"
+      : v.ptz.value("inspection_held").toBool() ? "巡检拍照中"
       : v.ptz.value("state").toString() == "stopping" ? "正在停止"
       : !v.ptz.value("last_error").toString().isEmpty() ? "设备异常"
       : v.ptz.value("state").toString() == "stopped" ? "已停止"
@@ -349,6 +351,8 @@ void DevicePanel::refresh() {
       : v.ptzBlocked && !ptzFresh ? "warning"
       : ptzFresh && v.ptz.value("moving").toBool() ? "info" : "muted";
   QString ptzText = !ptzFresh ? "尚无新鲜云台巡航状态" :
+      v.ptz.value("state").toString() == "inspection_stopping" ? "已暂停自转，等待云台停止确认" :
+      v.ptz.value("inspection_held").toBool() ? "到点抓拍 / 停留期间暂停自转，离点后恢复原先设置" :
       v.ptz.value("state").toString() == "stopping" ? "正在停止，等待设备确认" :
       !v.ptz.value("last_error").toString().isEmpty() ? "云台巡航异常" :
       v.ptz.value("state").toString() == "stopped" ? "巡航已停止，可使用手动云台" :

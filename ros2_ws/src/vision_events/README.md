@@ -109,9 +109,9 @@ ros2 run vision_events vision_cli context --map 场地A --revision v1
 
 ## 当前网页后台与旧上传入口
 
-当前网页后台是只读巡检摘要服务，不挂载旧的 `/api/records/detections` 写入或 `/api/vision/media` 图片接口。保持 `upload_enabled:=false`（默认）；不要为当前网页开启旧上传。记录节点的旧 outbox 参数仅为外部旧后台兼容保留，当前后台不支持它。
+网页后台现已接入 `/api/records/detections`，默认 `upload_enabled:=true`。记录器通过持久 outbox 自动上传事件及图片，后台按 event_id 去重，网页可查询完整图片、时间、类型和坐标。后台离线时继续本地记录，恢复后补传；可设 `upload_enabled:=false` 保持仅本地执勤。
 
-`start_robot_monitor.sh` 的可选检测启动也显式关闭上传。静止执勤的全部小图和坐标通过 Qt“查看视觉记录”或本地 CLI 查询；巡航时原有 `inspection_recorder` 可订阅统一事件，按原设计累计巡检摘要，两者不影响视觉独立运行。
+`start_robot_monitor.sh` 的可选检测启动启用上传，也可通过 `ROBOT_BACKEND_URL` 指定后台。静止执勤记录同样上报，Qt 和 CLI 查询继续可用；原有 `inspection_recorder` 继续订阅统一事件并累计巡检摘要，不影响视觉独立运行。详见[网页巡检业务说明](../../../web/巡检业务使用说明.md)。
 
 ## 无实车验证
 

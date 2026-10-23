@@ -22,11 +22,22 @@
     <span id="connection">连接中</span><span id="owner">未取得控制权</span><span id="task"></span>
   </div>
   <div class="console-actions">
+    <button class="btn gray" id="intercomOpen">麦克风 / 音响</button>
     <button class="btn gray" id="release" disabled>释放控制权</button>
     <button class="btn" id="stop"><span class="icon" data-icon="stop"></span>急停</button>
   </div>
 </header>
+<dialog id="intercomDialog" aria-labelledby="intercomTitle">
+  <div class="toolbar"><h2 id="intercomTitle">双向语音对讲</h2><button class="btn gray" id="intercomClose">收起</button></div>
+  <p class="form-hint">网页主动开启，机器人被动接入。使用独立麦克风和音响。</p>
+  <div class="intercom-grid"><label>网页麦克风<select id="browserMicrophone"><option value="">系统默认</option></select></label><label>网页音响<select id="browserSpeaker"><option value="">系统默认</option></select></label>
+    <label>机器人麦克风<select id="robotMicrophone"><option value="">机器人系统默认</option></select></label><label>机器人音响<select id="robotSpeaker"><option value="">机器人系统默认</option></select></label></div>
+  <div class="intercom-grid"><label class="toggleRow"><span>网页麦克风</span><input id="intercomMic" type="checkbox" checked></label><label class="toggleRow"><span>网页音响</span><input id="intercomSpeaker" type="checkbox" checked></label></div>
+  <div class="control-buttons"><button class="btn" id="intercomStart" disabled>开启对讲</button><button class="btn danger" id="intercomEnd" disabled>结束对讲</button><button class="btn gray" id="intercomRefresh">刷新设备</button></div>
+  <p id="intercomMessage" role="status" class="form-hint">取得网页控制权后，可查询设备并开启对讲。</p>
+</dialog>
 <iframe id="view" title="机器人工作区" allow="autoplay; fullscreen" allowfullscreen></iframe>
 <script src="console.js"></script>
+<script src="intercom-client.js"></script>
 </body>
 </html>

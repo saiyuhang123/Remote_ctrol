@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
-# 实机监控入口：只读业务后端 + 遥控网关；视频和识别按需开启。
+# 实机监控入口：网页后端、遥控网关与音频；视频和识别按需开启。
 # 底盘、雷达、TF、定位/导航由 chassis_nav2 在另一终端启动。
 set -e
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 ENABLE_VIDEO="${ENABLE_VIDEO:-0}"
 ENABLE_DETECTOR="${ENABLE_DETECTOR:-0}"
+ENABLE_AUDIO="${ENABLE_AUDIO:-1}"
 ENABLE_CAPTURE="${ENABLE_CAPTURE:-$ENABLE_VIDEO}"
 VIDEO_SOURCE="${VIDEO_SOURCE:-rtsp://127.0.0.1:8554/cam}"
 
@@ -14,6 +15,12 @@ export ROBOT_PROJECT_ROOT="$ROOT"
 export ROBOT_CONFIG="$ROOT/config/config.yaml"
 export ROBOT_PATROL_DB="${ROBOT_PATROL_DB:-$HOME/.local/share/robot_patrol/patrol.sqlite3}"
 export ROBOT_WEB_MAP_DIR="${ROBOT_WEB_MAP_DIR:-$ROOT/web/maps}"
+export ROBOT_AUDIO_DIR="${ROBOT_AUDIO_DIR:-$ROOT/data/audio}"
+if [ -n "${ROBOT_TLS_CERT:-}" ]; then
+  export ROBOT_BACKEND_URL="${ROBOT_BACKEND_URL:-http://127.0.0.1:8887}"
+else
+  export ROBOT_BACKEND_URL="${ROBOT_BACKEND_URL:-http://127.0.0.1:8888}"
+fi
 
 if [ "$ENABLE_VIDEO" = 1 ] && [ ! -x "$ROOT/bin/mediamtx" ]; then
   echo "缺少 $ROOT/bin/mediamtx，请先准备本机架构的 MediaMTX 可执行文件。" >&2
@@ -33,7 +40,21 @@ trap 'exit 130' INT
 trap 'exit 143' TERM
 start() { setsid "$@" & pids+=("$!"); }
 
-start python3 -m uvicorn backend.main:app --host 0.0.0.0 --port 8888 --app-dir "$ROOT"
+tls_args=()
+if [ -n "${ROBOT_TLS_CERT:-}${ROBOT_TLS_KEY:-}" ]; then
+  if [ -z "${ROBOT_TLS_CERT:-}" ] || [ -z "${ROBOT_TLS_KEY:-}" ]; then
+    echo "ROBOT_TLS_CERT 和 ROBOT_TLS_KEY 必须同时设置" >&2
+    exit 1
+  fi
+  tls_args=(--ssl-certfile "$ROBOT_TLS_CERT" --ssl-keyfile "$ROBOT_TLS_KEY")
+  # Local recorders keep a loopback-only HTTP endpoint; no TLS verification
+  # bypass is needed for uploads or retry queues.
+  start python3 -m uvicorn backend.main:app --host 127.0.0.1 --port 8887 --app-dir "$ROOT"
+  export MTX_WEBRTCENCRYPTION=true
+  export MTX_WEBRTCSERVERKEY="$ROBOT_TLS_KEY"
+  export MTX_WEBRTCSERVERCERT="$ROBOT_TLS_CERT"
+fi
+start python3 -m uvicorn backend.main:app --host 0.0.0.0 --port 8888 --app-dir "$ROOT" "${tls_args[@]}"
 start ros2 run robot_gateway gateway --ros-args -p use_sim_time:=false
 
 if [ "$ENABLE_VIDEO" = 1 ]; then
@@ -52,14 +73,21 @@ if [ "$ENABLE_CAPTURE" = 1 ]; then
     -p use_sim_time:=false -p "video_source:=$VIDEO_SOURCE"
 fi
 if [ "$ENABLE_DETECTOR" = 1 ]; then
-  # Vision media/events stay in the recorder's local DB. The web only reads
-  # the shared robot_patrol inspection_summary, so do not upload duplicate logs.
-  start ros2 run vision_events recorder --ros-args -p upload_enabled:=false
+  start ros2 run vision_events recorder --ros-args -p upload_enabled:=true \
+    -p "backend_url:=$ROBOT_BACKEND_URL"
   start ros2 run detector_node detector --ros-args \
     -p use_sim_time:=false -p input_mode:=video -p "video_source:=$VIDEO_SOURCE"
 fi
+if [ "$ENABLE_AUDIO" = 1 ]; then
+  start ros2 run audio_player tts_node --ros-args -p "audio_dir:=$ROBOT_AUDIO_DIR" \
+    -p alert_on_person:=false
+fi
 
-echo "实机监控入口：http://<本机IP>:8888/monitor.html"
+if [ -n "${ROBOT_TLS_CERT:-}" ]; then
+  echo "实机监控入口：https://<证书对应主机>:8888/console.html"
+else
+  echo "实机监控入口：http://<本机IP>:8888/console.html"
+fi
 echo "请另行启动实际底盘、传感器、定位和 robot_patrol；未配置网页地图或定位时页面会明确提示。"
 # 任一组件退出时结束本次启动，避免组件失败后仍显示整个服务已正常运行。
 wait -n "${pids[@]}"

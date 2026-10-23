@@ -4,6 +4,8 @@
   const pages = {monitor:'monitor.html', tasks:'tasks.html', records:'records.html'};
   let socket, session = null, telemetry = null, control = {}, task = {};
   let viewId = '', currentPage = '', reconnectTimer;
+  let socketUrl='';
+  window.RobotConsole={get session(){return session;},get socketUrl(){return socketUrl;}};
   function post(kind, data) {
     if (viewId) frame.contentWindow.postMessage({robotConsole:true, id:viewId, kind, data}, location.origin);
   }
@@ -27,12 +29,13 @@
   }
   function sessionState() { post('data', {type:'session_state', session_id:session}); }
   function refreshHeader() {
+    dispatchEvent(new Event('robot-console-state'));
     document.getElementById('owner').textContent = control.local_control ? '本地控制优先' :
       session ? '本网页控制中' : control.owner_present ? '其他网页控制中' : '未取得控制权';
     document.getElementById('release').disabled = !session;
     document.getElementById('owner').dataset.owned = Boolean(session);
     document.getElementById('task').textContent = task.running
-      ? (task.kind === 'return' ? '正在返回待命点' : '巡航任务进行中') : '';
+      ? (task.kind === 'return' ? '正在返回待命点' : task.kind === 'point' ? '到点巡检进行中' : '巡航任务进行中') : '';
   }
   function stopInteraction() {
     if (!session) return;
@@ -69,7 +72,8 @@
     clearTimeout(reconnectTimer);
     const configuredPort = Number(new URL(location.href).searchParams.get('ws_port') || 8765);
     const port = Number.isInteger(configuredPort) && configuredPort > 0 && configuredPort <= 65535 ? configuredPort : 8765;
-    socket = new WebSocket(`${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.hostname}:${port}`);
+    socketUrl=`${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.hostname}:${port}`;
+    socket = new WebSocket(socketUrl);
     socket.onopen = () => {
       document.getElementById('connection').textContent = '已连接'; post('open');
       document.getElementById('connection').dataset.state = 'connected';

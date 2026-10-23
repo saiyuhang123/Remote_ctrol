@@ -29,8 +29,8 @@ class Recorder(Node):
         self.declare_parameter('map_id', '')
         self.declare_parameter('map_revision', '')
         self.declare_parameter('base_frame', 'base_link')
-        self.declare_parameter('upload_enabled', False)
-        self.declare_parameter('backend_url', 'http://127.0.0.1:8888')
+        self.declare_parameter('upload_enabled', True)
+        self.declare_parameter('backend_url', os.environ.get('ROBOT_BACKEND_URL', 'http://127.0.0.1:8888'))
         self.directory = Path(self.get_parameter('data_dir').value).expanduser().resolve()
         self.directory.mkdir(parents=True, exist_ok=True)
         self.ownership = (self.directory / 'recorder.lock').open('a')
@@ -55,6 +55,7 @@ class Recorder(Node):
         self.stopping = threading.Event()
         self.last_error = ''
         self.errors = self.overflows = self.saved = 0
+        self.upload_error = ''
         self.event_pub = self.create_publisher(String, '/vision/events', 20)
         self.legacy_pub = self.create_publisher(String, '/detection_events', 20)
         self.status_pub = self.create_publisher(String, '/vision/status', 5)
@@ -242,26 +243,35 @@ class Recorder(Node):
                      queue=self.work.qsize(), errors=self.errors, overflows=self.overflows,
                      last_error=self.last_error, data_dir=str(self.directory),
                      map_id=self.pose.contexts[-1][2], free_bytes=free.f_bavail*free.f_frsize,
-                     upload_enabled=self.store.upload)
+                     upload_enabled=self.store.upload, upload_error=self.upload_error)
         self.status_pub.publish(String(data=json.dumps(value, ensure_ascii=False)))
 
     def upload_worker(self):
         import requests
         url = self.get_parameter('backend_url').value.rstrip('/') + '/api/records/detections'
-        while not self.stopping.wait(1.):
+        while not self.stopping.wait(.2):
             event = self.store.pending()
             if not event:
                 continue
-            payload = dict(event_id=event['event_id'], ts=event['event_time_ns']/1e9,
-                           event='person_face' if event['event_type']=='face_capture' else event['event_type'],
-                           label=event['label'], score=event.get('confidence') or 0.,
-                           image='api/vision/media/' + event['event_id'], metadata=event)
             try:
-                response = requests.post(url, json=payload, timeout=2.)
-                if response.status_code == 200:
+                path = Path(event.get('image_path') or '').resolve()
+                if path.is_relative_to((self.directory/'media').resolve()) and path.is_file():
+                    with path.open('rb') as stream:
+                        response = requests.post(url, data={'event': json.dumps(event, ensure_ascii=False)},
+                            files={'image': ('image.jpg', stream, 'image/jpeg')}, timeout=3.)
+                else:
+                    response = requests.post(url, json=event, timeout=3.)
+                response.raise_for_status()
+                result = response.json()
+                if result.get('ok') and result.get('event_id') == event['event_id']:
                     self.store.delivered(event['event_id'])
-            except requests.RequestException:
-                pass  # outbox remains committed; no live event loss
+                    self.upload_error = ''
+                else:
+                    raise ValueError('后台未确认该识别记录')
+            except (requests.RequestException, OSError, ValueError) as error:
+                self.upload_error = str(error)[:500]
+                # Committed outbox survives backend/network outages and restart.
+                self.stopping.wait(5.)
 
     def shutdown_worker(self):
         self.stopping.set()

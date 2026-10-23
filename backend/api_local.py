@@ -147,7 +147,12 @@ def _routes_for(map_id: str, map_revision: int, map_sync_ok: bool) -> list[dict[
                WHERE s.route_id = ? ORDER BY s.step_order""", (route["route_id"],))
         mode = route.get('navigation_mode', 'FREE_NAV')
         fixed = mode == 'RECORDED_NETWORK'
-        valid = map_sync_ok and bool(steps) and not fixed
+        network_ok = True
+        if fixed:
+            network = db.query_one('SELECT map_id,map_revision,revision,published FROM road_networks WHERE network_id=?', (route.get('network_id', ''),)) if db.table_columns('road_networks') else None
+            network_ok = bool(network and network['published'] and network['map_id']==map_id and
+                              network['map_revision']==map_revision and network['revision']==route.get('network_revision'))
+        valid = map_sync_ok and bool(steps) and network_ok
         result.append({
             "route_id": route["route_id"],
             "map_id": route["map_id"],
@@ -155,6 +160,7 @@ def _routes_for(map_id: str, map_revision: int, map_sync_ok: bool) -> list[dict[
             "navigation_mode": mode,
             "network_id": route.get('network_id', ''),
             "network_revision": route.get('network_revision', 0),
+            "requires_preview": fixed,
             "revision": route["revision"],
             "map_revision": map_revision,
             "updated_at": route["updated_at"] / 1_000_000_000.0,
@@ -167,8 +173,8 @@ def _routes_for(map_id: str, map_revision: int, map_sync_ok: bool) -> list[dict[
                 "dwell_seconds": row["dwell_seconds"],
             } for row in steps],
             "valid": valid,
-            "invalid_reason": "固定路线请在本地客户端预览并启动；网页暂仅查看" if fixed else "" if valid else (
-                "网页地图与本地地图版本不一致" if not map_sync_ok else "路线没有可执行步骤"),
+            "invalid_reason": "" if valid else (
+                "网页地图与本地地图版本不一致" if not map_sync_ok else "路网未发布或版本已变化" if not network_ok else "路线没有可执行步骤"),
         })
     return result
 
@@ -251,7 +257,7 @@ def active_map() -> dict[str, Any]:
 @router.get("/api/local/state")
 def local_state() -> dict[str, Any]:
     try:
-        db.schema_version()
+        version = db.schema_version()
         maps = [_map_out(row) for row in db.query(
             "SELECT * FROM maps ORDER BY updated_at DESC")]
         meta, meta_error = _read_meta()
@@ -261,7 +267,7 @@ def local_state() -> dict[str, Any]:
         routes = (_routes_for(active["map_id"], int(active["revision"]), map_sync_ok)
                   if active else [])
         return {
-            "schema_version": db.SUPPORTED_SCHEMA_VERSION,
+            "schema_version": version,
             "maps": maps,
             "active_map": active,
             "active_error": (active_error if active is None else sync_error),

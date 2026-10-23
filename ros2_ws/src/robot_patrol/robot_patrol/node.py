@@ -23,7 +23,7 @@ from nav_msgs.msg import OccupancyGrid, Odometry
 from std_msgs.msg import Bool, String
 from .tf_feedback import TfFeedback
 
-from patrol_interfaces.action import ReturnHome, RunRoute
+from patrol_interfaces.action import InspectPoint, ReturnHome, RunRoute
 from patrol_interfaces.msg import (
     ExecutorHeartbeat, InspectionResult as InspectionResultMsg,
     MapBinding, PatrolPoint, PatrolRoute, PatrolStatus, RouteStep, RunRecord,
@@ -58,6 +58,7 @@ from .nav2_client import Nav2Driver, quaternion_to_yaw
 from .store import PatrolStore
 from .recorded_routes.component import RoadComponent
 from .inspection_client import InspectionClient
+from .point_task import point_route
 
 
 def stamp_from_ns(value: int) -> TimeMsg:
@@ -180,6 +181,7 @@ class PatrolNode(Node):
         self._safety_interrupt_delivered = False
         self._guard_status_message = ""
         self._hazard_driver: Nav2Driver | None = None
+        self._active_feedback_type = RunRoute.Feedback
         self._last_status: dict = {
             "state": STATE_IDLE, "sequence": 0, "run_id": "", "route_id": "",
             "map_id": "", "loop_index": 0, "total_loops": 0, "step_index": 0,
@@ -246,6 +248,12 @@ class PatrolNode(Node):
             cancel_callback=self._return_cancel_callback,
             callback_group=self._callback_group,
         )
+        self._point_server = ActionServer(
+            self, InspectPoint, "/patrol/inspect_point",
+            lambda handle: self._execute_run(handle, single_point=True),
+            goal_callback=self._goal_callback, cancel_callback=self._cancel_callback,
+            callback_group=self._callback_group,
+        )
 
         def service(type_, name, callback):
             return self.create_service(type_, name, callback, callback_group=self._callback_group)
@@ -283,6 +291,9 @@ class PatrolNode(Node):
             self, self._store, callback_group=self._callback_group)
 
     def destroy_node(self):
+        inspection = getattr(self, '_inspection_client', None)
+        if inspection is not None:
+            inspection.finish(False)
         feedback = getattr(self, '_tf_feedback', None)
         if feedback is not None:
             feedback.close()
@@ -594,7 +605,7 @@ class PatrolNode(Node):
         self._publish_status_dict(data)
         goal_handle = self._active_goal_handle
         if goal_handle is not None:
-            feedback = RunRoute.Feedback()
+            feedback = self._active_feedback_type()
             feedback.status = self._to_ros_status(data)
             try:
                 goal_handle.publish_feedback(feedback)
@@ -1106,8 +1117,8 @@ class PatrolNode(Node):
             driver.cancel_current()
         return CancelResponse.ACCEPT
 
-    def _execute_run(self, goal_handle):
-        result = RunRoute.Result()
+    def _execute_run(self, goal_handle, single_point=False):
+        result = InspectPoint.Result() if single_point else RunRoute.Result()
         result.run_id = ""
         # Match the road service lock order so a passive recording cannot
         # start between goal acceptance and reserving the execution slot.
@@ -1138,6 +1149,7 @@ class PatrolNode(Node):
             # is not released until either no Nav2 child goal exists or the
             # old child has reached a known terminal state.
             self._run_reserved = True
+            self._active_feedback_type = InspectPoint.Feedback if single_point else RunRoute.Feedback
             self._active_owner_session_id = str(
                 goal_handle.request.owner_session_id or "").strip()
             self._safety_interrupt_reason = ""
@@ -1160,15 +1172,18 @@ class PatrolNode(Node):
                 raise PatrolError("INVALID_DATA", "request_id 不能为空")
             if not goal_handle.request.owner_session_id:
                 raise PatrolError("INVALID_DATA", "owner_session_id 不能为空")
-            route = self._store.get_route(goal_handle.request.route_id)
+            if single_point and not goal_handle.request.map_revision:
+                raise PatrolError("INVALID_DATA", "一键巡检必须提供当前地图版本")
             map_entry = self._store.get_map(goal_handle.request.map_id)
+            route = (point_route(self._store, goal_handle.request, map_entry) if single_point
+                     else self._store.get_route(goal_handle.request.route_id))
             if route.map_id != map_entry.map_id:
                 raise PatrolError("MAP_MISMATCH", "路线与地图不匹配")
             with self._active_map_lock:
                 active_id = self._active_map_id
             if active_id != map_entry.map_id:
                 raise PatrolError("MAP_MISMATCH", "执行地图不是已确认的活跃地图")
-            if goal_handle.request.route_revision and \
+            if not single_point and goal_handle.request.route_revision and \
                     int(goal_handle.request.route_revision) != int(route.revision):
                 raise PatrolError("STALE_DATA", "路线已被修改，请刷新预览后重试")
             if goal_handle.request.map_revision and \
@@ -1185,7 +1200,7 @@ class PatrolNode(Node):
                 revision=route.revision, steps=route.steps,
                 navigation_mode=route.navigation_mode,
             )
-            loops = int(goal_handle.request.loop_count)
+            loops = 1 if single_point else int(goal_handle.request.loop_count)
             if loops < 0:
                 raise PatrolError("INVALID_DATA", "loop_count 不能为负数")
             if route.navigation_mode == 'RECORDED_NETWORK':
@@ -1231,6 +1246,8 @@ class PatrolNode(Node):
                 point_timeout=float(self.get_parameter("point_timeout_sec").value),
                 min_dispatch_interval=float(self.get_parameter("min_dispatch_interval_sec").value),
                 inspection_cb=self._inspection_client.run,
+                inspection_depart_cb=self._inspection_client.depart,
+                inspection_finish_cb=self._inspection_client.finish,
             )
             with self._run_lock:
                 safety_reason = self._safety_interrupt_reason

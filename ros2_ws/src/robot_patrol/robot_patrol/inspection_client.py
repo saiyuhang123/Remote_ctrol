@@ -9,6 +9,7 @@ import time
 from typing import Any, Callable
 
 from .models import InspectionResult, PatrolError, new_id, now_ns
+from .ptz_inspection import PtzInspectionLease
 
 
 @dataclass
@@ -57,22 +58,63 @@ class InspectionClient:
             node.get_parameter("inspection_preset_settle_sec").value)
         self.default_prompt = str(
             node.get_parameter("inspection_default_prompt").value).strip()
+        self.ptz_lease = PtzInspectionLease(node, self._call, self._check_control, self.service_timeout, callback_group)
 
-    def _call(self, client, request, timeout: float, label: str):
-        if not client.wait_for_service(timeout_sec=min(3.0, max(0.1, timeout))):
-            raise PatrolError("INSPECTION_UNAVAILABLE", f"{label}服务未就绪")
+    def _check_control(self, flags):
+        if flags is not None and flags.cancel_requested:
+            raise PatrolError("CANCELED", "巡检动作已取消")
+        if flags is not None and flags.pause_requested:
+            raise PatrolError("PAUSED", "巡检动作已暂停")
+        lease = getattr(self, 'ptz_lease', None)
+        if lease is not None:
+            lease.check()
+
+    def _wait(self, seconds, flags):
+        deadline = time.monotonic() + max(0.0, seconds)
+        while True:
+            self._check_control(flags)
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return
+            time.sleep(min(0.05, remaining))
+
+    def _call(self, client, request, timeout: float, label: str, flags=None):
+        available_until = time.monotonic() + min(3.0, max(0.1, timeout))
+        while True:
+            self._check_control(flags)
+            if client.wait_for_service(timeout_sec=0.05):
+                break
+            if time.monotonic() >= available_until:
+                raise PatrolError("INSPECTION_UNAVAILABLE", f"{label}服务未就绪")
+        self._check_control(flags)
         future = client.call_async(request)
         completed = threading.Event()
         future.add_done_callback(lambda _future: completed.set())
-        if not completed.wait(max(0.1, timeout)):
-            raise PatrolError("INSPECTION_TIMEOUT", f"{label}超时（{timeout:.1f}s）")
+        deadline = time.monotonic() + max(0.1, timeout)
+        try:
+            while True:
+                self._check_control(flags)
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise PatrolError("INSPECTION_TIMEOUT", f"{label}超时（{timeout:.1f}s）")
+                if completed.wait(min(0.05, remaining)):
+                    self._check_control(flags)
+                    break
+        except PatrolError:
+            # ROS services cannot retract a request already received by the
+            # device. Retire the local future and never consume its late result
+            # or dispatch a subsequent camera/recognition operation.
+            future.cancel()
+            if hasattr(client, "remove_pending_request"):
+                client.remove_pending_request(future)
+            raise
         error = future.exception()
         if error is not None:
             raise PatrolError("INSPECTION_FAILED", f"{label}失败：{error}")
         return future.result()
 
     def run(self, step, run_id: str, map_id: str, loop_index: int, step_index: int,
-            status_cb: Callable[..., Any] | None = None) -> InspectionOutcome:
+            status_cb: Callable[..., Any] | None = None, flags=None) -> InspectionOutcome:
         """Run one point inspection, persist the result, and return the outcome."""
         started_at = now_ns()
         prompt = (getattr(step, "recognition_prompt", "") or self.default_prompt).strip()
@@ -91,6 +133,7 @@ class InspectionClient:
                     pass
 
         try:
+            self._check_control(flags)
             self.image_dir.mkdir(parents=True, exist_ok=True)
             preset_no = int(getattr(step, "ptz_preset", 0))
             if not 1 <= preset_no <= 255:
@@ -98,19 +141,24 @@ class InspectionClient:
                     "INSPECTION_PRESET_INVALID",
                     "巡检点未配置有效的云台预置位编号（1～255）")
 
+            lease = getattr(self, 'ptz_lease', None)
+            if lease is not None:
+                progress('正在暂停云台自转，等待停止确认')
+                lease.acquire(flags)
+
             progress(f"正在转到云台预置位 {preset_no}")
             preset_request = self._PTZPreset.Request()
             preset_request.action = 1  # GOTO preset; camera firmware does closed-loop positioning.
             preset_request.preset_no = preset_no
             preset_response = self._call(
-                self.preset, preset_request, self.service_timeout, "云台预置位跳转")
+                self.preset, preset_request, self.service_timeout, "云台预置位跳转", flags)
             if not preset_response.success:
                 raise PatrolError("INSPECTION_PRESET_FAILED",
                                   preset_response.message or "云台预置位跳转失败")
             # This camera does not report absolute pan/tilt. Wait a bounded,
             # configurable settle interval before capturing, then verify the
             # image quality through the recognition step.
-            time.sleep(max(0.0, self.preset_settle_sec))
+            self._wait(self.preset_settle_sec, flags)
             progress("预置位等待完成，正在抓拍")
 
             loop_dir = self.image_dir / run_id
@@ -122,7 +170,7 @@ class InspectionClient:
             capture_request.quality = 0
             capture_request.save_path = image_path
             response = self._call(
-                self.capture, capture_request, self.capture_timeout, "相机抓拍")
+                self.capture, capture_request, self.capture_timeout, "相机抓拍", flags)
             if not response.success:
                 raise PatrolError("INSPECTION_CAPTURE_FAILED",
                                   response.message or "相机抓拍失败")
@@ -132,7 +180,7 @@ class InspectionClient:
             vision_request.image = response.image
             vision_request.prompt = prompt
             vision = self._call(
-                self.recognize, vision_request, self.recognition_timeout, "DeepSeek 识别")
+                self.recognize, vision_request, self.recognition_timeout, "DeepSeek 识别", flags)
             if not vision.success:
                 raise PatrolError("INSPECTION_RECOGNITION_FAILED",
                                   vision.message or "DeepSeek 识别失败")
@@ -171,7 +219,13 @@ class InspectionClient:
             ))
         except Exception as error:  # noqa: BLE001 - persistence must not hide the result
             self.node.get_logger().error(f"保存巡检结果失败：{error}")
-        if not outcome.success:
+        if not outcome.success and error_code not in ("CANCELED", "PAUSED"):
             self.node.get_logger().error(
                 f"巡检点动作失败：{error_code}: {message}")
         return outcome
+
+    def depart(self, flags=None):
+        self.ptz_lease.depart(flags)
+
+    def finish(self, success=False):
+        self.ptz_lease.finish(success)

@@ -8,6 +8,7 @@ control:
 ros:
   base_frame: base_link
   odom_topic: /odom
+  battery_topic: /battery_status  # JD03 BMS 电量、电压、电流和充电状态
   scan_topic: /scan
   cmd_vel_topic: /cmd_vel_teleop  # 通过 twist_mux 与 /cmd_vel_auto 仲裁后才输出 /cmd_vel
 

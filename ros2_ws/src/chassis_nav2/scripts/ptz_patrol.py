@@ -15,6 +15,7 @@ from rclpy.node import Node
 from rcl_interfaces.msg import SetParametersResult
 from std_msgs.msg import String
 from hk_camera.srv import ControlPTZ, GetPTZPose, SetPTZPose
+from patrol_interfaces.srv import PtzInspectionControl
 
 PAN_LEFT, PAN_RIGHT = 23, 24
 MIN_FLIP_GAP = 3.0
@@ -47,6 +48,11 @@ class PtzPatrol(Node):
         self._error = ''
         self._stop_due = False
         self._home_due = False
+        self._inspection_owner = ''
+        self._inspection_deadline = 0.0
+        self._inspection_fault = ''
+        self._inspection_releases = {}
+        self.create_service(PtzInspectionControl, '/ptz_patrol/inspection_control', self._inspection_control)
         self.create_timer(0.2, self._tick)
         self.create_timer(1.0, self._poll_pose)
         self.create_timer(0.5, self._publish_status)
@@ -90,12 +96,92 @@ class PtzPatrol(Node):
         if values['enabled'] and not self.get_parameter('enabled').value:
             self._last_flip = time.monotonic()
             self._direction = PAN_LEFT
+            self._inspection_fault = ''
         return SetParametersResult(successful=True)
+
+    def _expire_inspection(self):
+        if self._inspection_owner and time.monotonic() >= self._inspection_deadline:
+            # A lost executor must never silently restart the sweep into a
+            # pending capture. An explicit operator start is required afterward.
+            self._home_due = False
+            self.set_parameters([rclpy.parameter.Parameter('enabled', value=False)])
+            self._remember_release(self._inspection_owner, False)
+            self._inspection_owner = ''
+            self._stop_due = True
+            self._inspection_fault = '巡检联动失联，云台保持停转，请重新确认后启动'
+
+    def _inspection_stopped(self):
+        return not self._moving and not self._stop_due and self._ctrl_pending is None
+
+    def _remember_release(self, owner, resume):
+        self._inspection_releases[owner] = resume
+        while len(self._inspection_releases)>20:
+            self._inspection_releases.pop(next(iter(self._inspection_releases)))
+
+    def _inspection_control(self, request, response):
+        self._expire_inspection()
+        owner = request.owner_id.strip()
+        command = request.command
+        if not owner or len(owner)>128 or command not in (1, 2, 3):
+            response.message = '巡检联动请求无效'
+            return response
+        if command in (1, 2) and (not math.isfinite(request.lease_seconds) or not 1 <= request.lease_seconds <= 10):
+            response.message = '巡检联动租期无效'
+            return response
+        if command == PtzInspectionControl.Request.ACQUIRE:
+            if owner in self._inspection_releases:
+                response.message = '该巡检占用已结束，拒绝迟到请求'
+                return response
+            if self._inspection_owner and self._inspection_owner != owner:
+                response.message = '云台已由其他巡检动作占用'
+                return response
+            if not self._inspection_owner:
+                self._stop_due = True  # Require an actual camera stop ACK.
+            self._inspection_owner = owner
+            self._inspection_deadline = time.monotonic()+request.lease_seconds
+            self._inspection_fault = ''
+            self._home_due = False
+            self._tick()
+        elif command == PtzInspectionControl.Request.RENEW:
+            if self._inspection_owner != owner:
+                response.message = '巡检联动占用已失效'
+                return response
+            self._inspection_deadline = time.monotonic()+request.lease_seconds
+        else:
+            if self._inspection_owner != owner:
+                if self._inspection_owner:
+                    response.message = '云台已由其他巡检动作占用'
+                    return response
+                previous = self._inspection_releases.get(owner)
+                if not request.resume:
+                    # A cancel can overtake an ACQUIRE or follow a RELEASE
+                    # whose response was lost. Never resurrect the old hold.
+                    if previous is True:
+                        self._home_due = False
+                        self.set_parameters([rclpy.parameter.Parameter('enabled', value=False)])
+                    self._remember_release(owner, False)
+                response.success, response.stopped = True, self._inspection_stopped()
+                response.sweep_enabled = bool(self.get_parameter('enabled').value)
+                response.message = '巡检占用已结束'
+                return response
+            self._home_due = False
+            if not request.resume:
+                self.set_parameters([rclpy.parameter.Parameter('enabled', value=False)])
+            self._inspection_owner = ''
+            self._remember_release(owner, bool(request.resume))
+            self._last_flip = time.monotonic()
+        response.success = True
+        response.stopped = self._inspection_stopped()
+        response.sweep_enabled = bool(self.get_parameter('enabled').value)
+        response.message = '巡检停转已确认' if self._inspection_owner and response.stopped else '巡检联动请求已受理'
+        self._publish_status()
+        return response
 
     def _use_pan_bounds(self):
         return 0 <= self.get_parameter('pan_min').value < self.get_parameter('pan_max').value <= 360
 
     def _tick(self):
+        self._expire_inspection()
         now = time.monotonic()
         if self._ctrl_pending is not None and now >= self._ctrl_deadline:
             self._ctrl.remove_pending_request(self._ctrl_pending)
@@ -109,7 +195,7 @@ class PtzPatrol(Node):
             if self._ctrl.service_is_ready():
                 self._command(True)
             return
-        if not enabled:
+        if not enabled or self._inspection_owner:
             self._last_flip = now
             return
         if not self._ctrl.service_is_ready():
@@ -152,7 +238,7 @@ class PtzPatrol(Node):
             self._moving = not stop
             if stop:
                 self._stop_due = False
-                if self._home_due and not self.get_parameter('enabled').value:
+                if self._home_due and not self.get_parameter('enabled').value and not self._inspection_owner:
                     self._go_home()
                     self._home_due = False
         except Exception as error:
@@ -186,12 +272,15 @@ class PtzPatrol(Node):
 
     def _publish_status(self):
         enabled = self.get_parameter('enabled').value
-        active = enabled or self._moving or self._stop_due or self._ctrl_pending is not None
-        state = ('stopping' if not enabled and active else 'error' if self._error else
+        active = enabled or self._moving or self._stop_due or self._ctrl_pending is not None or bool(self._inspection_owner)
+        state = ('inspection_stopping' if self._inspection_owner and not self._inspection_stopped() else
+                 'inspection_paused' if self._inspection_owner else
+                 'stopping' if not enabled and active else 'error' if self._error or self._inspection_fault else
                  'sweeping' if self._moving else 'waiting' if enabled else 'stopped')
         value = dict(component='ptz', enabled=enabled, moving=self._moving,
                      status_time_ns=self.get_clock().now().nanoseconds,
-                     active=active, state=state, last_error=self._error,
+                     active=active, state=state, last_error=self._error or self._inspection_fault,
+                     inspection_held=bool(self._inspection_owner), inspection_owner=self._inspection_owner,
                      direction='left' if self._direction == PAN_LEFT else 'right',
                      pan=self._pan, pan_speed=self.get_parameter('pan_speed').value,
                      sweep_seconds=self.get_parameter('sweep_seconds').value,

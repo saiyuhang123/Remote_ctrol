@@ -55,6 +55,8 @@ face_db/
 
 # 上传的音频文件
 web/audio/
+data/audio/
+data/web_records/
 
 # Local secrets: never commit real DeepSeek credentials.
 ros2_ws/src/ocr_node/config/deepseek*.yaml

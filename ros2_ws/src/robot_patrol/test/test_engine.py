@@ -204,7 +204,7 @@ def test_inspection_runs_after_arrival_before_dwell(tmp_path):
     statuses = []
     calls = []
 
-    def inspection(step, run_id_, map_id, loop_index, step_index, status_cb):
+    def inspection(step, run_id_, map_id, loop_index, step_index, status_cb, flags=None):
         calls.append((step.point_id, run_id_, map_id, loop_index, step_index))
         status_cb(state=STATE_INSPECTING, message="云台巡检中")
         return type("Outcome", (), {
@@ -232,7 +232,7 @@ def test_inspection_failure_fails_route(tmp_path):
     store.create_run(run_id, "route", mapping.map_id, 1, mapping.revision,
                      route.as_dict(), 1, 1, 1)
 
-    def inspection(_step, _run_id, _map_id, _loop, _step_index, _status_cb):
+    def inspection(_step, _run_id, _map_id, _loop, _step_index, _status_cb, flags=None):
         return type("Outcome", (), {
             "success": False, "text": "", "message": "云台服务未就绪",
             "error_code": "INSPECTION_UNAVAILABLE", "image_path": "",

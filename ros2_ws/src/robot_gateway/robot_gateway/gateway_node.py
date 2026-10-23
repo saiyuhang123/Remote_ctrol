@@ -8,7 +8,7 @@ Ownership rules implemented here:
   manual control, and is removed after publishing zero;
 * web route/return tasks run through the local robot_patrol action server,
   and are canceled when the browser disconnects or loses the lease;
-* arbitrary initial-pose and Nav2 target commands are not implemented.
+* one-off map targets use the guarded patrol executor, never direct Nav2 goals.
 """
 from __future__ import annotations
 
@@ -16,6 +16,7 @@ import asyncio
 import json
 import math
 import os
+import ssl
 import threading
 import time
 import uuid
@@ -38,11 +39,14 @@ from rclpy.qos import (DurabilityPolicy, QoSProfile, ReliabilityPolicy,
 from rclpy.time import Time
 from sensor_msgs.msg import LaserScan
 from std_msgs.msg import Bool, String
+from yunle_msgs.msg import Battery
 import tf2_ros
 
-from patrol_interfaces.action import ReturnHome, RunRoute
+from patrol_interfaces.action import InspectPoint, ReturnHome, RunRoute
 from patrol_interfaces.msg import OperatorHeartbeat, PatrolStatus
 from patrol_interfaces.srv import ControlRun
+from .business import WebBusiness
+from .intercom import Intercom
 
 CONFIG_CANDIDATES = [
     Path(os.environ.get("ROBOT_PROJECT_ROOT", str(Path.home() / "Remote_ctrol")))
@@ -59,8 +63,9 @@ TASK_STATES = {
     0: "idle", 1: "validating", 2: "dispatching", 3: "navigating",
     4: "settling", 5: "dwelling", 6: "pausing", 7: "paused",
     8: "canceling", 9: "canceled", 10: "succeeded", 11: "failed",
-    12: "interrupted", 13: "stopping",
+    12: "interrupted", 13: "stopping", 14: "inspecting",
 }
+TASK_COMMANDS = {"route": "route_start", "point": "point_start", "return": "return_home"}
 GOAL_STATES = {
     GoalStatus.STATUS_UNKNOWN: "unknown", GoalStatus.STATUS_ACCEPTED: "accepted",
     GoalStatus.STATUS_EXECUTING: "executing", GoalStatus.STATUS_CANCELING: "canceling",
@@ -133,6 +138,11 @@ class GatewayNode(Node):
         self._control_lock = threading.RLock()
         self._task_lock = threading.RLock()
         self._data_lock = threading.RLock()
+        self._battery_data = {}
+        self._battery_time = 0.0
+        self._battery_valid = False
+        self._battery_timeout = 5.0
+        self._battery_topic = str(ros_cfg.get('battery_topic', '/battery_status'))
         self._linear = 0.0
         self._angular = 0.0
         self._last_cmd_time = 0.0
@@ -186,12 +196,27 @@ class GatewayNode(Node):
         self._ptz_jog_until = 0.0
         self._ptz_pending = False
         self._last_ptz_pose_poll = 0.0
+        self._audio_status = {}
+        self._audio_time = 0.0
+        project = Path(os.environ.get('ROBOT_PROJECT_ROOT', Path.home() / 'Remote_ctrol'))
+        self._audio_dir = Path(os.environ.get('ROBOT_AUDIO_DIR', project / 'data/audio')).expanduser().resolve()
+        self._audio_pub = self.create_publisher(String, '/audio_play', 10)
+        self._audio_stop_pub = self.create_publisher(String, '/audio_stop', 10)
+        self._string_type = String
+        self._business = WebBusiness(self)
+        self._intercom = Intercom(self)
+        self._capture_pub = self.create_publisher(String, '/capture_request', 10)
+        self._capture_status, self._capture_time, self._captures = {}, 0., {}
+        self.create_subscription(String, '/capture/status', self._on_capture_status, 10)
+        self.create_subscription(String, '/capture_done', self._on_capture_done, 10)
+        self.create_timer(.5, self._expire_captures)
 
         self._ws_clients: set = set()
         self._ws_loop = None
 
         # ROS action/service clients
         self._route_client = ActionClient(self, RunRoute, "/patrol/run_route")
+        self._point_client = ActionClient(self, InspectPoint, "/patrol/inspect_point")
         self._return_client = ActionClient(self, ReturnHome, "/patrol/return_home")
         self._control_client = self.create_client(ControlRun, "/patrol/control")
         self._params_client = self.create_client(SetParameters, "/detector_node/set_parameters")
@@ -202,6 +227,7 @@ class GatewayNode(Node):
         self.create_subscription(
             Odometry, ros_cfg.get("odom_topic", "/odom"),
             self._on_odom, qos_profile_sensor_data)
+        self.create_subscription(Battery, self._battery_topic, self._on_battery, qos_profile_sensor_data)
         self.create_subscription(
             LaserScan, ros_cfg.get("scan_topic", "/scan"),
             self._on_scan, qos_profile_sensor_data)
@@ -223,6 +249,7 @@ class GatewayNode(Node):
             ("/gas_detector/status", self._on_gas_status),
             ("/gas_detector/data", self._on_gas_data),
             ("/ptz_patrol/status", self._on_ptz_patrol_status),
+            ("/audio/status", self._on_audio_status),
         ):
             self.create_subscription(String, topic, callback, 10)
         self.create_subscription(
@@ -448,6 +475,37 @@ class GatewayNode(Node):
                 "final": dict(self._task_final),
             }
 
+    def _on_audio_status(self, message):
+        with self._data_lock:
+            self._audio_status = _json_status(message.data)
+            self._audio_time = time.monotonic()
+
+    def _on_battery(self, message):
+        valid = (math.isfinite(message.capacity) and 0 <= message.capacity <= 100
+                 and math.isfinite(message.voltage) and message.voltage > 0)
+        with self._data_lock:
+            self._battery_time = time.monotonic()
+            self._battery_valid = valid
+            self._battery_data = (dict(percentage=float(message.capacity), voltage=float(message.voltage),
+                current=float(message.ampere) if math.isfinite(message.ampere) else None,
+                charging=int(message.charge_status)==1 if message.charge_status in (0, 1) else None,
+                bms_status=int(message.bmusys_status)) if valid else {})
+
+    def _battery_snapshot(self):
+        with self._data_lock:
+            age = time.monotonic()-self._battery_time if self._battery_time else None
+            available = bool(self._battery_valid and age is not None and age <= self._battery_timeout)
+            state = ('waiting' if age is None else 'invalid' if not self._battery_valid
+                     else 'stale' if not available else 'ready')
+            return dict(self._battery_data if available else {}, available=available, state=state,
+                        age=age, timeout=self._battery_timeout, topic=self._battery_topic)
+
+    def _audio_snapshot(self):
+        with self._data_lock:
+            age = time.monotonic()-self._audio_time if self._audio_time else None
+            return {**self._audio_status, 'age': age, 'intercom_active': self._intercom.reserved,
+                    'available': age is not None and age <= 3.0 and bool(self._audio_status.get('ready'))}
+
     def _make_telemetry(self):
         if not self._ws_clients:
             return
@@ -497,6 +555,9 @@ class GatewayNode(Node):
             "turn": turn,
             "control": self._control_snapshot(),
             "task": self._task_snapshot(),
+            "audio": self._audio_snapshot(),
+            "battery": self._battery_snapshot(),
+            "capture": {**self._capture_status, 'available': bool(self._capture_status.get('ready')) and time.monotonic()-self._capture_time<=3},
             "patrol": patrol,
             "nav": {
                 "statuses": nav_statuses,
@@ -532,7 +593,7 @@ class GatewayNode(Node):
                 "pose_age": round(ptz_pose_age, 2) if ptz_pose_age is not None else None,
                 "jog": ptz_jog,
                 "service_ready": bool(_safe_ready(self._ptz_control_client)),
-                "manual_locked": bool(ptz_patrol.get("active") or ptz_patrol.get("enabled")),
+                "manual_locked": self._ptz_blocked(),
             },
         }, ensure_ascii=False)
         loop = self._ws_loop
@@ -667,6 +728,7 @@ class GatewayNode(Node):
             self._pending_return = None
         self._publish_zero_and_destroy_cmd_pub()
         self._ptz_stop()
+        self._intercom.stop()
         if had_owner and cancel_task:
             self._cancel_task(reason, owner_token=token)
         self._publish_disabled_operator_heartbeat(token)
@@ -761,6 +823,11 @@ class GatewayNode(Node):
             if type(value) is not int or not minimum <= value <= maximum:
                 raise ValueError(f"{name} 必须是 {minimum}～{maximum} 的整数")
             fields[name] = value
+        if route:
+            digest = data.get('plan_digest', '')
+            if not isinstance(digest, str) or (digest and (len(digest) != 64 or any(c not in '0123456789abcdef' for c in digest))):
+                raise ValueError('固定路线预览摘要无效')
+            fields['plan_digest'] = digest
         return fields
 
     def _begin_task(self, kind: str, request_id: str):
@@ -776,6 +843,8 @@ class GatewayNode(Node):
         with self._control_lock:
             if kind == "route":
                 self._control_mode = "route"
+            elif kind == "point":
+                self._control_mode = "point"
             elif kind == "return":
                 self._control_mode = "return"
         # Automatic navigation is owned by Nav2. The teleop publisher must not
@@ -805,7 +874,7 @@ class GatewayNode(Node):
         if self._owner_session:
             self._ensure_cmd_pub()
         pending = None
-        if kind == "route":
+        if kind in ("route", "point"):
             with self._task_lock:
                 pending = self._pending_return
                 self._pending_return = None
@@ -838,7 +907,7 @@ class GatewayNode(Node):
                     handle.cancel_goal_async()
                 except Exception:  # noqa: BLE001 - task may already be terminal
                     pass
-            if kind == "route":
+            if kind in ("route", "point"):
                 with self._data_lock:
                     run_id = str(self._patrol_status.get("run_id", ""))
                 if run_id:
@@ -869,6 +938,9 @@ class GatewayNode(Node):
         request_id = str(data.get("request_id", "")).strip()
         try:
             fields = self._task_fields(data, route=True)
+            if fields['plan_digest'] and self._business.plans.get(fields['plan_digest']) != (
+                    self._owner_session, fields['route_id'], fields['route_revision'], fields['map_id'], fields['map_revision'], fields['loop_count']):
+                raise ValueError('请先由当前网页预览该路线及圈数')
             goal = RunRoute.Goal()
             for name, value in fields.items():
                 setattr(goal, name, value)
@@ -920,6 +992,126 @@ class GatewayNode(Node):
         self._command_result(websocket, "route_start", True, "PENDING",
                              "路线任务提交中", request_id)
 
+    def _start_point(self, websocket, data: dict):
+        request_id = str(data.get('request_id', '')).strip()
+        try:
+            fields = self._task_fields(data)
+            goal = InspectPoint.Goal()
+            for key, value in fields.items():
+                setattr(goal, key, value)
+            point_id = data.get('point_id', '')
+            if not isinstance(point_id, str) or len(point_id) > 128:
+                raise ValueError('巡检点编号无效')
+            goal.point_id = point_id
+            if point_id:
+                revision = data.get('point_revision')
+                if type(revision) is not int or not 1 <= revision < 2**64:
+                    raise ValueError('请重新选择有效版本的巡检点')
+                goal.point_revision = revision
+            else:
+                for key in ('x', 'y', 'yaw'):
+                    value = data.get(key)
+                    if type(value) not in (int, float) or not math.isfinite(value):
+                        raise ValueError(f'{key} 必须是有限数值')
+                    setattr(goal, key, float(value))
+                enabled, preset = data.get('inspection_enabled', True), data.get('ptz_preset', 0)
+                if type(enabled) is not bool or type(preset) is not int or not 0 <= preset <= 255:
+                    raise ValueError('巡检设置无效')
+                if enabled and preset == 0:
+                    raise ValueError('请选择 1～255 的云台预置位')
+                prompt = data.get('recognition_prompt', '')
+                if not isinstance(prompt, str) or len(prompt) > 2000:
+                    raise ValueError('识别提示词不能超过 2000 字')
+                goal.inspection_enabled, goal.ptz_preset, goal.recognition_prompt = enabled, preset, prompt
+        except (ValueError, TypeError, AssertionError, OverflowError) as error:
+            self._command_result(websocket, 'point_start', False, 'INVALID_DATA', str(error), request_id)
+            return
+        if not self._lease_valid():
+            self._command_result(websocket, 'point_start', False, 'LEASE_LOST', '网页控制心跳已过期', request_id)
+            return
+        ok, code, message = self._estop_check()
+        if not ok:
+            self._command_result(websocket, 'point_start', False, code, message, request_id)
+            return
+        if self._local_task_active() or self._active_nav_goal_count():
+            self._command_result(websocket, 'point_start', False, 'BUSY', '已有任务或 Nav2 目标运行中', request_id)
+            return
+        if not self._point_client.wait_for_server(timeout_sec=0.5):
+            self._command_result(websocket, 'point_start', False, 'NAV_NOT_READY', '一键巡检执行器未就绪', request_id)
+            return
+        with self._control_lock:
+            goal.owner_session_id = self._owner_session
+        ok, code, message = self._begin_task('point', request_id)
+        if not ok:
+            self._command_result(websocket, 'point_start', False, code, message, request_id)
+            return
+        try:
+            future = self._point_client.send_goal_async(goal, feedback_callback=lambda feedback:
+                self._on_task_feedback('point', request_id, feedback))
+            future.add_done_callback(lambda done: self._on_task_goal_response('point', request_id, websocket, done))
+        except Exception as error:
+            self._finish_task('point', request_id, False, 'ACTION_FAILED', str(error))
+            self._command_result(websocket, 'point_start', False, 'ACTION_FAILED', str(error), request_id)
+            return
+        self._command_result(websocket, 'point_start', True, 'PENDING', '一键巡检任务提交中', request_id)
+
+    def _audio_command(self, websocket, data):
+        command, request_id = data['type'], str(data.get('request_id', ''))
+        if not self._lease_valid():
+            self._command_result(websocket, command, False, 'LEASE_LOST', '网页控制心跳已过期', request_id)
+            return
+        if not self._audio_snapshot()['available']:
+            self._command_result(websocket, command, False, 'AUDIO_UNAVAILABLE', '机器人音频播放器未启动或状态已过期', request_id)
+            return
+        if command == 'audio_stop':
+            self._audio_stop_pub.publish(String(data=request_id))
+            self._command_result(websocket, command, True, 'PENDING', '已请求停止播报', request_id)
+            return
+        if self._intercom.reserved:
+            self._command_result(websocket, command, False, 'INTERCOM_ACTIVE', '请先结束对讲再播放音频', request_id)
+            return
+        filename = data.get('filename', '')
+        if not isinstance(filename, str) or not filename or Path(filename).name != filename:
+            self._command_result(websocket, command, False, 'INVALID_DATA', '音频文件名无效', request_id)
+            return
+        path = (self._audio_dir / filename).resolve()
+        if path.parent != self._audio_dir or not path.is_file() or path.suffix.lower() not in ('.mp3', '.wav', '.ogg', '.m4a', '.flac'):
+            self._command_result(websocket, command, False, 'AUDIO_NOT_FOUND', '音频不存在，请刷新文件列表', request_id)
+            return
+        self._audio_pub.publish(String(data=json.dumps({'filename': filename, 'request_id': request_id})))
+        self._command_result(websocket, command, True, 'PENDING', '已提交机器人播报', request_id)
+
+    def _on_capture_status(self, message):
+        self._capture_status, self._capture_time = _json_status(message.data), time.monotonic()
+
+    def _on_capture_done(self, message):
+        value = _json_status(message.data)
+        pending = self._captures.pop(value.get('request_id', ''), None)
+        if pending:
+            self._command_result(pending[0], 'capture', bool(value.get('ok')), 'SAVED' if value.get('ok') else 'CAPTURE_FAILED',
+                '抓拍已保存' if value.get('ok') else value.get('reason', '抓拍失败'), value.get('request_id', ''), data=value)
+
+    def _expire_captures(self):
+        for identifier, (websocket, started) in list(self._captures.items()):
+            if time.monotonic()-started > 8:
+                self._captures.pop(identifier, None)
+                self._command_result(websocket, 'capture', False, 'TIMEOUT', '抓拍响应超时，请检查视频源和抓拍节点', identifier)
+
+    def _capture(self, websocket, data):
+        identifier = str(data.get('request_id', ''))
+        if not identifier or len(identifier)>128 or any(c not in 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-' for c in identifier):
+            self._command_result(websocket, 'capture', False, 'INVALID_DATA', '抓拍请求编号无效', identifier)
+            return
+        if len(self._captures) >= 2:
+            self._command_result(websocket, 'capture', False, 'BUSY', '正在抓拍，请稍候', identifier)
+            return
+        if not self._capture_status.get('ready') or time.monotonic()-self._capture_time > 3:
+            self._command_result(websocket, 'capture', False, 'CAMERA_UNAVAILABLE', '抓拍节点未就绪或视频没有新鲜画面', identifier)
+            return
+        self._captures[identifier] = (websocket, time.monotonic())
+        self._capture_pub.publish(String(data=json.dumps(dict(request_id=identifier, label='网页手动抓拍'))))
+        self._command_result(websocket, 'capture', True, 'PENDING', '正在抓拍…', identifier)
+
     def _start_return(self, websocket, data: dict):
         request_id = str(data.get("request_id", "")).strip()
         try:
@@ -944,7 +1136,7 @@ class GatewayNode(Node):
                     websocket, "return_home", False, "BUSY",
                     "返航任务已在执行", request_id)
                 return
-            if active_kind == "route":
+            if active_kind in ("route", "point"):
                 if self._pending_return is not None:
                     self._command_result(
                         websocket, "return_home", False, "BUSY",
@@ -955,7 +1147,7 @@ class GatewayNode(Node):
                     "data": dict(data),
                 }
                 self._task_cancel_pending = True
-        if active_kind == "route":
+        if active_kind in ("route", "point"):
             self._command_result(
                 websocket, "return_home", True, "PENDING",
                 "正在取消当前路线，随后开始返航", request_id)
@@ -1011,14 +1203,14 @@ class GatewayNode(Node):
             handle = future.result()
         except Exception as error:  # noqa: BLE001 - action boundary
             self._finish_task(kind, request_id, False, "ACTION_FAILED", str(error))
-            self._command_result(websocket, kind + (":start" if kind else ""), False,
+            self._command_result(websocket, TASK_COMMANDS[kind], False,
                                  "ACTION_FAILED", str(error), request_id)
             return
         if handle is None or not handle.accepted:
             self._finish_task(kind, request_id, False, "REJECTED",
                               "本地任务执行器拒绝任务")
             self._command_result(websocket,
-                                 "route_start" if kind == "route" else "return_home",
+                                 TASK_COMMANDS[kind],
                                  False, "REJECTED", "本地任务执行器拒绝任务", request_id)
             return
         with self._task_lock:
@@ -1040,7 +1232,7 @@ class GatewayNode(Node):
             "request_id": request_id, "stamp": time.time(),
         })
         self._command_result(
-            websocket, "route_start" if kind == "route" else "return_home",
+            websocket, TASK_COMMANDS[kind],
             True, "ACCEPTED", "本地任务执行器已接受任务", request_id)
         handle.get_result_async().add_done_callback(
             lambda result_future: self._on_task_result(
@@ -1078,7 +1270,7 @@ class GatewayNode(Node):
                                  "LEASE_LOST", "网页控制心跳已过期", data.get("request_id", ""))
             return
         with self._task_lock:
-            if self._task_kind != "route":
+            if self._task_kind not in ("route", "point"):
                 self._command_result(websocket, command_name, False,
                                      "NO_ACTIVE_TASK", "当前没有网页路线任务",
                                      data.get("request_id", ""))
@@ -1111,7 +1303,20 @@ class GatewayNode(Node):
             "route_resume": ControlRun.Request.RESUME,
             "route_cancel": ControlRun.Request.CANCEL,
         }[command_name]
+        if command_name == 'route_cancel':
+            with self._task_lock:
+                self._task_cancel_pending = True
+                handle = self._task_goal_handle
+            if handle is not None:
+                try:
+                    handle.cancel_goal_async()
+                except Exception:  # action may already be terminal
+                    pass
         if not self._control_client.service_is_ready():
+            if command_name == 'route_cancel':
+                self._command_result(websocket, command_name, True, 'PENDING',
+                                     '已通过任务动作请求取消', data.get('request_id', ''))
+                return
             self._command_result(websocket, command_name, False,
                                  "SERVICE_UNAVAILABLE", "路线控制服务未就绪",
                                  data.get("request_id", ""))
@@ -1126,17 +1331,6 @@ class GatewayNode(Node):
         future.add_done_callback(
             lambda done: self._on_route_control_done(
                 websocket, command_name, data.get("request_id", ""), done))
-        if command_name == "route_cancel":
-            with self._task_lock:
-                self._task_cancel_pending = True
-                handle = self._task_goal_handle
-            # The service owns engine cancellation; the action cancel is an
-            # independent safety path when the run_id/status update races.
-            if handle is not None:
-                try:
-                    handle.cancel_goal_async()
-                except Exception:  # noqa: BLE001 - already terminal
-                    pass
 
     def _on_route_control_done(self, websocket, command_name: str,
                                request_id: str, future):
@@ -1224,7 +1418,8 @@ class GatewayNode(Node):
     def _ptz_blocked(self) -> bool:
         with self._data_lock:
             status = dict(self._ptz_patrol_status)
-        return bool(status.get("active") or status.get("enabled"))
+            inspection = self._patrol_status.get('active') and self._patrol_status.get('state') == 14
+        return bool(status.get("active") or status.get("enabled") or inspection)
 
     def _call_ptz(self, command: int = 0, stop: bool = False,
                   speed: int = 3):
@@ -1401,6 +1596,13 @@ class GatewayNode(Node):
                                  "网页控制权正在释放", request_id)
             return
 
+        if msg_type in WebBusiness.commands:
+            await self._business.handle(websocket, data)
+            return
+        if msg_type == 'capture':
+            self._capture(websocket, data)
+            return
+
         if msg_type == "cmd_vel":
             with self._control_lock:
                 mode = self._control_mode
@@ -1423,6 +1625,12 @@ class GatewayNode(Node):
             return
         if msg_type == "route_start":
             self._start_route(websocket, data)
+            return
+        if msg_type == 'point_start':
+            self._start_point(websocket, data)
+            return
+        if msg_type in ('audio_play', 'audio_stop'):
+            self._audio_command(websocket, data)
             return
         if msg_type in ("route_pause", "route_resume", "route_cancel"):
             self._route_control(websocket, data, msg_type)
@@ -1499,7 +1707,12 @@ class GatewayNode(Node):
 
 
 async def _handle_client(node: GatewayNode, websocket):
+    path = getattr(websocket, 'path', getattr(getattr(websocket, 'request', None), 'path', '/'))
+    if path.split('?')[0] == '/intercom':
+        await node._intercom.handle(websocket)
+        return
     peer = websocket.remote_address
+    jobs = set()
     node._ws_clients.add(websocket)
     node.get_logger().info(f"web client connected: {peer}")
     try:
@@ -1516,6 +1729,16 @@ async def _handle_client(node: GatewayNode, websocket):
             if not isinstance(data, dict):
                 continue
             try:
+                if data.get('type') in WebBusiness.commands:
+                    # PLAN may take seconds. Keep reading control heartbeats,
+                    # cancel and e-stop messages while ROS serves the request.
+                    if len(jobs) >= 4:
+                        node._command_result(websocket, data['type'], False, 'BUSY', '正在处理资料请求', str(data.get('request_id', '')))
+                    else:
+                        job = asyncio.create_task(node.handle_command(websocket, data))
+                        jobs.add(job)
+                        job.add_done_callback(jobs.discard)
+                    continue
                 await node.handle_command(websocket, data)
             except Exception as error:  # noqa: BLE001 - keep one client alive
                 node.get_logger().error(f"web command failed: {error}")
@@ -1526,6 +1749,10 @@ async def _handle_client(node: GatewayNode, websocket):
     except websockets.exceptions.ConnectionClosed:
         pass
     finally:
+        for job in jobs:
+            job.cancel()
+        if jobs:
+            await asyncio.gather(*jobs, return_exceptions=True)
         try:
             node.get_logger().info(f"web client disconnected: {peer}")
         except Exception:  # noqa: BLE001
@@ -1540,11 +1767,18 @@ async def _handle_client(node: GatewayNode, websocket):
 
 
 def _run_ws_server(node: GatewayNode, port: int):
+    context = None
+    certificate, key = os.environ.get('ROBOT_TLS_CERT'), os.environ.get('ROBOT_TLS_KEY')
+    if certificate or key:
+        if not certificate or not key:
+            raise ValueError('ROBOT_TLS_CERT 和 ROBOT_TLS_KEY 必须同时设置')
+        context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        context.load_cert_chain(certificate, key)
     async def _serve():
         node._ws_loop = asyncio.get_running_loop()
         async with websockets.serve(
                 lambda websocket, *args: _handle_client(node, websocket),
-                "0.0.0.0", port):
+                "0.0.0.0", port, ssl=context):
             node.get_logger().info(f"WebSocket listening on :{port}")
             await asyncio.Future()
     asyncio.run(_serve())

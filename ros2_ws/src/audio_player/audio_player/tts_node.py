@@ -11,6 +11,7 @@ TTS 引擎：edge-tts（在线，自然音质，结果按文本哈希缓存）�
 """
 import hashlib
 import json
+import os
 import queue
 import subprocess
 import threading
@@ -24,6 +25,10 @@ from robot_common.paths import PROJECT_ROOT
 
 VOICE = 'zh-CN-XiaoxiaoNeural'   # edge-tts 中文女声
 ALERT_COOLDOWN = 30.0            # 识别播报冷却（秒）
+
+
+class PlaybackStopped(Exception):
+    pass
 
 
 class TtsNode(Node):
@@ -44,20 +49,30 @@ class TtsNode(Node):
 
         self._q = queue.Queue(maxsize=20)
         self._last_alert = 0.0
+        self._audio_lock = threading.RLock()
+        self._generation = 0
+        self._play_process = None
+        self._shutdown = threading.Event()
+        self._audio_state = dict(state='idle', ready=True, filename='', request_id='', message='待命')
 
         self.create_subscription(String, '/tts_say', self._on_say, 10)
         self.create_subscription(
             String, '/audio_play', self._on_audio_play, 10)
         self.declare_parameter(
             'audio_dir',
-            str(PROJECT_ROOT / 'web' / 'audio'))
-        self._audio_dir = Path(self.get_parameter('audio_dir').value)
+            os.environ.get('ROBOT_AUDIO_DIR', str(PROJECT_ROOT / 'data' / 'audio')))
+        self._audio_dir = Path(self.get_parameter('audio_dir').value).expanduser().resolve()
         self._audio_dir.mkdir(parents=True, exist_ok=True)
         self.create_subscription(
             String, '/detection_events', self._on_detection, 10)
+        self.create_subscription(String, '/audio_stop', self._on_audio_stop, 10)
+        self._pub_audio = self.create_publisher(String, '/audio/status', 10)
+        self.create_timer(1., self._publish_audio_state)
         self._pub_status = self.create_publisher(String, '/tts_status', 10)
 
-        threading.Thread(target=self._worker, daemon=True).start()
+        self._thread = threading.Thread(target=self._worker, daemon=True)
+        self._thread.start()
+        self._publish_audio_state()
         self.get_logger().info(
             f'TTS 节点就绪：语音={self._voice}，人员播报={"开" if self._alert_on_person else "关"}')
 
@@ -72,17 +87,48 @@ class TtsNode(Node):
             self.get_logger().warn('播报队列已满，丢弃')
 
     def _on_audio_play(self, msg):
-        """播放已上传的音频文件（文件名，只允许在 audio_dir 内）"""
-        name = Path(msg.data.strip()).name
-        path = self._audio_dir / name
-        if not name or not path.exists():
-            self.get_logger().warn(f'音频文件不存在: {msg.data}')
-            self._publish_status('error', f'文件不存在: {name}')
-            return
+        """Accept an uploaded filename or a correlated web playback request."""
+        name, request_id = '', ''
         try:
-            self._q.put_nowait(('FILE', str(path)))
-        except queue.Full:
-            self.get_logger().warn('播报队列已满，丢弃')
+            payload = json.loads(msg.data) if msg.data.lstrip().startswith('{') else {'filename': msg.data.strip()}
+            name, request_id = payload.get('filename', ''), str(payload.get('request_id', ''))[:200]
+            if not isinstance(name, str) or not name or Path(name).name != name:
+                raise ValueError('音频文件名无效')
+            path = (self._audio_dir / name).resolve()
+            if path.parent != self._audio_dir or not path.is_file() or path.suffix.lower() not in ('.mp3', '.wav', '.ogg', '.m4a', '.flac'):
+                raise ValueError('音频文件不存在')
+            with self._audio_lock:
+                self._q.put_nowait(('FILE', str(path), request_id, self._generation))
+                self._set_audio_state('queued', name, request_id, '已加入机器人播报队列')
+        except (ValueError, TypeError, AttributeError, queue.Full) as error:
+            self._set_audio_state('error', str(name), request_id,
+                                  '播报队列已满' if isinstance(error, queue.Full) else str(error))
+
+    def _set_audio_state(self, state, filename='', request_id='', message=''):
+        with self._audio_lock:
+            self._audio_state.update(state=state, filename=filename, request_id=request_id, message=message)
+        self._publish_audio_state()
+
+    def _publish_audio_state(self):
+        with self._audio_lock:
+            value = dict(self._audio_state, queue=self._q.qsize(), stamp=time.time())
+        self._pub_audio.publish(String(data=json.dumps(value, ensure_ascii=False)))
+
+    def _on_audio_stop(self, msg):
+        with self._audio_lock:
+            self._generation += 1
+            process = self._play_process
+            while True:
+                try:
+                    self._q.get_nowait()
+                except queue.Empty:
+                    break
+            if process is not None and process.poll() is None:
+                try:
+                    process.terminate()
+                except ProcessLookupError:
+                    pass
+            self._set_audio_state('stopped', request_id=msg.data[:200], message='播报已停止，队列已清空')
 
     def _on_detection(self, msg):
         if not self._alert_on_person:
@@ -124,9 +170,39 @@ class TtsNode(Node):
                 self.get_logger().error(f'espeak-ng 也失败: {e2}')
                 return None
 
-    def _play(self, path):
-        subprocess.run(['ffplay', '-nodisp', '-autoexit', '-loglevel', 'error', path],
-                       timeout=60)
+    def _play(self, path, generation):
+        with self._audio_lock:
+            if generation != self._generation or self._shutdown.is_set():
+                raise PlaybackStopped()
+            process = subprocess.Popen(['ffplay', '-nodisp', '-autoexit', '-loglevel', 'error', path],
+                                       stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+            self._play_process = process
+        deadline = time.monotonic()+605
+        try:
+            while process.poll() is None:
+                if generation != self._generation or self._shutdown.is_set():
+                    raise PlaybackStopped()
+                if time.monotonic() >= deadline:
+                    raise TimeoutError('音频播放超时')
+                time.sleep(.05)
+            if generation != self._generation:
+                raise PlaybackStopped()
+            _, error = process.communicate()
+            if process.returncode:
+                raise RuntimeError('机器人音频输出失败：'+error.decode('utf-8', 'replace')[-300:])
+        finally:
+            if process.poll() is None:
+                process.terminate()
+                try:
+                    process.wait(timeout=1.)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait(timeout=1.)
+            if process.stderr:
+                process.stderr.close()
+            with self._audio_lock:
+                if self._play_process is process:
+                    self._play_process = None
 
     def _publish_status(self, status, text=''):
         self._pub_status.publish(String(data=json.dumps(
@@ -134,34 +210,53 @@ class TtsNode(Node):
             ensure_ascii=False)))
 
     def _worker(self):
-        while rclpy.ok():
+        while rclpy.ok() and not self._shutdown.is_set():
             try:
-                item = self._q.get(timeout=1.0)
+                item = self._q.get(timeout=.2)
             except queue.Empty:
                 continue
             if isinstance(item, tuple) and item[0] == 'FILE':
                 # 已上传音频文件：直接播放，不走合成
                 label = Path(item[1]).name
+                request_id, generation = item[2], item[3]
+                if generation != self._generation:
+                    continue
+                self._set_audio_state('playing', label, request_id, '机器人正在播报')
                 self._publish_status('speaking', label)
                 try:
-                    self._play(item[1])
+                    self._play(item[1], generation)
                     self._publish_status('done', label)
+                    if generation == self._generation:
+                        self._set_audio_state('done', label, request_id, '播报完成')
+                except PlaybackStopped:
+                    pass
                 except Exception as e:
                     self.get_logger().error(f'播放失败: {e}')
                     self._publish_status('error', label)
+                    if generation == self._generation:
+                        self._set_audio_state('error', label, request_id, str(e))
                 continue
             text = item
+            generation = self._generation
             self._publish_status('speaking', text)
             path = self._synth(text)
             if path:
                 try:
-                    self._play(path)
+                    self._play(path, generation)
                     self._publish_status('done', text)
+                except PlaybackStopped:
+                    pass
                 except Exception as e:
                     self.get_logger().error(f'播放失败: {e}')
                     self._publish_status('error', text)
             else:
                 self._publish_status('error', text)
+
+    def destroy_node(self):
+        self._shutdown.set()
+        self._on_audio_stop(String(data='shutdown'))
+        self._thread.join(timeout=2.)
+        return super().destroy_node()
 
 
 def main():

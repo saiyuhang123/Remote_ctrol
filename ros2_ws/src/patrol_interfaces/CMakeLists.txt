@@ -34,7 +34,9 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "srv/GetHomePoint.srv"
   "srv/SetHomePoint.srv"
   "srv/RoadCommand.srv"
+  "srv/PtzInspectionControl.srv"
   "action/RunRoute.action"
+  "action/InspectPoint.action"
   "action/ReturnHome.action"
   DEPENDENCIES builtin_interfaces geometry_msgs std_msgs
 )

@@ -36,6 +36,12 @@
     <div class="metric-value gasValue"><span id="gasApprox"></span><span id="gasValue">—</span><span class="unit" id="gasUnit"></span></div>
     <div class="metric-foot">检测状态 <b id="gasState" class="muted">未知</b></div>
   </div>
+  <div class="metric battery-metric">
+    <div class="metric-head"><span>电池状态</span><span id="batteryFresh" class="tag">等待反馈</span></div>
+    <div class="metric-value"><span id="batteryPercent">—</span><span class="unit">%</span></div>
+    <progress id="batteryLevel" max="100" value="0" aria-label="电池电量" hidden></progress>
+    <div class="metric-foot"><span><span id="batteryVoltage">—</span> V · <span id="batteryCurrent">—</span> A</span><b id="batteryState">未知</b></div>
+  </div>
 </div>
 
 <div id="main">
@@ -68,6 +74,24 @@
         <iframe id="video" title="相机实时视频" allow="autoplay; fullscreen" allowfullscreen></iframe>
         <div id="videoOff"><span class="icon" data-icon="video"></span><span>视频未开启</span></div>
       </div>
+      <div class="control-buttons"><button class="btn gray" id="manualCapture" disabled>立即抓拍并保存</button><a class="btn gray" href="/records.html">抓拍记录</a></div>
+      <p id="captureMessage" class="form-hint" role="status">等待抓拍节点就绪</p>
+      <a id="capturePreview" target="_blank" rel="noopener" hidden><img alt="最新手动抓拍"></a>
+    </section>
+    <section class="card inspection-controls">
+      <h2>一键到达与巡检</h2>
+      <label>已有巡检点<select id="targetPoint"><option value="">在地图上选点或输入坐标</option></select></label>
+      <button class="btn gray" id="pickTarget">地图选点与朝向</button>
+      <div class="coordinate-fields">
+        <label>X (m)<input id="targetX" type="number" step="0.01"></label>
+        <label>Y (m)<input id="targetY" type="number" step="0.01"></label>
+        <label>朝向 (°)<input id="targetYaw" type="number" min="-180" max="180" step="1" value="0"></label>
+      </div>
+      <label class="toggleRow"><span>到达后抓拍识别</span><input id="targetInspect" type="checkbox" checked></label>
+      <label>云台预置位<input id="targetPreset" type="number" min="1" max="255" step="1" value="1"></label>
+      <details><summary>识别要求</summary><textarea id="targetPrompt" maxlength="2000" rows="3" placeholder="留空使用默认仪表与设备识别"></textarea></details>
+      <div class="control-buttons"><button class="btn" id="pointStart" disabled>到达并巡检</button><button class="btn gray" id="pointCancel" disabled>取消</button><button class="btn gray" id="pointHome" disabled>一键返回</button></div>
+      <p class="muted" id="pointMessage" role="status">选择地图目标，拖动可设置车头朝向；也可选择已有巡检点。</p>
     </section>
     <section class="card">
       <h2><span class="section-title"><span class="icon" data-icon="joystick"></span>手动遥控</span><span id="leaseText" class="muted">未授权</span></h2>
@@ -99,6 +123,15 @@
       <div class="row"><span>识别节点</span><b id="detectorState">未知</b></div>
       <div class="row"><span>状态更新时间</span><b id="visionFresh">未知</b></div>
       <div class="row"><span>最近错误</span><span id="visionError" class="muted">无</span></div>
+    </section>
+    <section class="card inspection-controls">
+      <h2>机器人语音播报</h2>
+      <label>上传音频<input id="audioFile" type="file" accept=".mp3,.wav,.ogg,.m4a,.flac"></label>
+      <button class="btn gray" id="audioUpload">上传音频</button>
+      <p class="muted">支持 MP3 / WAV / OGG / M4A / FLAC，最大 20MB、10 分钟。</p>
+      <label>已上传音频<select id="audioSelect"><option value="">暂无音频</option></select></label>
+      <div class="control-buttons"><button class="btn" id="audioPlay" disabled>机器人播放</button><button class="btn gray" id="audioStop" disabled>停止播报</button></div>
+      <p class="muted" id="audioMessage" role="status">等待音频播放器状态</p>
     </section>
     <section class="card">
       <h2><span class="section-title"><span class="icon" data-icon="gas"></span>气体设备详情</span></h2>
@@ -132,8 +165,8 @@ const app = {
 const TASK_NAMES = {idle:'空闲', validating:'校验', dispatching:'派发', navigating:'导航',
   settling:'停稳确认', dwelling:'停留', pausing:'暂停中', paused:'已暂停',
   canceling:'取消中', canceled:'已取消', succeeded:'已完成', failed:'失败',
-  interrupted:'已中断', stopping:'停车中'};
-const CONTROL_NAMES = {idle:'无控制者', manual:'网页手动', route:'网页路线', 'return':'网页返航'};
+  interrupted:'已中断', stopping:'停车中', inspecting:'抓拍识别中'};
+const CONTROL_NAMES = {idle:'无控制者', manual:'网页手动', route:'网页路线', point:'网页到点巡检', 'return':'网页返航'};
 
 function requestId(prefix) {
   return `${prefix}_${Date.now()}_${Math.random().toString(16).slice(2, 9)}`;
@@ -164,7 +197,7 @@ function connect() {
   app.ws.onclose = () => {
     setConnection(false, '连接断开，3s 后重连…');
     releaseStick(false); stopPtzHold(false);
-    app.session = null; app.telemetry = null; updateOwnership(); closeVideo(); updateGas({}); drawMap();
+    app.session = null; app.telemetry = null; updateOwnership(); closeVideo(); updateGas({}); updateBattery({}); drawMap();
   };
   app.ws.onerror = () => setConnection(false, 'WebSocket 连接失败');
   app.ws.onmessage = event => {
@@ -309,6 +342,7 @@ function updateTelemetry() {
   updateVision(t.vision || {});
   updatePtz(t.ptz || {});
   updateGas(t.gas || {});
+  updateBattery(t.battery || {});
 }
 
 function updateTaskStatus(status) {
@@ -322,7 +356,7 @@ function updateTaskStatus(status) {
   }
   const loop = status.total_loops ? `${status.loop_index}/${status.total_loops}` : `${status.loop_index}/∞`;
   const step = status.step_count ? `${status.step_index}/${status.step_count}` : '-';
-  const kind = running ? (task.kind === 'return' ? '返航 · ' : '路线 · ') : '';
+  const kind = running ? (task.kind === 'return' ? '返航 · ' : task.kind === 'point' ? '到点巡检 · ' : '路线 · ') : '';
   $('taskText').textContent = `${kind}${name} · 圈 ${loop} · 点 ${step}${status.current_point_name ? ' · ' + status.current_point_name : ''}`;
   $('taskText').title = status.message || status.error_code || '';
 }
@@ -394,9 +428,10 @@ function updatePtz(p) {
     ? `${Number(pose.pan).toFixed(1)}° / ${Number(pose.tilt).toFixed(1)}°` : '-';
   $('ptzZoom').textContent = pose.zoom !== undefined ? Number(pose.zoom).toFixed(1) : '-';
   const active = Boolean(patrol.active || patrol.enabled);
-  $('ptzAuto').textContent = active ? '自动巡航中' : '手动可用';
+  const inspecting = Boolean(patrol.inspection_held);
+  $('ptzAuto').textContent = inspecting ? '巡检占用中' : active ? '自动巡航中' : '手动可用';
   $('ptzAuto').dataset.tone = active ? 'warn' : 'good';
-  $('ptzPatrolState').textContent = patrol.state || '未知';
+  $('ptzPatrolState').textContent = ({inspection_stopping:'巡检停转中',inspection_paused:'巡检拍照中'})[patrol.state] || patrol.state || '未知';
   $('ptzFresh').textContent = p.patrol_age === null || p.patrol_age === undefined
     ? '未知' : `${Number(p.patrol_age).toFixed(1)}s · ${p.patrol_age <= 2.5 ? '新鲜' : '过期'}`;
   $('ptzFresh').className = p.patrol_age !== null && p.patrol_age !== undefined &&
@@ -404,7 +439,7 @@ function updatePtz(p) {
   $('ptzError').textContent = patrol.last_error || '无';
   $('ptzError').className = patrol.last_error ? 'warning' : 'muted';
   document.querySelectorAll('.ptz').forEach(button => {
-    button.disabled = !isOwner() || active;
+    button.disabled = !isOwner() || p.manual_locked || active;
   });
 }
 
@@ -438,7 +473,23 @@ function updateGas(g) {
     !status.enabled ? '采集已停止' : !status.connected ? '设备未连接' : status.last_error ? '采集异常' : '无新鲜数据';
   $('gasFresh').dataset.tone = live ? 'good' : 'warn';
 }
-setInterval(() => updateGas((app.telemetry && app.telemetry.gas) || {}), 250);
+function updateBattery(value) {
+  const elapsed=Math.max(0,(Date.now()-(app.telemetryReceivedAt || 0))/1000);
+  const age=typeof value.age==='number'?value.age+elapsed:Infinity;
+  const live=value.available===true && elapsed<3 && age<=(value.timeout || 5) &&
+    Number.isFinite(value.percentage) && value.percentage>=0 && value.percentage<=100 && Number.isFinite(value.voltage) && value.voltage>0;
+  $('batteryPercent').textContent=live?value.percentage.toFixed(0):'—';
+  $('batteryVoltage').textContent=live?value.voltage.toFixed(1):'—';
+  $('batteryCurrent').textContent=live && Number.isFinite(value.current)?value.current.toFixed(1):'—';
+  $('batteryLevel').hidden=!live;
+  if (live) $('batteryLevel').value=value.percentage;
+  const low=live && value.percentage<=20;
+  $('batteryState').textContent=!live?'未知':value.charging===true?'充电中':value.charging===false?'未充电':'充电状态未知';
+  $('batteryState').className=low?'warning':live?'good':'muted';
+  $('batteryFresh').textContent=live?(low?'电量偏低':'数据新鲜'):value.state==='invalid'?'反馈无效':value.state==='waiting' || value.age===undefined || value.age===null?'等待反馈':'反馈已过期';
+  $('batteryFresh').dataset.tone=low || !live?'warn':'good';
+}
+setInterval(() => { updateGas(app.telemetry?.gas || {}); updateBattery(app.telemetry?.battery || {}); }, 250);
 
 // ------------------------------ controls ------------------------------
 ui.btnClaim.onclick = () => {
@@ -529,7 +580,7 @@ function applyKeys() {
 const videoIframe = $('video');
 let videoOn = false;
 function openVideo() {
-  videoIframe.src = `http://${host}:8889/cam/`;
+  videoIframe.src = `${location.protocol}//${host}:8889/cam/`;
   videoIframe.style.display = 'block'; $('videoOff').style.display = 'none';
   $('btnVideo').textContent = '关闭视频'; videoOn = true;
 }
@@ -691,6 +742,7 @@ function drawMap() {
   ctx.drawImage(app.mapImage, app.view.panX, app.view.panY,
                 app.mapMeta.width * app.view.scale,
                 app.mapMeta.height * app.view.scale);
+  if (window.renderInspectionTarget) window.renderInspectionTarget();
   const t = app.telemetry;
   if (!t) return;
   const frameOk = t.frame === 'map' && app.projection;
@@ -720,5 +772,6 @@ function drawMap() {
   }
 }
 </script>
+<script src="inspection-controls.js"></script>
 </body>
 </html>

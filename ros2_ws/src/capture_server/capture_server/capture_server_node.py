@@ -10,6 +10,9 @@
 磁盘策略：按日期分目录；超过 MAX_GB 或超过 MAX_DAYS 天自动清最旧的。
 """
 import json
+import os
+import re
+import uuid
 import threading
 import time
 from pathlib import Path
@@ -40,7 +43,7 @@ class CaptureServerNode(Node):
         self._cap_dir.mkdir(parents=True, exist_ok=True)
         self.declare_parameter('backend_url', 'http://127.0.0.1:8888')
         self._reporter = HttpReporter(
-            self.get_parameter('backend_url').value,
+            os.environ.get('ROBOT_BACKEND_URL', self.get_parameter('backend_url').value),
             cache_db=str(PROJECT_ROOT / 'data' / 'capture_cache.db'))
 
         self._lock = threading.Lock()
@@ -50,6 +53,9 @@ class CaptureServerNode(Node):
         self.create_subscription(
             String, '/capture_request', self._on_capture_request, 10)
         self._pub_done = self.create_publisher(String, '/capture_done', 10)
+        self._pub_status = self.create_publisher(String, '/capture/status', 10)
+        self._recent = {}
+        self.create_timer(.5, self._publish_capture_status)
 
         self.get_logger().info(f'抓拍服务就绪：视频源={self._src}，存档={self._cap_dir}')
         threading.Thread(target=self._grab_loop, daemon=True).start()
@@ -76,33 +82,52 @@ class CaptureServerNode(Node):
                 self._latest_time = time.time()
 
     # ---------------- 抓拍 ----------------
+    def _publish_capture_status(self):
+        with self._lock:
+            ready = self._latest_frame is not None and time.time()-self._latest_time <= MIN_FRAME_AGE
+        self._pub_status.publish(String(data=json.dumps(dict(ready=ready, stamp=time.time()))))
+
     def _on_capture_request(self, msg):
-        label = msg.data.strip() or 'manual'
+        try:
+            value = json.loads(msg.data) if msg.data.lstrip().startswith('{') else {'label': msg.data.strip() or 'manual'}
+            identifier = value.get('request_id') or uuid.uuid4().hex
+            if not isinstance(identifier, str) or not re.fullmatch(r'[A-Za-z0-9_-]{1,128}', identifier):
+                raise ValueError('抓拍编号无效')
+            label = str(value.get('label') or 'manual')[:200]
+        except (ValueError, AttributeError, TypeError):
+            return
+        if identifier in self._recent:
+            self._pub_done.publish(String(data=json.dumps(self._recent[identifier], ensure_ascii=False)))
+            return
         with self._lock:
             frame = None if self._latest_frame is None else self._latest_frame.copy()
             age = time.time() - self._latest_time
         if frame is None or age > MIN_FRAME_AGE:
             self.get_logger().warn('视频流无最新帧，抓拍失败')
             self._pub_done.publish(String(data=json.dumps(
-                {'type': 'capture', 'ok': False, 'reason': '视频流无数据'},
+                {'type': 'capture', 'ok': False, 'request_id': identifier, 'reason': '视频流无数据'},
                 ensure_ascii=False)))
             return
 
         day = time.strftime('%Y-%m-%d')
         out_dir = self._cap_dir / day
-        out_dir.mkdir(parents=True, exist_ok=True)
-        fname = f"{int(time.time())}_capture_{label}.jpg"
+        fname = f"{time.time_ns()}_{uuid.uuid4().hex}.jpg"
         path = out_dir / fname
-        cv2.imwrite(str(path), frame, [cv2.IMWRITE_JPEG_QUALITY, 92])
+        try:
+            out_dir.mkdir(parents=True, exist_ok=True)
+            if not cv2.imwrite(str(path), frame, [cv2.IMWRITE_JPEG_QUALITY, 92]):
+                raise OSError('图片写入失败')
+        except (OSError, cv2.error) as error:
+            self._pub_done.publish(String(data=json.dumps(dict(type='capture', ok=False, request_id=identifier, reason=str(error)))))
+            return
         self.get_logger().info(f'抓拍已保存: {path.name}')
-        self._reporter.post('/api/records/captures', {
-            'ts': int(time.time()), 'label': label,
-            'image': f'captures/{day}/{fname}',
-        })
-        self._pub_done.publish(String(data=json.dumps({
-            'type': 'capture', 'ok': True, 'label': label,
-            'ts': int(time.time()), 'image': f'captures/{day}/{fname}',
-        }, ensure_ascii=False)))
+        result = dict(type='capture', ok=True, capture_id=identifier, request_id=identifier,
+                      label=label, ts=time.time(), image=f'captures/{day}/{fname}')
+        self._reporter.post('/api/records/captures', result)
+        self._recent[identifier] = result
+        while len(self._recent)>50:
+            self._recent.pop(next(iter(self._recent)))
+        self._pub_done.publish(String(data=json.dumps(result, ensure_ascii=False)))
 
     # ---------------- 磁盘轮转 ----------------
     def _housekeeping(self):

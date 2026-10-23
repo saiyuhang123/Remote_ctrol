@@ -22,9 +22,18 @@
 - 全上位机视觉：YuNet 人脸抓拍、OpenVINO YOLO26n 行人检测、LPD-YuNet 车牌检测 + 字符识别，三类独立启停。
 - 网页只开关已运行时的人脸抓拍、行人、车牌检测，不启动视觉进程。
 - 云台方向/变倍按住控制，气体检测实时只读显示。
+- 网页显示底盘 BMS 电量、电压、电流和充电状态，失联后清空过期读数。
+- 云台自转与到点巡检联动：到点停转、预置位拍照，离点恢复；最后一点正常结束仅恢复原已开启的自转。
 - 地图激活时自动导出网页 PNG/meta，支持 Nav2 地图 `origin` 的任意朝向。
-- 共享本地 `robot_patrol` SQLite：网页只读；巡检摘要只记录巡检日期、人脸抓拍次数、行人次数和去重车牌。
-- 不提供网页建图/导航启动、初始位姿、任意 Nav2 目标、点位/路线编辑、周期计划或气体历史。
+- 网页地图选点或选择已有巡检点，一键到达、转云台、抓拍识别，沿用巡航执行器和 guard 联锁。
+- 任务结束自动生成巡检报告，网页查看、下载含内嵌图片的 HTML 或结构化 JSON。
+- 人脸、行人、车牌图片与坐标自动上传、去重保存和分页查询，断网后补传。
+- 网页上传音频后由机器人扬声器播放，支持停止及播放状态反馈。
+- 网页新增、编辑和保存点位与路线，固定路网路线支持预览后启动；修改由网关调用巡航服务，HTTP 后台仍只读主库。
+- 网页独立手动抓拍并保存、查询；双向对讲由网页开启，使用独立麦克风和音响。
+- 音频与接收的视觉记录单独保存。不提供网页建图/导航启动、初始位姿或周期计划。
+
+新增业务的更新、使用和数据目录见[网页巡检业务说明](web/巡检业务使用说明.md)。
 
 ## 系统结构
 
@@ -85,7 +94,7 @@ Remote_ctrol/
 
 ```bash
 cd ~/Remote_ctrol
-sudo apt install -y python3-pip python3-opencv ffmpeg v4l-utils \
+sudo apt install -y python3-pip python3-opencv ffmpeg v4l-utils libportaudio2 \
   python3-colcon-common-extensions ros-humble-nav2-msgs \
   ros-humble-tf2-ros ros-humble-navigation2 \
   ros-humble-nav2-bringup ros-humble-rviz2
@@ -95,7 +104,7 @@ sudo apt install -y python3-pip python3-opencv ffmpeg v4l-utils \
 
 ```bash
 python3 -m pip install --user fastapi "uvicorn[standard]" \
-  websockets PyYAML requests 'numpy==1.26.4' 'transforms3d==0.4.2' python-multipart
+  websockets PyYAML requests Pillow sounddevice 'numpy==1.26.4' 'transforms3d==0.4.2' python-multipart
 ```
 
 NumPy 1.26.4 需要配套 `transforms3d==0.4.2`。Ubuntu 自带的 transforms3d 0.3.1 使用已移除的 `np.float`，会让 FAST-LIO 的 ICP 节点在导入 `tf_transformations` 时退出，随后 Nav2 持续提示 `map` 坐标系不存在。导航和视觉安装脚本已固定兼容版本；已有环境修复后需重新启动导航，并重新设置初始位姿。
@@ -118,11 +127,13 @@ bash scripts/install_navigation_deps.sh
 bash scripts/build_navigation.sh
 source /opt/ros/humble/setup.bash
 
-# 抓拍、识别、音频按需另行构建。
+# 构建网页巡检、识别服务、音频及所需消息接口。
+bash scripts/build_web_patrol.sh
+# 首次使用独立视频抓拍或上位机检测时，另行构建这两个节点。
 cd ros2_ws
-colcon build --symlink-install --packages-select \
-  capture_server detector_node audio_player
-source install/setup.bash
+colcon build --symlink-install --packages-select capture_server detector_node
+cd ..
+source ros2_ws/install/setup.bash
 ```
 
 如果使用了新的终端，需要重新加载环境：
@@ -141,7 +152,7 @@ cd ~/Remote_ctrol
 bash scripts/start_robot_monitor.sh
 ```
 
-默认不开视频、识别或音频。接入实际 UVC 摄像头后，可按需开启：
+默认开启音频播放器，视频与识别按需开启；已有独立播放器时可设置 `ENABLE_AUDIO=0`。接入实际 UVC 摄像头后：
 
 ```bash
 ENABLE_VIDEO=1 ENABLE_DETECTOR=1 bash scripts/start_robot_monitor.sh
@@ -222,24 +233,28 @@ DEV=/dev/video4 SIZE=640x480 FPS=30 \
 ### 监控台 `monitor.html`
 
 - 二维地图、雷达、机器人位置/朝向/速度、Nav2 目标数量和巡航任务状态。
-- 全局/局部路径只读显示；不再提供初始位姿或任意 Nav2 目标点选。
+- 全局/局部路径显示；支持地图选点与已有点位的一键到达巡检，由巡航执行器统一授权。
+- 上传音频、一键机器人播报、停止及播放状态。
 - 单网页控制权、虚拟摇杆、W/S/A/D、急停和 1 秒控制心跳超时。网页急停会触发本地联锁并释放网页控制权，解除急停必须在现场/本地桌面确认安全后操作。
 - 实际摄像头视频按需开启/关闭。
 - 视觉识别开关：人脸抓拍、行人检测、车牌检测；只控制本地已启动节点。
 - 云台方向/变倍按住控制、停止、位置读取和自动巡航锁定状态。
 - 气体实时数值、单位、原始寄存器、设备报警、连接和新鲜度；不写数据库。
+- 电池电量、电压、电流、充电状态及反馈新鲜度；默认订阅 `/battery_status`，超过 5 秒清空旧读数。
 
 ### 巡检任务 `tasks.html`
 
 - 显示当前活跃地图、地图版本一致性、有效返航点和本地已有路线。
-- 只允许选择既有路线并立即执行，可设置圈数，支持暂停/继续/取消。
+- 点位和路线可新增、编辑、删除；路线支持点序调整和停留时间设置，保存时检查版本冲突。
+- 自由路线可立即执行；固定路网路线先预览，再携带计划摘要启动。可设置圈数，支持暂停/继续/取消。
 - 支持一键返回当前地图待命点；如果路线正在执行，会先取消路线、等待停车再返航。
-- 不能编辑点位/路线、切换地图、创建定时计划或设置初始位姿。
+- 不支持切换地图、创建定时计划或设置初始位姿。
 - 路线地图/路线版本不一致时由网页和 `robot_patrol` 双重拒绝。
 
 ### 巡检记录 `records.html`
 
-- 只显示巡检日期、关联路线/运行、人脸抓拍次数、行人次数和去重车牌及出现次数。
+- 显示巡检摘要、每次任务自动报告、到点识别结果、人脸/行人/车牌完整图片与坐标，支持筛选和分页。
+- 报告提供 HTML / JSON 下载，HTML 内嵌图片，可离线打开或打印保存 PDF。
 - 不记录气体、云台、控制权、断网、视觉服务错误或任务状态事件日志。
 - 旧网页 `data/robot.db` 和测试数据不再使用，不做迁移。
 
@@ -397,9 +412,13 @@ ros2 launch chassis_nav2 cartographer_2d_localization.launch.py enable_control:=
 - `GET /api/local/maps/{map_id}/routes`：指定地图的本地只读路线。
 - `GET /api/local/maps/{map_id}/home`：指定地图的有效待命点。
 - `GET /api/inspection/records`：巡检摘要。
+- `GET /api/inspection/reports`、`GET /api/inspection/reports/{run_id}`：报告列表和详情，`/download?format=html|json` 下载。
+- `GET /api/inspection/results`：到点抓拍识别，`/{result_id}/image` 读取图片。
+- `POST /api/records/detections`：幂等接收视觉事件及图片；`GET /api/vision/events`、`GET /api/vision/media/{event_id}` 查询。
+- `GET/POST /api/audio/files`：已上传音频和上传；实际播放、停止通过有控制权的 WebSocket 命令执行。
 - `GET /api/map/meta`：网页地图几何和版本，禁止缓存。
 
-FastAPI 不挂载点位/路线/计划编辑、运动控制、初始位姿或识别记录写入接口。业务数据库由 `patrol_node` 和 `inspection_recorder` 写入，后端以 SQLite `mode=ro` 打开。旧 `data/robot.db` 不再使用。
+FastAPI 不直接执行运动控制或编辑点位/路线/计划。巡航主库由 `patrol_node` 和 `inspection_recorder` 写入，后端以 SQLite `mode=ro` 打开；后端只写独立的上传音频和视觉记录目录。旧 `data/robot.db` 不再使用。
 
 完整请求参数和响应结构可以在 `/docs` 查看。
 
@@ -413,6 +432,8 @@ $HOME/.local/share/robot_patrol/patrol.sqlite3   # 默认主库，可由 ROBOT_P
 ~/Remote_ctrol/web/maps/meta.json                # map_id/revision/origin/sha256
 ~/Remote_ctrol/data/vision/events.sqlite3        # 视觉模块内部媒体/事件索引
 ~/Remote_ctrol/data/vision/media/                # 视觉事件图片
+~/Remote_ctrol/data/web_records/                 # 后台接收的视觉事件和图片
+~/Remote_ctrol/data/audio/                       # 网页上传音频，供机器人播放器读取
 ~/Remote_ctrol/captures/hk_faces/                # 旧海康原生人脸文件（当前默认不补扫）
 ```
 
@@ -442,10 +463,10 @@ video:
 
 ## 当前已知限制
 
-1. 网页 MVP 只支持立即执行本地已有路线和一键返回待命点；不提供定时/周期计划。实车到点停稳、返航和控制权接管时序仍需最终验收。
+1. 网页支持点位/路线维护、固定路线预览执行、一键到达巡检及返航，定时/周期计划尚未提供。新增抓拍、对讲和任务流程仍需现场验收。
 2. JD03 Twist/Ecu 桥、转向符号和速度反馈已实车核对，轮速里程计已标定（`speed_scale: 0.29`）；最大控制速度 0.5 m/s。
 3. 已接入单网页控制权、本地桌面优先、心跳超时和断网停车；厂家手持遥控的权限逻辑仍需实车确认。
-4. 电池反馈尚未接入，页面显示“未接入”和空值。
+4. Qt 和网页已接入 JD03 `/battery_status`；没有有效底盘反馈时显示等待/过期和空值，实际电量与充电状态需现场核对。
 5. 统一使用 `base_link`；外参、轴距、转角与 footprint 已确认（`hardware.yaml` 各段 `confirmed: true`）。
 6. 地图在本地激活时自动导出网页 PNG/meta，支持非零 `origin_yaw`。地图版本不一致时网页任务页禁止执行。说明见 [地图说明](web/maps/README.md)。
 7. 人脸/行人/车牌均在上位机 CPU 推理，性能取决于处理器、视频分辨率和限帧配置；人脸只检测并保存小图，不做身份判断。

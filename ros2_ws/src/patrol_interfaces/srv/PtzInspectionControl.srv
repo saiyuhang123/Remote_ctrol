@@ -1,0 +1,14 @@
+# Internal lease for point inspections. enabled remains the operator's intent.
+uint8 ACQUIRE=1
+uint8 RENEW=2
+uint8 RELEASE=3
+uint8 command
+string owner_id
+float64 lease_seconds
+# RELEASE: true preserves enabled; false disables sweep without a home move.
+bool resume
+---
+bool success
+string message
+bool stopped
+bool sweep_enabled
