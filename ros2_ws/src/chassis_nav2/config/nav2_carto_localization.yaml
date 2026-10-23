@@ -8,7 +8,7 @@ bt_navigator:
     odom_topic: /odom
     bt_loop_duration: 100
     always_reload_bt_xml: true
-    default_server_timeout: 20
+    default_server_timeout: 1000  # 大地图清图/动作确认允许 1 秒，避免 20ms 误超时
     wait_for_service_timeout: 1000
     default_nav_to_pose_bt_xml: '@CHASSIS_NAV2_SHARE@/config/bt/navigate_to_pose_w_replanning_and_recovery.xml'
     default_nav_through_poses_bt_xml: '@CHASSIS_NAV2_SHARE@/config/bt/navigate_through_poses_w_replanning_and_recovery.xml'
@@ -225,6 +225,10 @@ planner_server:
       allow_unknown: false
       minimum_turning_radius: 0.85  # 规划保留转向余量；控制器仍可用实测 0.69m 纠偏
       motion_model_for_search: REEDS_SHEPP
+      # 三点路线长距离返程：保留倒车但减少为规避倒车代价而插入的多次换向。
+      reverse_penalty: 1.05
+      # 应 >= 规划半径的 4~5 倍；0.85m 半径不能沿用默认 3m 连接长度。
+      analytic_expansion_max_length: 5.0
       angle_quantization_bins: 72
       # 搜索预算放宽到 1000 万次，由 max_planning_time 5s 兜底最坏耗时。
       max_iterations: 10000000

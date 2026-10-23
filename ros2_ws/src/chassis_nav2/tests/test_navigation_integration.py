@@ -641,7 +641,10 @@ class IntegrationTests(unittest.TestCase):
                 radius = params['planner_server']['ros__parameters']['GridBased']['minimum_turning_radius']
                 measured = hw['chassis'].get('min_turning_radius')
                 expected = float(measured) if measured is not None else .5/math.tan(math.radians(27.))
-                self.assertAlmostEqual(radius, expected)
+                self.assertAlmostEqual(radius, hw['chassis'].get('navigation_turning_radius', expected*1.23))
+                self.assertGreaterEqual(radius, expected)
+                physical=params['controller_server']['ros__parameters']['FollowPath']['minimum_turning_radius']
+                self.assertAlmostEqual(physical, expected)
                 costmap = params['local_costmap']['local_costmap']['ros__parameters']
                 self.assertEqual(__import__('json').loads(costmap['footprint']), hw['robot_geometry']['footprint'])
                 self.assertEqual(costmap['robot_base_frame'], 'base_link')
