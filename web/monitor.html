@@ -72,7 +72,7 @@
       <h2><span class="section-title"><span class="icon" data-icon="video"></span>实时视频</span><button class="btn gray" id="btnVideo">开启视频</button></h2>
       <div id="videoBox">
         <iframe id="video" title="相机实时视频" allow="autoplay; fullscreen" allowfullscreen></iframe>
-        <div id="videoOff"><span class="icon" data-icon="video"></span><span>视频未开启</span></div>
+        <div id="videoOff"><span class="icon" data-icon="video"></span><span id="videoMessage" role="status">视频未开启</span></div>
       </div>
       <div class="control-buttons"><button class="btn gray" id="manualCapture" disabled>立即抓拍并保存</button><a class="btn gray" href="/records.html">抓拍记录</a></div>
       <p id="captureMessage" class="form-hint" role="status">等待抓拍节点就绪</p>
@@ -579,14 +579,44 @@ function applyKeys() {
 // ------------------------------ video ------------------------------
 const videoIframe = $('video');
 let videoOn = false;
-function openVideo() {
-  videoIframe.src = `${location.protocol}//${host}:8889/cam/`;
-  videoIframe.style.display = 'block'; $('videoOff').style.display = 'none';
+let videoGeneration = 0;
+async function openVideo() {
+  const attempt = ++videoGeneration;
   $('btnVideo').textContent = '关闭视频'; videoOn = true;
+  $('videoMessage').textContent = '正在连接视频…';
+  try {
+    for (let retry=0; retry<20; retry++) {
+      const controller = new AbortController(), timer = setTimeout(()=>controller.abort(), 3000);
+      let status;
+      try {
+        const response = await fetch('/api/video/status', {cache:'no-store', signal:controller.signal});
+        if (!response.ok) throw new Error('视频状态读取失败，请检查网页后端');
+        status = await response.json();
+      } finally { clearTimeout(timer); }
+      if (attempt !== videoGeneration) return;
+      if (!status.available) throw new Error(status.message || '视频服务未启动');
+      if (status.ready !== false) {
+        videoIframe.src = `${location.protocol}//${host}:8889/cam/?muted=true`;
+        videoIframe.style.display = 'block'; $('videoOff').style.display = 'none';
+        return;
+      }
+      $('videoMessage').textContent = status.message || '正在等待相机画面…';
+      if (retry===19) throw new Error(status.message || '相机暂时没有画面，请稍后重试');
+      await new Promise(resolve=>setTimeout(resolve, 500));
+      if (attempt !== videoGeneration) return;
+    }
+  } catch (error) {
+    if (attempt !== videoGeneration) return;
+    videoOn = false;
+    $('btnVideo').textContent = '重试视频';
+    $('videoMessage').textContent = error.name==='AbortError' ? '视频服务连接超时，请稍后重试' : error.message;
+  }
 }
 function closeVideo() {
+  videoGeneration++;
   videoIframe.src = 'about:blank'; videoIframe.style.display = 'none';
   $('videoOff').style.display = 'flex'; $('btnVideo').textContent = '开启视频';
+  $('videoMessage').textContent = '视频未开启';
   videoOn = false;
 }
 $('btnVideo').onclick = () => videoOn ? closeVideo() : openVideo();

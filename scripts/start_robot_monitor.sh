@@ -1,9 +1,17 @@
 #!/usr/bin/env bash
-# 实机监控入口：网页后端、遥控网关与音频；视频和识别按需开启。
+# 实机监控入口：网页后端、遥控网关、音频和网页视频；识别按需开启。
 # 底盘、雷达、TF、定位/导航由 chassis_nav2 在另一终端启动。
 set -e
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-ENABLE_VIDEO="${ENABLE_VIDEO:-0}"
+ENABLE_VIDEO="${ENABLE_VIDEO:-auto}"
+if [ "$ENABLE_VIDEO" = auto ]; then
+  if [ -x "$ROOT/bin/mediamtx" ]; then
+    ENABLE_VIDEO=1
+  else
+    ENABLE_VIDEO=0
+    echo "未找到 MediaMTX，网页视频暂不启动；其他网页功能继续启动。" >&2
+  fi
+fi
 ENABLE_DETECTOR="${ENABLE_DETECTOR:-0}"
 ENABLE_AUDIO="${ENABLE_AUDIO:-1}"
 ENABLE_CAPTURE="${ENABLE_CAPTURE:-$ENABLE_VIDEO}"
@@ -58,15 +66,7 @@ start python3 -m uvicorn backend.main:app --host 0.0.0.0 --port 8888 --app-dir "
 start ros2 run robot_gateway gateway --ros-args -p use_sim_time:=false
 
 if [ "$ENABLE_VIDEO" = 1 ]; then
-  start "$ROOT/bin/mediamtx" "$ROOT/deploy/mediamtx.yml"
-  sleep 1
-  if [ -n "${CAMERA_RTSP:-}" ]; then
-    # 海康等网络摄像头：转发实际 RTSP 视频到本机 MediaMTX。
-    start ffmpeg -hide_banner -loglevel warning -rtsp_transport tcp -i "$CAMERA_RTSP" \
-      -map 0:v:0 -c:v copy -an -f rtsp -rtsp_transport tcp rtsp://127.0.0.1:8554/cam
-  else
-    start bash "$ROOT/scripts/push_camera.sh"
-  fi
+  start python3 "$ROOT/scripts/start_web_video.py"
 fi
 if [ "$ENABLE_CAPTURE" = 1 ]; then
   start ros2 run capture_server capture_server --ros-args \

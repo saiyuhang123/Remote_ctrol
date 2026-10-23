@@ -4,7 +4,9 @@
 # 注意：默认配置会占用 8888(HLS)，与后台页面端口冲突，故显式关闭
 logLevel: info
 rtspAddress: :8554
+rtspTransports: [tcp]
 webrtcAddress: :8889
+webrtcLocalTCPAddress: :8189
 hls: no
 rtmp: no
 srt: no

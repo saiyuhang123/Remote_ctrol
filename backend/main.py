@@ -12,6 +12,7 @@ from .api_local import router as local_router
 from .api_inspection import router as inspection_router
 from .api_audio import router as audio_router
 from .api_captures import router as capture_router
+from .api_video import router as video_router
 
 WEB_DIR = Path(__file__).resolve().parents[1] / "web"
 
@@ -20,6 +21,7 @@ app.include_router(local_router)
 app.include_router(inspection_router)
 app.include_router(audio_router)
 app.include_router(capture_router)
+app.include_router(video_router)
 # Only media/incoming events are writable here. Motion stays in the gateway;
 # patrol maps, routes, results and reports are written by the patrol executor.
 

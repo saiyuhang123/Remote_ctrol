@@ -49,6 +49,8 @@ class RobotFixture:
         self.battery_mode = 'fresh'
         self.ptz_held = False
         self.telemetry_paused = False
+        self.video_available = False
+        self.video_ready = False
         self.vision = {}
         self.audio_assets = []
         self.audio_uploads = []
@@ -76,6 +78,9 @@ class RobotFixture:
                                'map_sync_ok': True, 'home': {'x': 0, 'y': 0, 'yaw': 0},
                                'routes': robot.routes}
                     raw = json.dumps(payload).encode()
+                elif path == '/api/video/status':
+                    raw = json.dumps(dict(available=robot.video_available,ready=robot.video_ready,
+                        message='视频服务未启动' if not robot.video_available else '正在等待相机画面')).encode()
                 elif path == '/api/inspection/records':
                     raw = b'{"items": []}'
                 elif path == '/api/map/meta':
@@ -599,6 +604,33 @@ def test_inspection_hold_is_visible_and_locks_manual_ptz(web):
     robot.ptz_held = False
     view.locator('#ptzAuto').get_by_text('手动可用', exact=True).wait_for()
     view.locator('.ptz:enabled').first.wait_for()
+
+
+def test_video_missing_service_shows_actionable_message_without_error_iframe(web):
+    robot,page,_=web
+    view=open_view(robot,page,'monitor')
+    view.locator('#btnVideo').click()
+    view.locator('#videoMessage').get_by_text('视频服务未启动',exact=True).wait_for()
+    assert view.locator('#btnVideo').inner_text()=='重试视频'
+    assert view.locator('#video').get_attribute('src') in (None,'about:blank')
+
+
+def test_video_wait_can_be_canceled_and_ready_video_can_be_reopened(web):
+    robot,page,_=web
+    page.route('**://127.0.0.1:8889/**',lambda route:route.fulfill(status=200,content_type='text/html; charset=utf-8',body='<p>模拟视频</p>'))
+    robot.video_available=True
+    view=open_view(robot,page,'monitor')
+    view.locator('#btnVideo').click()
+    view.locator('#videoMessage').get_by_text('正在等待相机画面',exact=True).wait_for()
+    view.locator('#btnVideo').click()
+    robot.video_ready=True
+    page.wait_for_timeout(700)
+    assert view.locator('#video').get_attribute('src')=='about:blank'
+    assert view.locator('#btnVideo').inner_text()=='开启视频'
+    view.locator('#btnVideo').click()
+    view.frame_locator('#video').get_by_text('模拟视频',exact=True).wait_for()
+    view.locator('#btnVideo').click()
+    assert view.locator('#video').get_attribute('src')=='about:blank'
 
 
 def test_host_vision_toggles_need_no_sdk_and_remain_usable_after_model_error(web):

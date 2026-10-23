@@ -152,13 +152,13 @@ cd ~/Remote_ctrol
 bash scripts/start_robot_monitor.sh
 ```
 
-默认开启音频播放器，视频与识别按需开启；已有独立播放器时可设置 `ENABLE_AUDIO=0`。接入实际 UVC 摄像头后：
+默认开启音频播放器；安装了 `bin/mediamtx` 时自动开启网页视频和独立抓拍，缺少二进制时保留其他网页功能。视频默认复用海康相机 YAML 中的地址、通道和登录信息，统一转为无音轨的 H.264；相机断流时自动重连。已有独立播放器时可设 `ENABLE_AUDIO=0`，已有视频服务时可设 `ENABLE_VIDEO=0`。使用 UVC 摄像头并启用检测时：
 
 ```bash
-ENABLE_VIDEO=1 ENABLE_DETECTOR=1 bash scripts/start_robot_monitor.sh
+ROBOT_VIDEO_INPUT=uvc ENABLE_DETECTOR=1 bash scripts/start_robot_monitor.sh
 ```
 
-网络摄像头可通过 `CAMERA_RTSP` 传入实际 RTSP 地址；流转发要求摄像头使用浏览器支持的 H.264 编码。如果视频流由其他进程提供，可保持 `ENABLE_VIDEO=0`，设置 `VIDEO_SOURCE`、`ENABLE_CAPTURE=1`、`ENABLE_DETECTOR=1` 使用该实际视频流。
+相机配置可通过 `ROBOT_CAMERA_CONFIG` 指定其他 YAML；`CAMERA_RTSP` 可覆盖实际视频源，`ROBOT_VIDEO_STREAM` 可选择海康码流（1 主码流、2 子码流）。相机 H.265 会转码为 H.264，无需修改相机设备编码。如果视频流由其他进程提供，可设 `ENABLE_VIDEO=0`，通过 `VIDEO_SOURCE`、`ENABLE_CAPTURE=1`、`ENABLE_DETECTOR=1` 使用该视频流。网页开启前检查 `/api/video/status`，服务未启动或没有相机画面时显示明确提示。
 
 `scripts/start_m1.sh` 保留为真实 UVC 摄像头 + 静态遥控页入口，没有业务 API。摄像头失败会报错；两个启动入口均已去掉测试视频回退。
 
@@ -197,6 +197,7 @@ deploy/mediamtx.yml
 
 - RTSP 推流入口：`8554`
 - WebRTC 播放入口：`8889`
+- WebRTC 媒体传输：`8189`（UDP / TCP）；MediaMTX 状态 API 仅监听本机 `127.0.0.1:9997`。
 - 流名称：`cam`
 
 浏览器实际播放地址为 `http://<主机IP>:8889/cam/`，默认视频源为 `rtsp://127.0.0.1:8554/cam`。
