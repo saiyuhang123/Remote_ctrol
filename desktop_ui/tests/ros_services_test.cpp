@@ -54,6 +54,8 @@ private slots:
     QVERIFY(!args.contains("enable_patrol:=true"));
     args = ProcessManager::launchArguments(config(), amcl, "/tmp/slam_map", true, false, false, "lio", {}, true);
     QVERIFY(args.contains("enable_patrol:=true"));
+    QVERIFY(args.contains("enable_recorded_routes:=false"));
+    QVERIFY(!args.contains("enable_recorded_routes:=true"));
     QVERIFY(!args.contains("map_file:=/tmp/slam_map"));
     args = ProcessManager::launchArguments(config(), desktopProfiles().at(4), "/tmp/carto", true, false, false, "lio");
     QVERIFY(args.contains("map_file:=/tmp/carto"));
@@ -69,6 +71,8 @@ private slots:
         config(), desktopProfiles().at(0), "/tmp/fastlio/source", true, false, false,
         "wheel_imu", edited, true);
     QVERIFY(fastlioPatrol.contains("enable_patrol:=true"));
+    QVERIFY(fastlioPatrol.contains("enable_recorded_routes:=false"));
+    QVERIFY(!fastlioPatrol.contains("enable_recorded_routes:=true"));
     QVERIFY(fastlioNavigation.contains("map:=" + edited));
     QVERIFY(!fastlioNavigation.contains("map:=/tmp/fastlio/source.yaml"));
 
@@ -80,6 +84,8 @@ private slots:
         config(), desktopProfiles().at(4), "/tmp/cartographer/source", true, false, false,
         "lio", edited, true);
     QVERIFY(cartographerPatrol.contains("enable_patrol:=true"));
+    QVERIFY(cartographerPatrol.contains("enable_recorded_routes:=false"));
+    QVERIFY(!cartographerPatrol.contains("enable_recorded_routes:=true"));
     QVERIFY(cartographerNavigation.contains("map:=" + edited));
 
     const auto amclOverride = ProcessManager::launchArguments(

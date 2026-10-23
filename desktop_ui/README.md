@@ -265,7 +265,7 @@ Qt → 本地 ROS2 /cmd_vel_teleop → twist_mux → 原底盘控制链
 
 ## 本地启动会话与地图保存
 
-默认不启动任何机器人进程。需要由界面启动时，勾选“由界面启动与管理所选流程”，设置不带扩展名的地图绝对路径，并按实际需要选择雷达/IMU、底盘驱动和控制桥。底盘与控制桥默认关闭；FAST-LIO 建图固定使用 LIO 里程计，导航可选择原入口支持的里程计源。需要本地多点巡航或固定路线时，勾选“启用路线巡航联锁”；该选项会使用带 `/patrol/stop_lock` 的 mux 配置，并在同一个 launch 中启动 `patrol_node` 与 `patrol_guard`。巡航联锁会话只允许巡航执行器发起的 Nav2 目标，界面会禁用单点导航按钮；手动驾驶仍可用。普通单点导航和手动驾驶默认不依赖巡航服务。连接外部已启动的后端时，界面会根据 `/patrol/stop_lock` 和 `/patrol/executor_heartbeat` 的实际消息自动识别巡航联锁模式，同样禁用单点 Nav2 目标。如果已从命令行单独启动 `robot_patrol`/`patrol_guard`，界面启动会话会检测这些节点及 `/patrol/stop_lock`、`/patrol/executor_heartbeat` 发布者并拒绝重复启动；此时应使用连接模式或先停止旧巡航服务。
+默认不启动任何机器人进程。需要由界面启动时，勾选“由界面启动与管理所选流程”，设置不带扩展名的地图绝对路径，并按实际需要选择雷达/IMU、底盘驱动和控制桥。底盘与控制桥默认关闭；FAST-LIO 建图固定使用 LIO 里程计，导航可选择原入口支持的里程计源。需要本地多点巡航时，勾选“启用路线巡航联锁”；该选项会使用带 `/patrol/stop_lock` 的 mux 配置，并在同一个 launch 中启动 `patrol_node` 与 `patrol_guard`。巡航联锁会话只允许巡航执行器发起的 Nav2 目标，界面会禁用单点导航按钮；手动驾驶仍可用。普通单点导航和手动驾驶默认不依赖巡航服务。连接外部已启动的后端时，界面会根据 `/patrol/stop_lock` 和 `/patrol/executor_heartbeat` 的实际消息自动识别巡航联锁模式，同样禁用单点 Nav2 目标。如果已从命令行单独启动 `robot_patrol`/`patrol_guard`，界面启动会话会检测这些节点及 `/patrol/stop_lock`、`/patrol/executor_heartbeat` 发布者并拒绝重复启动；此时应使用连接模式或先停止旧巡航服务。
 
 启动前检测已有机器人管线；存在时拒绝重复启动，使用连接模式，或从原启动入口结束旧会话。界面仅管理自身启动的进程组，停止不会读取旧 ROS1 的 PID 文件或全局杀进程。关闭前需先结束本界面启动的会话；地图保存期间不能停止会话。
 
@@ -340,7 +340,7 @@ python3 desktop_ui/scripts/make_map_editor_demo_map.py /tmp/map_editor_demo
 - 记录：查询任务终态、完成圈数/步骤和错误信息。数据默认写入 `~/.local/share/robot_patrol/patrol.sqlite3`。
 - 离线模式仍可打开页面编辑数据，但开始/暂停/继续/取消执行按钮禁用。
 
-**当前边界：**独立 `patrol_guard`、执行器/操作端心跳、`twist_mux` 死锁联动和主窗口急停/手动接管/取消导航与巡航任务的协调已接入。导航会话默认使用普通 mux；只有勾选“启用路线巡航联锁”时会传入 `enable_patrol:=true enable_recorded_routes:=true`，并由底盘 launch 同时启动 patrol_node/patrol_guard。guard 校验 `/diagnostics` 中的 patrol mux 锁，并在复位前直接向 Nav2 发送 cancel-all、核对 action status，新执行器 IDLE 不能代替旧目标终止证明。手动接管和解除急停都要求新鲜里程计并连续停稳；关闭窗口会等待巡航取消和停车确认。录制路网已增加 RViz MarkerArray 预览、路网 JSON 导入导出及草稿处理；地图拖拽取点、整库业务导入导出和自主任务 CLAIM 租约仍未实现；本轮只做隔离 ROS 验证，**不能把当前版本当作已完成实车验收的版本**，实车 P6 仍需现场验收。
+**当前边界：**独立 `patrol_guard`、执行器/操作端心跳、`twist_mux` 死锁联动和主窗口急停/手动接管/取消导航与巡航任务的协调已接入。导航会话默认使用普通 mux；只有勾选“启用路线巡航联锁”时会传入 `enable_patrol:=true enable_recorded_routes:=false`，并由底盘 launch 同时启动 patrol_node/patrol_guard。普通巡航只加载 GridBased，不再附带 RecordedEntry、RecordedDetour 及录制路网控制器；录制路网通过命令行独立启用。guard 校验 `/diagnostics` 中的 patrol mux 锁，并在复位前直接向 Nav2 发送 cancel-all、核对 action status，新执行器 IDLE 不能代替旧目标终止证明。手动接管和解除急停都要求新鲜里程计并连续停稳；关闭窗口会等待巡航取消和停车确认。录制路网已增加 RViz MarkerArray 预览、路网 JSON 导入导出及草稿处理；地图拖拽取点、整库业务导入导出和自主任务 CLAIM 租约仍未实现；本轮只做隔离 ROS 验证，**不能把当前版本当作已完成实车验收的版本**，实车 P6 仍需现场验收。
 
 新增 ROS2 包需要先构建：
 
