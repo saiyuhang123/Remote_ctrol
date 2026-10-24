@@ -1,0 +1,33 @@
+fixed_route:
+  ros__parameters:
+    map_frame: map
+    odom_frame: odom
+    base_frame: base_link
+    pose_topic: /current_pose
+    odom_topic: /odom
+    scan_topic: /scan
+    cmd_topic: /cmd_vel_auto
+    max_speed: 0.3
+    max_reverse_speed: 0.15
+    allow_reverse: false
+    acceleration: 0.25
+    deceleration: 0.4
+    min_lookahead: 0.45
+    max_lookahead: 0.8
+    lookahead_time: 1.0
+    goal_tolerance: 0.10
+    goal_yaw_tolerance: 0.35
+    start_tolerance: 0.3
+    start_yaw_tolerance: 0.5
+    max_cross_track: 0.45
+    max_segment_length: 1.0
+    pose_timeout: 0.5
+    scan_timeout: 0.5
+    health_timeout: 0.5
+    obstacle_margin: 0.12
+    obstacle_clear_time: 0.5
+    stop_settle_time: 0.3
+    record_spacing: 0.05
+    record_angle: 0.05
+    legacy_spacing: 0.08  # 仅旧 7 列无速度 CSV 去抖；新 8 列保留短距离换向
+    # footprint 和 min_turning_radius 在 launch 中从 hardware.yaml 传入。

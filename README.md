@@ -10,6 +10,8 @@
 
 轮速里程计可与 FAST-LIO 同时记录，并通过 `odom_source:=lio/wheel/wheel_imu` 选择 Nav2 的主里程计，见 [底盘里程计说明](底盘里程计说明.md)。
 
+从旧 `catkin_ws` 移植的 **NDT 融合定位 + CSV 录点固定导航** 使用独立入口 `ndt_localization.launch.py` / `fixed_route_navigation.launch.py`，适配本项目 JD03、速腾雷达、维特 IMU 和轮速/IMU EKF，不涉及建图修改。构建、录点和启动命令见 [NDT 融合定位与 CSV 固定导航移植说明](docs/NDT融合定位与CSV固定导航移植说明.md)。
+
 ## 功能概览
 
 网页端没有账号/密码认证，只适用于受控工场内网或隔离 VPN。禁止将 8888/8765/8889 直接映射到公网；急停仍应在现场安全回路中保持独立有效。
@@ -265,13 +267,14 @@ DEV=/dev/video4 SIZE=640x480 FPS=30 \
 
 ## 实机建图与导航（3D / 2D）
 
-本车有三套**互斥**的建图定位方案，运行时三选一（都会抢 `map->odom` TF 和 `/scan`，不可同时启动）：
+本车支持下列**互斥**的定位导航方案，运行时选择一种（共用 `map->odom` TF 和 `/scan`，不可同时启动）：
 
 | 方案 | 定位原理 | 地图目录 | 建图 launch | 定位+导航 launch |
 | --- | --- | --- | --- | --- |
 | 3D：FAST-LIO | FAST-LIO + ICP 全局定位 | `maps/fastlio/`（map.pcd + map.pgm/yaml） | `slam.launch.py` | `navigation.launch.py odom_source:=wheel_imu enable_control:=true` |
 | 2D：SLAM Toolbox + AMCL | AMCL 栅格地图定位 | `maps/slam_toolbox/`（map.pgm/yaml） | `slam_2d_mapping.launch.py` | `amcl_localization.launch.py` |
 | 2D：cartographer | 子图匹配纯定位 | `maps/cartographer/`（map.pbstream + map.pgm/yaml） | `cartographer_2d_mapping.launch.py` | `cartographer_2d_localization.launch.py` |
+| 3D：旧系统 NDT + CSV 固定路线 | 轮速/IMU 预测 + NDT 地图校正 | 指定的 PCD 文件或目录；默认 `maps/fastlio/map.pcd` | 本次不移植建图，使用已有 PCD | `fixed_route_navigation.launch.py enable_control:=true`；[录点与执行说明](docs/NDT融合定位与CSV固定导航移植说明.md) |
 
 ### 公共前提
 

@@ -1,0 +1,106 @@
+Panels:
+  - Class: rviz_common/Displays
+    Name: Displays
+  - Class: rviz_common/Tool Properties
+    Name: Tool Properties
+Visualization Manager:
+  Class: ''
+  Enabled: true
+  Global Options:
+    Fixed Frame: map
+    Background Color: 35; 38; 42
+    Frame Rate: 20
+  Displays:
+    - Class: rviz_default_plugins/Grid
+      Name: Grid
+      Enabled: true
+      Cell Size: 1
+      Plane Cell Count: 100
+    - Class: rviz_default_plugins/PointCloud2
+      Name: NDT map
+      Enabled: true
+      Topic:
+        Value: /map_cloud
+        Reliability Policy: Reliable
+        Durability Policy: Transient Local
+        Depth: 1
+      Size (m): 0.04
+      Style: Points
+      Color Transformer: AxisColor
+    - Class: rviz_default_plugins/PointCloud2
+      Name: NDT matched scan
+      Enabled: true
+      Topic:
+        Value: /ndt_cloud
+        Reliability Policy: Reliable
+        Durability Policy: Volatile
+      Size (m): 0.05
+      Style: Points
+      Color Transformer: FlatColor
+      Color: 0; 255; 128
+    - Class: rviz_default_plugins/LaserScan
+      Name: Scan
+      Enabled: true
+      Topic:
+        Value: /scan
+        Reliability Policy: Best Effort
+        Durability Policy: Volatile
+      Size (m): 0.04
+      Style: Points
+      Color: 255; 60; 60
+    - Class: rviz_default_plugins/Map
+      Name: Optional grid map
+      Enabled: true
+      Topic:
+        Value: /map
+        Reliability Policy: Reliable
+        Durability Policy: Transient Local
+      Alpha: 0.4
+    - Class: rviz_default_plugins/Path
+      Name: Recorded route
+      Enabled: true
+      Topic:
+        Value: /fixed_route/path
+        Reliability Policy: Reliable
+        Durability Policy: Transient Local
+      Line Style: Lines
+      Line Width: 0.04
+      Color: 255; 200; 40
+    - Class: rviz_default_plugins/Pose
+      Name: Current pose
+      Enabled: true
+      Topic:
+        Value: /current_pose
+        Reliability Policy: Reliable
+        Durability Policy: Volatile
+      Shape: Arrow
+    - Class: rviz_default_plugins/RobotModel
+      Name: Robot
+      Enabled: true
+      Description Source: Topic
+      Description Topic:
+        Value: /robot_description
+        Durability Policy: Transient Local
+        Reliability Policy: Reliable
+    - Class: rviz_default_plugins/TF
+      Name: TF
+      Enabled: false
+  Tools:
+    - Class: rviz_default_plugins/Interact
+    - Class: rviz_default_plugins/MoveCamera
+    - Class: rviz_default_plugins/Select
+    - Class: rviz_default_plugins/SetInitialPose
+      Topic:
+        Value: /initialpose
+        Reliability Policy: Reliable
+        Durability Policy: Volatile
+  Views:
+    Current:
+      Class: rviz_default_plugins/Orbit
+      Distance: 30
+      Pitch: 1.2
+      Yaw: 0
+      Target Frame: base_link
+Window Geometry:
+  Width: 1400
+  Height: 900
