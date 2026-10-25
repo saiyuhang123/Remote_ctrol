@@ -1,0 +1,18 @@
+# RS485 head patrol. Start requests renew a 500 ms lease.
+# command: 23 pan left, 24 pan right; stop stops both head axes.
+# Optical zoom is never read or changed by this service.
+uint8 command
+uint8 pan_speed
+bool tilt_enabled
+float32 tilt_min
+float32 tilt_max
+uint8 tilt_speed
+bool stop
+---
+bool success
+string message
+bool moving
+bool positioning
+bool pose_valid
+float32 pan
+float32 tilt

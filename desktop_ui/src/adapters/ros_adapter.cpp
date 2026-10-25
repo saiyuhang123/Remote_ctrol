@@ -430,7 +430,7 @@ void RosAdapter::captureCamera() {
 }
 void RosAdapter::setPtz(double pan, double tilt, double zoom) {
 #ifdef DESKTOP_HAS_HK_CAMERA
-  if (!std::isfinite(pan) || !std::isfinite(tilt) || !std::isfinite(zoom) || pan < 0 || pan > 360 || tilt < 0 || tilt > 360 || zoom < 1 || zoom > 999.9) {
+  if (!std::isfinite(pan) || !std::isfinite(tilt) || !std::isfinite(zoom) || pan < 0 || pan > 360 || tilt < -180 || tilt > 360 || zoom < 1 || zoom > 999.9) {
     emit requestFinished("ptz", false, "云台角度或变倍超出范围"); return;
   }
   auto req = std::make_shared<hk_camera::srv::SetPTZPose::Request>(); req->pan = pan; req->tilt = tilt; req->zoom = zoom;
@@ -469,6 +469,21 @@ bool RosAdapter::ptzPresetAvailable() const {
 bool RosAdapter::cameraAvailable() const {
   const auto client = impl_->clients.at("/hk_camera/login");
   return client->service_is_ready() && impl_->clients.at("/hk_camera/start_stream")->service_is_ready();
+}
+bool RosAdapter::ptzAvailable() const {
+#ifdef DESKTOP_HAS_HK_CAMERA
+  return impl_->clients.at("/hk_camera/control_ptz")->service_is_ready() &&
+      impl_->clients.at("/hk_camera/get_ptz_pose")->service_is_ready() &&
+      impl_->clients.at("/hk_camera/set_ptz_pose")->service_is_ready();
+#else
+  return false;
+#endif
+}
+bool RosAdapter::ptzNodePresent() const {
+  if (ptzAvailable()) return true;
+  for (const auto &name : impl_->node->get_node_names())
+    if (QString::fromStdString(name).section('/', -1) == "ptz_pelco") return true;
+  return false;
 }
 bool RosAdapter::cameraNodePresent() const {
   if (cameraAvailable() || impl_->node->count_publishers(impl_->config.imageTopic.toStdString()) > 0) return true;

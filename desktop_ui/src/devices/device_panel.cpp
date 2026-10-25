@@ -21,9 +21,9 @@
 struct DevicePanel::View : QObject {
   using QObject::QObject;
   QLineEdit *port;
-  QSpinBox *address, *baudrate, *speed;
-  QDoubleSpinBox *interval, *seconds, *minimum, *maximum;
-  QCheckBox *bounds;
+  QSpinBox *address, *baudrate, *speed, *tiltSpeed;
+  QDoubleSpinBox *interval, *seconds, *minimum, *maximum, *tiltMinimum, *tiltMaximum;
+  QCheckBox *bounds, *tiltSweep;
   QPushButton *gasStart, *gasStop, *ptzStart, *ptzStop;
   QLabel *gasStatus, *gasValue, *gasDetails, *ptzStatus;
   QLabel *gasSummary, *gasBadge, *gasAlarm, *gasEstimate, *gasFreshness;
@@ -186,7 +186,7 @@ DevicePanel::DevicePanel(DeviceClient *client, bool offline, QWidget *parent)
   auto *ptz = deviceui::card(this);
   auto *p = new QVBoxLayout(ptz);
   p->setContentsMargins(16, 14, 16, 14); p->setSpacing(10);
-  auto *ptzHeading = deviceui::label("往返巡航", ptz);
+  auto *ptzHeading = deviceui::label("485 云台往返巡航", ptz);
   ptzHeading->setProperty("deviceHeading", true); p->addWidget(ptzHeading);
   v.ptzActivity = deviceui::label("状态未知", ptz);
   v.ptzActivity->setObjectName("ptzActivity"); p->addWidget(v.ptzActivity);
@@ -215,7 +215,24 @@ DevicePanel::DevicePanel(DeviceClient *client, bool offline, QWidget *parent)
   angles->addRow("最小水平角", v.minimum); angles->addRow("最大水平角", v.maximum);
   parametersLayout->addWidget(angleFields); angleFields->hide();
   connect(v.bounds, &QCheckBox::toggled, angleFields, &QWidget::setVisible);
-  parametersLayout->addWidget(deviceui::label("角度反馈不可用时按时间换向；角度边界是换向参考，不是硬限位。", ptzParameters, true));
+  parametersLayout->addWidget(deviceui::label("水平按时间或角度边界换向；俯仰摆动需要有效角度反馈。", ptzParameters, true));
+  v.tiltSweep = new QCheckBox("同时俯仰摆动（485）", ptzParameters);
+  v.tiltSweep->setObjectName("ptzTiltSweep"); v.tiltSweep->setChecked(true);
+  parametersLayout->addWidget(v.tiltSweep);
+  auto *tiltFields = new QWidget(ptzParameters); tiltFields->setObjectName("ptzTiltFields");
+  auto *tiltForm = new QFormLayout(tiltFields); tiltForm->setContentsMargins(0, 0, 0, 0);
+  v.tiltMinimum = new QDoubleSpinBox(tiltFields); v.tiltMinimum->setObjectName("ptzTiltMinimum");
+  v.tiltMaximum = new QDoubleSpinBox(tiltFields); v.tiltMaximum->setObjectName("ptzTiltMaximum");
+  for (auto *angle : {v.tiltMinimum, v.tiltMaximum}) {
+    angle->setRange(-90, 25); angle->setDecimals(1); angle->setSuffix("°");
+  }
+  v.tiltMinimum->setValue(-9); v.tiltMaximum->setValue(15);
+  v.tiltSpeed = new QSpinBox(tiltFields); v.tiltSpeed->setObjectName("ptzTiltSpeed");
+  v.tiltSpeed->setRange(1, 7); v.tiltSpeed->setValue(1);
+  tiltForm->addRow("最低俯仰角", v.tiltMinimum); tiltForm->addRow("最高俯仰角", v.tiltMaximum);
+  tiltForm->addRow("俯仰速度档位", v.tiltSpeed); parametersLayout->addWidget(tiltFields);
+  parametersLayout->addWidget(deviceui::label("先调整至俯仰范围内，再同时旋转和摆动；俯仰角度反馈失效会停止巡航。", ptzParameters, true));
+  connect(v.tiltSweep, &QCheckBox::toggled, tiltFields, &QWidget::setVisible);
   ptzBody->addWidget(ptzParameters); ptzBody->addStretch();
   v.ptzReadiness = deviceui::label(QString(), this);
   v.ptzReadiness->setObjectName("ptzReadiness");
@@ -235,12 +252,16 @@ DevicePanel::DevicePanel(DeviceClient *client, bool offline, QWidget *parent)
   connect(v.gasStop, &QPushButton::clicked, this, [this] { view_->gasPending = false; client_->stopGas(); refresh(); });
   connect(v.ptzStart, &QPushButton::clicked, this, [this] {
     client_->startPtz(view_->speed->value(), view_->seconds->value(), view_->bounds->isChecked() ? view_->minimum->value() : -1,
-                     view_->bounds->isChecked() ? view_->maximum->value() : -1);
+                     view_->bounds->isChecked() ? view_->maximum->value() : -1,
+                     view_->tiltSweep->isChecked(), view_->tiltMinimum->value(), view_->tiltMaximum->value(), view_->tiltSpeed->value());
   });
   connect(v.ptzStop, &QPushButton::clicked, client_, &DeviceClient::stopPtz);
   connect(v.bounds, &QCheckBox::toggled, this, [this] { refresh(); });
   connect(v.minimum, QOverload<double>::of(&QDoubleSpinBox::valueChanged), this, [this] { refresh(); });
   connect(v.maximum, QOverload<double>::of(&QDoubleSpinBox::valueChanged), this, [this] { refresh(); });
+  connect(v.tiltSweep, &QCheckBox::toggled, this, [this] { refresh(); });
+  connect(v.tiltMinimum, QOverload<double>::of(&QDoubleSpinBox::valueChanged), this, [this] { refresh(); });
+  connect(v.tiltMaximum, QOverload<double>::of(&QDoubleSpinBox::valueChanged), this, [this] { refresh(); });
   connect(client_, &DeviceClient::status, this, [this](const QString &component, const QJsonObject &value) {
     if (component == "gas") {
       view_->gas = value; view_->gasAge.restart();
@@ -336,16 +357,22 @@ void DevicePanel::refresh() {
 
   const bool ptzFresh = v.ptzAge.isValid() && v.ptzAge.elapsed() < 2000;
   const bool validBounds = !v.bounds->isChecked() || v.minimum->value() < v.maximum->value();
-  v.ptzStart->setEnabled(!offline_ && authorized_ && !v.ptzBlocked && validBounds);
+  const bool validTilt = !v.tiltSweep->isChecked() || v.tiltMaximum->value() - v.tiltMinimum->value() >= 2;
+  v.ptzStart->setEnabled(!offline_ && authorized_ && !v.ptzBlocked && validBounds && validTilt);
   v.ptzStop->setEnabled(!offline_);
   v.speed->setEnabled(!v.ptzBlocked); v.seconds->setEnabled(!v.ptzBlocked); v.bounds->setEnabled(!v.ptzBlocked);
   v.minimum->setEnabled(!v.ptzBlocked && v.bounds->isChecked()); v.maximum->setEnabled(!v.ptzBlocked && v.bounds->isChecked());
+  v.tiltSweep->setEnabled(!v.ptzBlocked);
+  v.tiltMinimum->setEnabled(!v.ptzBlocked && v.tiltSweep->isChecked());
+  v.tiltMaximum->setEnabled(!v.ptzBlocked && v.tiltSweep->isChecked());
+  v.tiltSpeed->setEnabled(!v.ptzBlocked && v.tiltSweep->isChecked());
   QString ptzState = offline_ ? "离线预览" : !ptzFresh ? "状态未知"
       : v.ptz.value("state").toString() == "inspection_stopping" ? "巡检停转中"
       : v.ptz.value("inspection_held").toBool() ? "巡检拍照中"
       : v.ptz.value("state").toString() == "stopping" ? "正在停止"
       : !v.ptz.value("last_error").toString().isEmpty() ? "设备异常"
       : v.ptz.value("state").toString() == "stopped" ? "已停止"
+      : v.ptz.value("state").toString() == "positioning" ? "调整俯仰位置"
       : v.ptz.value("moving").toBool() ? "往返扫掠中" : "等待相机";
   const char *ptzTone = offline_ ? "muted" : ptzFresh && !v.ptz.value("last_error").toString().isEmpty() ? "danger"
       : v.ptzBlocked && !ptzFresh ? "warning"
@@ -356,11 +383,19 @@ void DevicePanel::refresh() {
       v.ptz.value("state").toString() == "stopping" ? "正在停止，等待设备确认" :
       !v.ptz.value("last_error").toString().isEmpty() ? "云台巡航异常" :
       v.ptz.value("state").toString() == "stopped" ? "巡航已停止，可使用手动云台" :
+      v.ptz.value("state").toString() == "positioning" ? "正在通过 485 将俯仰调整至摆动范围" :
       v.ptz.value("moving").toBool() ? "正在往返扫掠" : "等待相机 / 处理请求";
   if (ptzFresh) {
-    const QString actual = QString("速度 %1 档 · 单侧 %2 s").arg(v.ptz.value("pan_speed").toInt()).arg(v.ptz.value("sweep_seconds").toDouble());
+    QString actual = QString("485 · 速度 %1 档 · 单侧 %2 s").arg(v.ptz.value("pan_speed").toInt()).arg(v.ptz.value("sweep_seconds").toDouble());
+    if (v.ptz.value("tilt_enabled").toBool())
+      actual += QString("\n俯仰 %1°～%2° · %3 档").arg(v.ptz.value("tilt_min").toDouble())
+          .arg(v.ptz.value("tilt_max").toDouble()).arg(v.ptz.value("tilt_speed").toInt());
     ptzText += "\n实际配置：" + actual;
     v.ptzSummary->setText(actual);
+    const auto actualPan = v.ptz.value("pan"), actualTilt = v.ptz.value("tilt");
+    if (actualPan.isDouble() && actualTilt.isDouble() && std::isfinite(actualPan.toDouble()) && std::isfinite(actualTilt.toDouble()))
+      ptzText += QString("\n当前角度：水平 %1° · 俯仰 %2°")
+          .arg(actualPan.toDouble(), 0, 'f', 1).arg(actualTilt.toDouble(), 0, 'f', 1);
     if (!v.ptz.value("last_error").toString().isEmpty()) ptzText += "\n" + v.ptz.value("last_error").toString();
   } else v.ptzSummary->setText("—");
   if (v.ptzBlocked) ptzText += "\n手动云台已锁定；需收到巡航停止反馈后恢复";
@@ -373,6 +408,7 @@ void DevicePanel::refresh() {
   if (!authorized_) blockers << "请勾选主界面“启用操作”";
   if (v.ptzBlocked) blockers << (!ptzFresh ? "状态失联，等待新鲜停止反馈" : "巡航已占用或正在停止，请先等待停止确认");
   if (!validBounds) blockers << "最小水平角必须小于最大水平角";
+  if (!validTilt) blockers << "最低俯仰角须小于最高俯仰角，间隔至少 2°";
   const bool ready = blockers.isEmpty();
   v.ptzReadiness->setText(ready ? "启动条件已就绪；巡航运行时会锁定手动云台。" : blockers.join("；"));
   deviceui::tone(v.ptzReadiness, ready ? "good" : "warning");

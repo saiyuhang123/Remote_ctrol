@@ -83,6 +83,7 @@ def rig(tmp_path):
         return response
 
     for service, name, callback in [(ControlPTZ,'/hk_camera/control_ptz',control),
+            (ControlPTZ,'/ptz/control',control),
             (PTZPreset,'/hk_camera/preset',preset), (CapturePicture,'/hk_camera/capture',capture),
             (RecognizeImage,'/vision/recognize_image',recognize)]:
         server.create_service(service,name,callback,callback_group=group)

@@ -12,7 +12,8 @@ public:
   ~DeviceClient() override;
   void startGas(const QString &port, int address, int baudrate, double interval);
   void stopGas();
-  void startPtz(int speed, double seconds, double minimum, double maximum);
+  void startPtz(int speed, double seconds, double minimum, double maximum,
+                bool tiltEnabled = true, double tiltMinimum = -9, double tiltMaximum = 15, int tiltSpeed = 1);
   void stopPtz();
   void setControlEnabled(bool enabled);
 signals:

@@ -21,16 +21,20 @@ struct CameraFixture {
   rclcpp::Node::SharedPtr node = std::make_shared<rclcpp::Node>("camera_panel_fixture");
   rclcpp::executors::SingleThreadedExecutor executor;
   std::thread worker;
-  std::atomic_int login{0}, start{0}, stop{0}, moves{0};
+  std::atomic_int login{0}, start{0}, stop{0}, moves{0}, poseReads{0};
   std::atomic_int jogs{0}, jogStops{0}, direction{0};
   std::atomic_bool streaming{false};
+  std::atomic_bool poseReadFails{false};
   double pan = 45, tilt = 10, zoom = 2;
   bool absolutePanTilt;
+  bool signedCoordinates;
   std::vector<rclcpp::ServiceBase::SharedPtr> services;
   rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr image;
   rclcpp::TimerBase::SharedPtr timer;
-  explicit CameraFixture(bool absolute = true) : absolutePanTilt(absolute) {
+  explicit CameraFixture(bool absolute = true, bool signedAngles = false)
+      : absolutePanTilt(absolute), signedCoordinates(signedAngles) {
     if (!absolute) { pan = 0; tilt = 0; }
+    if (signedAngles) tilt = -33.6;
     auto trigger = [this](const char *command, auto callback) {
       services.push_back(node->create_service<std_srvs::srv::Trigger>(std::string("/hk_camera/") + command,
         [callback](std_srvs::srv::Trigger::Request::SharedPtr, std_srvs::srv::Trigger::Response::SharedPtr r) {
@@ -42,10 +46,12 @@ struct CameraFixture {
     trigger("stop_stream", [this] { ++stop; streaming = false; });
     services.push_back(node->create_service<hk_camera::srv::GetPTZPose>("/hk_camera/get_ptz_pose",
       [this](hk_camera::srv::GetPTZPose::Request::SharedPtr, hk_camera::srv::GetPTZPose::Response::SharedPtr r) {
+        ++poseReads;
+        if (poseReadFails) { r->success = false; r->message = "485 read failed"; return; }
         r->success = true; r->pan = pan; r->tilt = tilt; r->zoom = zoom;
         r->limits_valid = true; r->pan_min = 0; r->pan_max = absolutePanTilt ? 360 : 0;
-        r->tilt_min = 0; r->tilt_max = absolutePanTilt ? 90 : 0;
-        r->zoom_min = 1; r->zoom_max = absolutePanTilt ? 30 : 23;
+        r->tilt_min = signedCoordinates ? -90 : 0; r->tilt_max = signedCoordinates ? 25 : absolutePanTilt ? 90 : 0;
+        r->zoom_min = 1; r->zoom_max = signedCoordinates ? 23 : absolutePanTilt ? 30 : 23;
       }));
     services.push_back(node->create_service<hk_camera::srv::SetPTZPose>("/hk_camera/set_ptz_pose",
       [this](hk_camera::srv::SetPTZPose::Request::SharedPtr q, hk_camera::srv::SetPTZPose::Response::SharedPtr r) {
@@ -53,6 +59,9 @@ struct CameraFixture {
       }));
     services.push_back(node->create_service<hk_camera::srv::ControlPTZ>("/hk_camera/control_ptz",
       [this](hk_camera::srv::ControlPTZ::Request::SharedPtr q, hk_camera::srv::ControlPTZ::Response::SharedPtr r) {
+        if (!q->stop && (q->speed < 1 || q->speed > 7)) {
+          r->message = "Invalid SDK speed"; return;
+        }
         if (q->stop) { ++jogStops; direction = 0; }
         else { ++jogs; direction = q->command; }
         r->success = true;
@@ -149,6 +158,31 @@ private slots:
     QCOMPARE(panel.findChild<QDoubleSpinBox *>("cameraZoom")->maximum(), 23.);
     QVERIFY(panel.findChild<QPushButton *>("cameraSetPtz")->text().contains("光学变倍"));
     QVERIFY(panel.findChild<QLabel *>("cameraPoseStatus")->text().contains("角度反馈不可用"));
+  }
+  void signedTiltAndMaximumOpticalZoomRoundTripAndAutoReadBack() {
+    CameraFixture fixture(true, true); RosAdapter ros(config()); CameraPanel panel(config(), &ros, false);
+    panel.setControlEnabled(true); panel.show();
+    QTest::mouseClick(panel.findChild<QToolButton *>("cameraDetailsToggle"), Qt::LeftButton);
+    auto *read = panel.findChild<QPushButton *>("cameraReadPtz");
+    auto *set = panel.findChild<QPushButton *>("cameraSetPtz");
+    auto *pan = panel.findChild<QDoubleSpinBox *>("cameraPan");
+    auto *tilt = panel.findChild<QDoubleSpinBox *>("cameraTilt");
+    auto *zoom = panel.findChild<QDoubleSpinBox *>("cameraZoom");
+    QTRY_VERIFY(read->isEnabled()); QTest::mouseClick(read, Qt::LeftButton);
+    QTRY_VERIFY(set->isEnabled());
+    QCOMPARE(tilt->minimum(), -90.); QCOMPARE(tilt->maximum(), 25.); QCOMPARE(tilt->value(), -33.6);
+    QCOMPARE(zoom->maximum(), 23.);
+    pan->setValue(125.7); tilt->setValue(-45.); zoom->setValue(23.);
+    QTest::mouseClick(set, Qt::LeftButton);
+    QTRY_COMPARE(fixture.moves.load(), 1);
+    QCOMPARE(fixture.tilt, -45.); QCOMPARE(fixture.zoom, 23.);
+    QTRY_VERIFY_WITH_TIMEOUT(fixture.poseReads.load() >= 2, 4000);
+    QTRY_VERIFY(set->isEnabled());
+    QCOMPARE(tilt->value(), -45.); QCOMPARE(zoom->value(), 23.);
+    fixture.poseReadFails = true;
+    QTest::mouseClick(read, Qt::LeftButton);
+    QTRY_VERIFY(panel.findChild<QLabel *>("cameraPoseStatus")->text().contains("读取失败"));
+    QVERIFY(!set->isEnabled());
   }
   void offlineCannotStartOrControlCamera() {
     CameraFixture fixture; RosAdapter ros(config()); CameraPanel panel(config(), &ros, true);

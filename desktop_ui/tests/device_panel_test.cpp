@@ -34,6 +34,8 @@ struct DeviceFixture {
   DeviceFixture() {
     ptz->declare_parameter("enabled", false); ptz->declare_parameter("pan_speed", 2);
     ptz->declare_parameter("sweep_seconds", 20.); ptz->declare_parameter("pan_min", -1.); ptz->declare_parameter("pan_max", -1.);
+    ptz->declare_parameter("tilt_enabled", false); ptz->declare_parameter("tilt_min", -9.);
+    ptz->declare_parameter("tilt_max", 15.); ptz->declare_parameter("tilt_speed", 1);
     service = gas->create_service<std_srvs::srv::SetBool>("/gas_detector/set_enabled",
       [this](std_srvs::srv::SetBool::Request::SharedPtr req, std_srvs::srv::SetBool::Response::SharedPtr res) {
         gasEnabled = req->data; res->success = true; res->message = "isolated gas fixture";
@@ -55,6 +57,10 @@ struct DeviceFixture {
       if (publishPtz) send(ptzStatus, {{"component", "ptz"}, {"enabled", enabled}, {"active", active}, {"moving", active},
         {"status_time_ns", static_cast<double>(ptz->now().nanoseconds())},
         {"state", enabled ? "sweeping" : active ? "stopping" : "stopped"},
+        {"control_transport", "rs485"}, {"tilt_enabled", ptz->get_parameter("tilt_enabled").as_bool()},
+        {"tilt_min", ptz->get_parameter("tilt_min").as_double()}, {"tilt_max", ptz->get_parameter("tilt_max").as_double()},
+        {"tilt_speed", static_cast<int>(ptz->get_parameter("tilt_speed").as_int())},
+        {"pan", 120.}, {"tilt", -3.},
         {"pan_speed", static_cast<int>(ptz->get_parameter("pan_speed").as_int())}, {"sweep_seconds", ptz->get_parameter("sweep_seconds").as_double()}});
     });
     timer.start(100);
@@ -90,6 +96,11 @@ private slots:
     QTRY_VERIFY(button("ptzPatrolStart")->isEnabled());
     QTest::mouseClick(button("ptzPatrolStart"), Qt::LeftButton);
     QTRY_VERIFY(fixture.ptz->get_parameter("enabled").as_bool()); QCOMPARE(camera.count(), 1);
+    QVERIFY(fixture.ptz->get_parameter("tilt_enabled").as_bool());
+    QCOMPARE(fixture.ptz->get_parameter("tilt_min").as_double(), -9.);
+    QCOMPARE(fixture.ptz->get_parameter("tilt_max").as_double(), 15.);
+    QTRY_VERIFY(panel.findChild<QLabel *>("ptzPatrolStatus")->text().contains("俯仰 -9°～15°"));
+    QVERIFY(panel.findChild<QLabel *>("ptzPatrolStatus")->text().contains("俯仰 -3.0°"));
     QTRY_VERIFY(fixture.everStarted.load());
     fixture.holdStop = true;
     QTest::mouseClick(button("ptzPatrolStop"), Qt::LeftButton);
@@ -166,10 +177,19 @@ private slots:
     QVERIFY(panel.findChild<QLabel *>("ptzReadiness")->text().contains("最小水平角"));
     minimum->setValue(0);maximum->setValue(180);
     QVERIFY(panel.findChild<QPushButton *>("ptzPatrolStart")->isEnabled());
+    auto *tiltSweep=panel.findChild<QCheckBox *>("ptzTiltSweep");
+    auto *tiltMin=panel.findChild<QDoubleSpinBox *>("ptzTiltMinimum");
+    auto *tiltMax=panel.findChild<QDoubleSpinBox *>("ptzTiltMaximum");
+    QVERIFY(tiltSweep->isChecked()); QCOMPARE(tiltMin->value(),-9.); QCOMPARE(tiltMax->value(),15.);
+    tiltMin->setValue(16); tiltMax->setValue(15);
+    QVERIFY(!panel.findChild<QPushButton *>("ptzPatrolStart")->isEnabled());
+    QVERIFY(panel.findChild<QLabel *>("ptzReadiness")->text().contains("俯仰角"));
+    tiltMin->setValue(-9); QVERIFY(panel.findChild<QPushButton *>("ptzPatrolStart")->isEnabled());
     QTest::qWait(30);QVERIFY(panel.grab().save("/tmp/device_duty_ptz_bounds.png"));
     client.ptzBlocked(true);ptz["state"]="sweeping";ptz["moving"]=true;ptz["active"]=true;
     client.status("ptz",ptz);
     QVERIFY(!panel.findChild<QPushButton *>("ptzPatrolStart")->isEnabled());
+    QVERIFY(!tiltSweep->isEnabled()); QVERIFY(!tiltMin->isEnabled()); QVERIFY(!tiltMax->isEnabled());
     QVERIFY(panel.findChild<QPushButton *>("ptzPatrolStop")->isEnabled());
     bounds->setChecked(false);QTest::qWait(30);
     QVERIFY(panel.grab().save("/tmp/device_duty_active.png"));

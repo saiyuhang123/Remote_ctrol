@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Independent, opt-in PTZ sweep. Default disabled; compatible with ros2 param.
 
-Renews the camera driver's 500 ms jog lease. Reports real command acknowledgments
+Renews the RS485 head driver's 500 ms lease. Reports real command acknowledgments
 and keeps stop pending until acknowledged; no navigation dependencies.
 """
 import fcntl
@@ -14,11 +14,14 @@ import rclpy
 from rclpy.node import Node
 from rcl_interfaces.msg import SetParametersResult
 from std_msgs.msg import String
-from hk_camera.srv import ControlPTZ, GetPTZPose, SetPTZPose
+from hk_camera.srv import ControlPTZ, ControlPTZPatrol, GetPTZPose, SetPTZPose
 from patrol_interfaces.srv import PtzInspectionControl
 
 PAN_LEFT, PAN_RIGHT = 23, 24
 MIN_FLIP_GAP = 3.0
+SETTINGS = ('enabled', 'pan_speed', 'sweep_seconds', 'pan_min', 'pan_max',
+            'tilt_enabled', 'tilt_min', 'tilt_max', 'tilt_speed',
+            'home_pan', 'home_tilt', 'home_zoom')
 
 
 class PtzPatrol(Node):
@@ -26,24 +29,27 @@ class PtzPatrol(Node):
         super().__init__('ptz_patrol')
         for key, value in dict(enabled=False, pan_speed=2, sweep_seconds=20.0,
                                pan_min=-1.0, pan_max=-1.0, home_pan=-1.0,
-                               home_tilt=-1.0, home_zoom=-1.0).items():
+                               home_tilt=-1.0, home_zoom=-1.0, tilt_enabled=False,
+                               tilt_min=-9.0, tilt_max=15.0, tilt_speed=1).items():
             self.declare_parameter(key, value)
-        self._validate({p.name: p.value for p in self.get_parameters([
-            'enabled', 'pan_speed', 'sweep_seconds', 'pan_min', 'pan_max',
-            'home_pan', 'home_tilt', 'home_zoom'])})
+        self._validate({p.name: p.value for p in self.get_parameters(SETTINGS)})
         self.add_on_set_parameters_callback(self._on_parameters)
-        self._ctrl = self.create_client(ControlPTZ, '/hk_camera/control_ptz')
-        self._pose = self.create_client(GetPTZPose, '/hk_camera/get_ptz_pose')
+        self._ctrl = self.create_client(ControlPTZ, '/ptz/control')
+        self._patrol_ctrl = self.create_client(ControlPTZPatrol, '/ptz/control_patrol')
+        self._pose = self.create_client(GetPTZPose, '/ptz/get_angles')
         self._set = self.create_client(SetPTZPose, '/hk_camera/set_ptz_pose')
         self._status = self.create_publisher(String, '/ptz_patrol/status', 10)
         self._moving = False
         self._direction = PAN_LEFT
         self._last_flip = time.monotonic()
         self._ctrl_pending = None
+        self._pending_client = None
         self._ctrl_deadline = 0.0
         self._pose_pending = None
         self._pose_deadline = 0.0
         self._pan = None
+        self._tilt = None
+        self._positioning = False
         self._pan_stamp = 0.0
         self._error = ''
         self._stop_due = False
@@ -64,6 +70,13 @@ class PtzPatrol(Node):
             raise ValueError('enabled must be boolean')
         if type(values['pan_speed']) is not int or not 1 <= values['pan_speed'] <= 7:
             raise ValueError('pan_speed must be an integer in 1..7')
+        if type(values['tilt_enabled']) is not bool:
+            raise ValueError('tilt_enabled must be boolean')
+        if type(values['tilt_speed']) is not int or not 1 <= values['tilt_speed'] <= 7:
+            raise ValueError('tilt_speed must be an integer in 1..7')
+        lo, hi = values['tilt_min'], values['tilt_max']
+        if not (math.isfinite(lo) and math.isfinite(hi) and -90 <= lo < hi <= 25 and hi - lo >= 2):
+            raise ValueError('tilt bounds require -90 <= min < max <= 25 and a span >= 2 degrees')
         if not math.isfinite(values['sweep_seconds']) or not 1 <= values['sweep_seconds'] <= 600:
             raise ValueError('sweep_seconds must be 1..600 seconds')
         lo, hi = values['pan_min'], values['pan_max']
@@ -76,8 +89,7 @@ class PtzPatrol(Node):
                 raise ValueError('Invalid ' + key)
 
     def _on_parameters(self, parameters):
-        names = ('enabled', 'pan_speed', 'sweep_seconds', 'pan_min', 'pan_max',
-                 'home_pan', 'home_tilt', 'home_zoom')
+        names = SETTINGS
         values = {name: self.get_parameter(name).value for name in names}
         for parameter in parameters:
             if parameter.name in names:
@@ -97,6 +109,7 @@ class PtzPatrol(Node):
             self._last_flip = time.monotonic()
             self._direction = PAN_LEFT
             self._inspection_fault = ''
+            self._error = ''
         return SetParametersResult(successful=True)
 
     def _expire_inspection(self):
@@ -184,22 +197,25 @@ class PtzPatrol(Node):
         self._expire_inspection()
         now = time.monotonic()
         if self._ctrl_pending is not None and now >= self._ctrl_deadline:
-            self._ctrl.remove_pending_request(self._ctrl_pending)
+            self._pending_client.remove_pending_request(self._ctrl_pending)
             self._ctrl_pending = None
             self._error = 'PTZ command timed out; stop required before retry'
             self._stop_due = True  # The timed-out command may have executed.
+            if self.get_parameter('tilt_enabled').value:
+                self.set_parameters([rclpy.parameter.Parameter('enabled', value=False)])
         if self._ctrl_pending is not None:
             return
         enabled = self.get_parameter('enabled').value
+        control = self._patrol_ctrl if self.get_parameter('tilt_enabled').value else self._ctrl
         if self._stop_due or (not enabled and self._moving):
-            if self._ctrl.service_is_ready():
+            if control.service_is_ready():
                 self._command(True)
             return
         if not enabled or self._inspection_owner:
             self._last_flip = now
             return
-        if not self._ctrl.service_is_ready():
-            self._error = 'Waiting for camera PTZ service'
+        if not control.service_is_ready():
+            self._error = '等待 485 云台服务，请启动或更新 ptz_pelco 节点'
             return
         elapsed = now - self._last_flip
         flip = elapsed >= self.get_parameter('sweep_seconds').value
@@ -214,17 +230,28 @@ class PtzPatrol(Node):
         self._command(False)
 
     def _command(self, stop):
-        req = ControlPTZ.Request()
-        req.command, req.speed, req.stop = (self._direction,
-            self.get_parameter('pan_speed').value, stop)
-        future = self._ctrl.call_async(req)
+        patrol_mode = bool(self.get_parameter('tilt_enabled').value)
+        if patrol_mode:
+            req = ControlPTZPatrol.Request(command=self._direction,
+                pan_speed=self.get_parameter('pan_speed').value, stop=stop,
+                tilt_enabled=True, tilt_min=self.get_parameter('tilt_min').value,
+                tilt_max=self.get_parameter('tilt_max').value,
+                tilt_speed=self.get_parameter('tilt_speed').value)
+            client = self._patrol_ctrl
+        else:
+            req = ControlPTZ.Request()
+            req.command, req.speed, req.stop = (self._direction,
+                self.get_parameter('pan_speed').value, stop)
+            client = self._ctrl
+        future = client.call_async(req)
+        self._pending_client = client
         self._ctrl_pending = future
         self._ctrl_deadline = time.monotonic() + 1.5
         if not stop:
             self._home_due = True
-        future.add_done_callback(lambda done: self._on_ctrl_done(done, stop))
+        future.add_done_callback(lambda done: self._on_ctrl_done(done, stop, patrol_mode))
 
-    def _on_ctrl_done(self, future, stop):
+    def _on_ctrl_done(self, future, stop, patrol_mode=False):
         if future is not self._ctrl_pending:
             return
         self._ctrl_pending = None
@@ -233,9 +260,18 @@ class PtzPatrol(Node):
             if not result.success:
                 self._error = 'PTZ control failed: ' + result.message
                 self._stop_due = True
+                if patrol_mode:
+                    self.set_parameters([rclpy.parameter.Parameter('enabled', value=False)])
                 return
-            self._error = ''
+            if not stop:
+                self._error = ''
             self._moving = not stop
+            self._positioning = patrol_mode and not stop and result.positioning
+            if self._positioning:
+                self._last_flip = time.monotonic()
+            if patrol_mode and result.pose_valid and math.isfinite(result.pan) and math.isfinite(result.tilt):
+                self._pan, self._tilt = result.pan, result.tilt
+                self._pan_stamp = time.monotonic()
             if stop:
                 self._stop_due = False
                 if self._home_due and not self.get_parameter('enabled').value and not self._inspection_owner:
@@ -252,7 +288,7 @@ class PtzPatrol(Node):
             self._pose.remove_pending_request(self._pose_pending)
             self._pose_pending = None
             self._pan = None
-        if not self._use_pan_bounds() or not self._moving or self._pose_pending is not None:
+        if self.get_parameter('tilt_enabled').value or not self._use_pan_bounds() or not self._moving or self._pose_pending is not None:
             return
         if self._pose.service_is_ready():
             self._pose_pending = self._pose.call_async(GetPTZPose.Request())
@@ -276,7 +312,7 @@ class PtzPatrol(Node):
         state = ('inspection_stopping' if self._inspection_owner and not self._inspection_stopped() else
                  'inspection_paused' if self._inspection_owner else
                  'stopping' if not enabled and active else 'error' if self._error or self._inspection_fault else
-                 'sweeping' if self._moving else 'waiting' if enabled else 'stopped')
+                 'positioning' if self._positioning else 'sweeping' if self._moving else 'waiting' if enabled else 'stopped')
         value = dict(component='ptz', enabled=enabled, moving=self._moving,
                      status_time_ns=self.get_clock().now().nanoseconds,
                      active=active, state=state, last_error=self._error or self._inspection_fault,
@@ -286,6 +322,11 @@ class PtzPatrol(Node):
                      sweep_seconds=self.get_parameter('sweep_seconds').value,
                      pan_min=self.get_parameter('pan_min').value,
                      pan_max=self.get_parameter('pan_max').value)
+        value.update(control_transport='rs485', tilt=self._tilt,
+                     tilt_enabled=self.get_parameter('tilt_enabled').value,
+                     tilt_min=self.get_parameter('tilt_min').value,
+                     tilt_max=self.get_parameter('tilt_max').value,
+                     tilt_speed=self.get_parameter('tilt_speed').value)
         self._status.publish(String(data=json.dumps(value, ensure_ascii=False)))
 
     def _go_home(self):

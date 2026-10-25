@@ -48,9 +48,9 @@ CameraPanel::CameraPanel(const DesktopConfig &config, RosAdapter *ros, bool offl
     auto *s = new QDoubleSpinBox(this); s->setObjectName(name); s->setRange(min, max);
     s->setDecimals(1); s->setValue(value); s->setKeyboardTracking(false); return s;
   };
-  pan_ = number("cameraPan", 0, 360, 0); tilt_ = number("cameraTilt", 0, 360, 0); zoom_ = number("cameraZoom", 1, 40, 1);
-  form->addRow("水平 (°)", pan_); form->addRow("俯仰 / SDK (°)", tilt_); form->addRow("光学变倍 (×)", zoom_);
-  tilt_->setToolTip("设备的绝对垂直坐标，部分机型用 270~360° 表示向上的角度；以读取值和设备范围为准");
+  pan_ = number("cameraPan", 0, 360, 0); tilt_ = number("cameraTilt", -180, 360, 0); zoom_ = number("cameraZoom", 1, 999.9, 1);
+  form->addRow("水平 (°)", pan_); form->addRow("俯仰 (°)", tilt_); form->addRow("光学变倍 (×)", zoom_);
+  tilt_->setToolTip("按设备返回的坐标和范围设置，支持 485 云台的负角度及 SDK 的 0~360° 坐标");
   auto *deviceDetails = new QWidget;
   auto *deviceLayout = new QVBoxLayout(deviceDetails);
   deviceLayout->setContentsMargins(0, 0, 0, 0);
@@ -60,6 +60,12 @@ CameraPanel::CameraPanel(const DesktopConfig &config, RosAdapter *ros, bool offl
   const int commands[] = {21, 23, 0, 24, 22, 11, 12};
   const int rows[] = {0, 1, 1, 1, 2, 3, 3}, columns[] = {1, 0, 1, 2, 1, 0, 2};
   jogTimer_ = new QTimer(this); jogTimer_->setInterval(150);
+  poseReadTimer_ = new QTimer(this); poseReadTimer_->setSingleShot(true);
+  connect(poseReadTimer_, &QTimer::timeout, this, [this] {
+    if (offline_ || jogCommand_ || !ros_->ptzAvailable()) return;
+    if (!pending_.isEmpty()) { poseReadTimer_->start(150); return; }
+    pending_ = "ptz_read"; ros_->readCameraPose(); refresh();
+  });
   connect(jogTimer_, &QTimer::timeout, this, [this] {
     if (!jogCommand_ || jogInFlight_) return;
     jogInFlight_ = true; ros_->jogCamera(jogCommand_, 3, false);
@@ -79,7 +85,8 @@ CameraPanel::CameraPanel(const DesktopConfig &config, RosAdapter *ros, bool offl
     } else {
       connect(b, &QPushButton::pressed, this, [this, command] {
         if (offline_ || patrolBlocked_ || !controlEnabled_ || !pending_.isEmpty() || !lastFrame_.isValid() || lastFrame_.elapsed() >= 3000) return;
-        stopJog(); jogCommand_ = command; jogInFlight_ = true;
+        stopJog(); poseReadTimer_->stop(); poseRead_ = false; poseTargetPending_ = false;
+        jogCommand_ = command; jogInFlight_ = true;
         ros_->jogCamera(command, 3, false); jogTimer_->start(); refresh();
       });
       connect(b, &QPushButton::released, this, &CameraPanel::stopJog);
@@ -110,10 +117,13 @@ CameraPanel::CameraPanel(const DesktopConfig &config, RosAdapter *ros, bool offl
   });
   connect(read_, &QPushButton::clicked, this, [this] {
     if (offline_ || !pending_.isEmpty()) return;
+    poseReadTimer_->stop(); poseRead_ = false;
     pending_ = "ptz_read"; ros_->readCameraPose(); refresh();
   });
   connect(set_, &QPushButton::clicked, this, [this] {
     if (offline_ || patrolBlocked_ || !controlEnabled_ || !poseRead_ || !pending_.isEmpty()) return;
+    targetPan_ = pan_->value(); targetTilt_ = tilt_->value(); targetZoom_ = zoom_->value();
+    poseTargetPending_ = false;
     pending_ = "ptz"; ros_->setPtz(pan_->value(), tilt_->value(), zoom_->value()); refresh();
   });
   connect(save_, &QPushButton::clicked, this, &CameraPanel::saveFrame);
@@ -140,14 +150,17 @@ CameraPanel::CameraPanel(const DesktopConfig &config, RosAdapter *ros, bool offl
     auto range = [](QDoubleSpinBox *s, double min, double max, double fallbackMin, double fallbackMax) {
       // Wrapped ranges cannot be represented by a single spinbox interval;
       // the driver validates those before issuing a command.
-      if (std::isfinite(min) && std::isfinite(max) && min < max)
+      if (std::isfinite(min) && std::isfinite(max) && min < max &&
+          std::max(min, fallbackMin) < std::min(max, fallbackMax))
         s->setRange(std::max(min, fallbackMin), std::min(max, fallbackMax));
       else s->setRange(fallbackMin, fallbackMax);
     };
     if (pose.limitsValid) {
       range(pan_, pose.panMin, pose.panMax, 0, 360);
-      range(tilt_, pose.tiltMin, pose.tiltMax, 0, 360);
+      range(tilt_, pose.tiltMin, pose.tiltMax, -180, 360);
       range(zoom_, pose.zoomMin, pose.zoomMax, 1, 999.9);
+    } else {
+      pan_->setRange(0, 360); tilt_->setRange(-180, 360); zoom_->setRange(1, 999.9);
     }
     pan_->setValue(pose.pan); tilt_->setValue(pose.tilt); zoom_->setValue(pose.zoom);
     absolutePanTilt_ = !(pose.limitsValid && pose.panMin == 0 && pose.panMax == 0 && pose.tiltMin == 0 && pose.tiltMax == 0);
@@ -156,6 +169,19 @@ CameraPanel::CameraPanel(const DesktopConfig &config, RosAdapter *ros, bool offl
     poseRead_ = true;
     poseStatus_->setText(QString("设备上报：水平 %1°，俯仰 %2°，变倍 %3×").arg(pose.pan, 0, 'f', 1).arg(pose.tilt, 0, 'f', 1).arg(pose.zoom, 0, 'f', 1));
     if (!absolutePanTilt_) poseStatus_->setText(QString("光学变倍 %1×（最大 %2×）；水平/俯仰用方向按钮控制，角度反馈不可用").arg(pose.zoom, 0, 'f', 1).arg(zoom_->maximum(), 0, 'f', 1));
+    if (poseTargetPending_) {
+      const bool arrived = std::abs(pose.zoom - targetZoom_) <= .15 &&
+          (!absolutePanTilt_ || (std::abs(std::remainder(pose.pan - targetPan_, 360.)) <= .3 &&
+                                 std::abs(pose.tilt - targetTilt_) <= .3));
+      if (arrived) poseTargetPending_ = false;
+      else if (poseSettle_.elapsed() < 15000) {
+        poseStatus_->setText(poseStatus_->text() + "\n设备尚未到位，继续读取实际位置");
+        schedulePoseRead();
+      } else {
+        poseTargetPending_ = false;
+        poseStatus_->setText(poseStatus_->text() + "\n15 秒内未确认到位，请检查目标与设备状态");
+      }
+    }
     refresh();
   });
   connect(ros_, &RosAdapter::requestFinished, this, [this](const QString &op, bool ok, const QString &detail) {
@@ -175,7 +201,15 @@ CameraPanel::CameraPanel(const DesktopConfig &config, RosAdapter *ros, bool offl
     } else if (op == "camera_stop_stream" && ok) {
       frame_ = {}; lastFrame_.invalidate(); preview_->clear(); preview_->setText("取流已停止");
     } else if (op == "ptz" && ok) {
-      poseStatus_->setText("目标已接受；点击“读取当前云台”确认设备反馈");
+      poseRead_ = false;
+      poseTargetPending_ = true; poseSettle_.start();
+      poseStatus_->setText("目标已接受，等待设备到位后自动读取实际位置");
+      schedulePoseRead();
+    } else if (op == "ptz_read" && !ok) {
+      poseRead_ = false;
+      poseStatus_->setText("读取失败：" + detail);
+      if (poseTargetPending_ && poseSettle_.elapsed() < 15000) schedulePoseRead();
+      else poseTargetPending_ = false;
     }
     refresh();
   });
@@ -187,7 +221,7 @@ CameraPanel::CameraPanel(const DesktopConfig &config, RosAdapter *ros, bool offl
         waitingForNode_ = false; detail_ = "启动超过 25 秒，尚未发现相机服务，请检查日志"; emit message(detail_);
       }
     }
-    if (!ros_->cameraNodePresent()) { poseRead_ = false; stopJog(); }
+    if (!ros_->cameraNodePresent() || !ros_->ptzAvailable()) { poseRead_ = false; stopJog(); }
     if (lastFrame_.isValid() && lastFrame_.elapsed() > 3000) { stopJog(); preview_->clear(); preview_->setText("视频数据已过期\n可点击连接 / 恢复预览"); }
     refresh();
   }); timer->start(); qApp->installEventFilter(this); refresh();
@@ -205,7 +239,10 @@ void CameraPanel::setPatrolBlocked(bool blocked) { patrolBlocked_ = blocked; if 
 void CameraPanel::ensureCamera() {
   if (offline_) return;
   if (!ros_->cameraNodePresent()) startCamera();
-  else if (pending_.isEmpty() && (!lastFrame_.isValid() || lastFrame_.elapsed() >= 3000)) connectPreview();
+  else {
+    ensurePtz();
+    if (pending_.isEmpty() && (!lastFrame_.isValid() || lastFrame_.elapsed() >= 3000)) connectPreview();
+  }
 }
 void CameraPanel::stopInteraction() { stopJog(); }
 void CameraPanel::hideEvent(QHideEvent *event) { stopJog(); QWidget::hideEvent(event); }
@@ -215,22 +252,26 @@ bool CameraPanel::eventFilter(QObject *object, QEvent *event) {
 }
 void CameraPanel::stopJog() {
   jogTimer_->stop();
-  if (jogCommand_) { jogCommand_ = 0; ros_->jogCamera(0, 3, true); refresh(); }
+  if (jogCommand_) {
+    jogCommand_ = 0; ros_->jogCamera(0, 3, true); schedulePoseRead(); refresh();
+  }
 }
+void CameraPanel::schedulePoseRead() { if (!offline_) poseReadTimer_->start(1000); }
 void CameraPanel::refresh() {
   const bool available = ros_->cameraAvailable(), present = ros_->cameraNodePresent();
+  const bool ptzAvailable = ros_->ptzAvailable();
   const bool busy = !pending_.isEmpty() || waitingForNode_ || jogCommand_;
   const bool fresh = lastFrame_.isValid() && lastFrame_.elapsed() < 3000;
   start_->setEnabled(!offline_ && !process_->running() && !present && !busy);
   connect_->setEnabled(!offline_ && available && !busy);
   stopStream_->setEnabled(!offline_ && available && !busy);
   stopNode_->setEnabled(!offline_ && process_->running());
-  read_->setEnabled(!offline_ && available && !busy && ros_->capabilities().contains("camera"));
-  set_->setEnabled(!offline_ && !patrolBlocked_ && controlEnabled_ && poseRead_ && available && !busy);
+  read_->setEnabled(!offline_ && ptzAvailable && !busy);
+  set_->setEnabled(!offline_ && !patrolBlocked_ && controlEnabled_ && poseRead_ && ptzAvailable && !busy);
   save_->setEnabled(!offline_ && fresh && !jogCommand_);
   for (auto *b : directions_) {
     const bool stop = b->objectName() == "cameraDirection0";
-    b->setEnabled(!offline_ && available && (stop || (!patrolBlocked_ && controlEnabled_ && fresh && (!busy || jogCommand_))));
+    b->setEnabled(!offline_ && ptzAvailable && (stop || (!patrolBlocked_ && controlEnabled_ && fresh && (!busy || jogCommand_))));
   }
   const auto provider = process_->running() ? "本界面管理" : present ? "外部节点" : "未启动";
   QString text = QString("相机：%1 · %2").arg(provider, available ? "服务就绪" : "服务未就绪");
@@ -239,6 +280,7 @@ void CameraPanel::refresh() {
   if (busy) text += waitingForNode_ ? "\n正在启动相机…" : "\n请求处理中…";
   else if (!detail_.isEmpty()) text += "\n" + detail_;
   if (offline_) text += "\n离线验证模式";
+  else if (available && !ptzAvailable) text += "\n云台服务未就绪，请连接 / 恢复预览并检查云台日志";
   if (patrolBlocked_) text += "\n云台巡航活动或待停止确认；手动云台已锁定";
   status_->setText(text);
 }
@@ -252,14 +294,20 @@ void CameraPanel::startCamera() {
   if (!process_->start({"ros2", "run", "hk_camera", "hk_camera_node", "--ros-args",
       "--params-file", config_.cameraParamsFile, "-p", "auto_login:=true", "-p", "auto_stream:=true",
       "-p", "enable_face_capture:=false"})) waitingForNode_ = false;
-  // 云台控制走 485：hk_camera 已禁用 SDK 云台服务，由 ptz_pelco 提供同名服务。
+  ensurePtz();
+  refresh();
+}
+void CameraPanel::ensurePtz() {
+  if (offline_ || ptzProcess_->running() || ros_->ptzNodePresent()) return;
+  if (!QFileInfo::exists(config_.ptzParamsFile)) { emit message("云台参数文件不存在：" + config_.ptzParamsFile); return; }
+  // Public PTZ services combine RS485 angles with the camera's optical lens.
   if (!ptzProcess_->running())
     ptzProcess_->start({"ros2", "run", "ptz_pelco", "ptz_pelco_node", "--ros-args",
         "--params-file", config_.ptzParamsFile});
-  refresh();
 }
 void CameraPanel::connectPreview() {
   if (offline_ || !pending_.isEmpty()) return;
+  ensurePtz();
   pending_ = "camera_login"; ros_->cameraCommand("login"); refresh();
 }
 void CameraPanel::renderFrame() {

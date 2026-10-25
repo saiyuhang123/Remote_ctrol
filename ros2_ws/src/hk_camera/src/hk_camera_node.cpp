@@ -195,9 +195,12 @@ void HKCameraNode::setupServices()
             onStopStream(req, res);
         });
 
-    // 云台控制改走 485 时（ptz_pelco 节点提供同名同类型服务），置 false 让出名字。
-    if (get_parameter("enable_ptz_services").as_bool()) {
-    control_ptz_srv_ = create_service<srv::ControlPTZ>("/hk_camera/control_ptz",
+    // The external RS485 head reports angles; the camera reports and drives
+    // the optical lens. Keep SDK services private when ptz_pelco owns the
+    // public services so it can combine these two independent devices.
+    const bool public_ptz = get_parameter("enable_ptz_services").as_bool();
+    const std::string ptz_prefix = public_ptz ? "/hk_camera/" : "/hk_camera/sdk/";
+    control_ptz_srv_ = create_service<srv::ControlPTZ>(ptz_prefix + "control_ptz",
         [this](const srv::ControlPTZ::Request::SharedPtr req,
                srv::ControlPTZ::Response::SharedPtr res) { onControlPTZ(req, res); });
     ptz_timer_ = create_wall_timer(std::chrono::milliseconds(100), [this] {
@@ -206,7 +209,7 @@ void HKCameraNode::setupServices()
     });
 
     get_ptz_pose_srv_ = create_service<srv::GetPTZPose>(
-        "/hk_camera/get_ptz_pose",
+        ptz_prefix + "get_ptz_pose",
         [this](const srv::GetPTZPose::Request::SharedPtr req,
                srv::GetPTZPose::Response::SharedPtr res) { onGetPTZPose(req, res); });
     ptz_preset_srv_ = create_service<srv::PTZPreset>(
@@ -215,13 +218,13 @@ void HKCameraNode::setupServices()
                srv::PTZPreset::Response::SharedPtr res) { onPTZPreset(req, res); });
 
     set_ptz_pose_srv_ = create_service<srv::SetPTZPose>(
-        "/hk_camera/set_ptz_pose",
+        ptz_prefix + "set_ptz_pose",
         [this](const srv::SetPTZPose::Request::SharedPtr  req,
                srv::SetPTZPose::Response::SharedPtr       res) {
             onSetPTZPose(req, res);
         });
-    } else {
-        RCLCPP_INFO(get_logger(), "PTZ 服务已禁用：云台由 ptz_pelco 节点走 485 控制");
+    if (!public_ptz) {
+        RCLCPP_INFO(get_logger(), "公共 PTZ 服务由 ptz_pelco 提供；镜头 SDK 服务位于 /hk_camera/sdk/");
     }
 }
 

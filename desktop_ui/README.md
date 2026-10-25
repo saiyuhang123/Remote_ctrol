@@ -47,6 +47,8 @@ RViz 退出时会先停止显示更新，并保留当前显示插件库直到 RO
 
 新增 **设备执勤** 入口：在独立窗口管理 `gas_detector` 和 `ptz_patrol.py`，不增加主窗口页签。气体检测默认固定串口 `/dev/gq_otk9633`，显示原始值、单位和设备报警状态；估算小数值保留待核对标记。云台旋转需“启用操作”，巡航活动或状态失联时锁定手动云台，确认停止后恢复；关闭设备窗口继续执勤。构建、话题、服务、操作与验证详见[独立设备说明](../ros2_ws/src/gas_detector/README.md)。
 
+设备执勤的云台巡航使用 485 通道，默认同时开启 **−9°～+15°** 的俯仰摆动。最低/最高俯仰角和俯仰速度可在停止时调整；取消“同时俯仰摆动”则仅水平巡航。启动时先调整至俯仰范围内，再同时旋转和摆动；反馈失效时停止，巡检暂停/恢复同时作用于两轴。镜头变倍仍由相机 SDK 网口通道负责。
+
 设备执勤窗口现分为 **“气体检测 / 云台巡航”** 两个页签，顶部同时显示两项设备的实际状态摘要；切页不停止执勤。气体页突出原始寄存器数值、单位及报警，小数估算单独标记；点击“连接参数”展开串口、地址、波特率和周期，采集中锁定配置。停止、异常、过期或重启等待新采样时清空旧读数和估算。云台页显示实际状态、扫掠参数和启动条件，勾选角度边界后才展开角度输入；停止仍等待设备确认。两页参数区分别滚动，启停按钮固定在底部。
 
 设备窗口使用局部浅色主题，默认640px宽并按屏幕可用区域限制高度。入口、ROS服务、独立进程管理及云台联锁沿用原流程。[气体页截图](docs/device_duty_gas.png)、[云台页截图](docs/device_duty_ptz.png)使用隔离模拟设备数据。本轮已构建并通过 `desktop_devices`、`desktop_console_layout`、`desktop_ui_lifecycle` 三组检查；设备页验证480×640、580×680、640×760、900×800四种尺寸，以及运行时锁定参数、隐藏继续、停止确认、失联和异常/停止后的读数清空。没有连接真实设备。
@@ -361,13 +363,15 @@ ros2 launch robot_patrol patrol.launch.py
 1. 打开界面，在右侧“相机监控”点击“启动相机”。程序读取现有海康参数文件，自动登录、取流。已有节点时直接显示视频，用“连接 / 恢复预览”执行登录与恢复取流。
 2. 状态区显示相机由本界面管理还是外部启动、服务是否就绪、分辨率和界面预览帧率。超过 3 秒无新图像时清除旧画面并提示过期；预览采用最新帧缓存，最高约 10 fps。
 3. “保存当前画面”将当前帧另存 PNG/JPG，默认目录 `~/Pictures/robot_camera/`。下方“相机抓拍（预览）”调用 SDK 原图抓拍服务，空路径使用临时 JPEG 并在返回后删除，不再写入旧机器的 `/home/nvidia` 路径。
-4. 点击“读取当前云台”，读取设备上报坐标和光学变倍范围。当前相机 `iDS-2ZMN2307S(E)` 返回 **1～23 倍**，水平、俯仰范围均为 0，未提供可靠的绝对角度能力；界面禁用这两个角度输入，仅设置光学变倍。支持绝对角度的其他机型按其返回范围开放。
-5. 勾选顶部“启用操作”后，可按住上/下/左/右或放大/缩小；松开、窗口失活、取消使能、视频过期或关闭面板对象时发送停止。驱动收到方向请求后维持 500 ms 租约，界面每 150 ms 续期，超时停止，SDK 停止失败时重试。固定方向速度为 SDK 3 档。
+4. 点击“读取当前云台”，读取 485 云台实际角度和相机自身的光学倍率。当前组合设备由 `ptz_pelco` 汇总：水平 **0～360°**、俯仰 **−90～25°**、光学变倍 **1～23×**。SDK 单独使用时仍不提供外部云台角度，界面按返回能力禁用角度输入。修改目标并设置后，界面延迟自动读回实际位置；读取失败后需重新读取才能设置。
+5. 勾选顶部“启用操作”后，可按住上/下/左/右或放大/缩小；松开、窗口失活、取消使能、视频过期或关闭面板对象时发送停止。方向通过 485 连续运动，镜头通过 SDK 连续变倍，界面每 150 ms 续期，500 ms 租约超时停止，停止失败会重试。
 6. “停止取流”停止该节点的视频采集；“停止本界面相机”仅关闭本界面创建的相机进程。退出界面会回收自身相机进程，外部相机节点保持运行。切换/停止导航不会停止相机。
 
 配置 `camera_params_file` 指向 `hk_camera_params.yaml`，相对路径以项目根目录解析。默认复用工作空间安装目录的相机参数文件；账号、密码继续只在原驱动配置中管理，不复制到桌面配置或启动命令。界面启动仅监控视频，覆盖 `enable_face_capture:=false`，不启动人脸抓拍。
 
 服务接口：`/hk_camera/login`、`/hk_camera/start_stream`、`/hk_camera/stop_stream` 使用 Trigger；`/hk_camera/get_ptz_pose` 使用 `GetPTZPose`；`/hk_camera/control_ptz` 使用 `ControlPTZ`；`/hk_camera/set_ptz_pose` 使用 `SetPTZPose`。这些服务均位于 `/hk_camera/` 命名空间。绝对云台服务已改正为 SDK 的角度/变倍语义，不再把水平角误用为预置点编号；既有独立 Qt 相机程序的预置点接口保留。
+
+本机配置 `enable_ptz_services: false` 时，`hk_camera` 在 `/hk_camera/sdk/` 下保留镜头控制与反馈接口，公共 PTZ 接口由 `ptz_pelco` 提供。`ptz_pelco.yaml` 默认 `zoom_backend: sdk`。厂商说明书明确将 485 的 Z 定义为光学倍率，换算为 `(ZH × 256 + ZL) / 100`，范围 1～20×；但本机实测 Z 返回 0 或超说明书范围，并与相机自身反馈不一致，原因待核实，因此当前使用已实测的 SDK 镜头通道。`zoom_backend: pelco` 需按对应设备说明设置范围并确认反馈有效，不能将 Z=0 自动当成 1×。已有视频节点但云台节点缺失时，“连接 / 恢复预览”会补启动云台节点。
 
 首次构建新海康服务后再构建界面：
 
@@ -375,13 +379,13 @@ ros2 launch robot_patrol patrol.launch.py
 cd /home/jkbot/Remote_ctrol/ros2_ws
 source /opt/ros/humble/setup.bash
 source install/setup.bash
-CMAKE_BUILD_PARALLEL_LEVEL=2 colcon build --packages-select hk_camera --symlink-install
+CMAKE_BUILD_PARALLEL_LEVEL=2 colcon build --packages-select hk_camera ptz_pelco --symlink-install
 cd ..
 ./desktop_ui/scripts/build.sh
 ./desktop_ui/scripts/run.sh
 ```
 
-- 云台坐标按海康 SDK 的十进制压缩编码和 0.1°/0.1 倍单位处理，参见 [NET_DVR_PTZPOS 官方结构说明](https://open.hikvision.com/hardware/structures/NET_DVR_PTZPOS.html)。设置请求成功表示设备接受，实际到位需读取反馈；本设备的外部 RS485 云台方向控制不提供可靠角度反馈。
+- SDK 的镜头坐标按十进制压缩编码和 0.1 倍单位处理，参见 [NET_DVR_PTZPOS 官方结构说明](https://open.hikvision.com/hardware/structures/NET_DVR_PTZPOS.html)。485 角度按二进制 0.01° 编码，负俯仰角按 360° 环绕转换。设置成功表示目标已发送，实际到位需读取反馈；目标值不会覆盖实际反馈缓存。
 - “业务抓拍”直接发布 `/capture_request`，订阅 `/capture_done` 查看结果，与相机预览抓拍分开。
 - 仪表识别调用 `/ocr/recognize`；当前节点使用 EasyOCR，默认按需识别。输出包括文本和置信度，具体仪表的区域、读数筛选规则继续由识别模块适配。
 - 本地点位、路线、活跃地图、运行记录和返航点统一由“路线巡航”页面及 `robot_patrol` 管理。

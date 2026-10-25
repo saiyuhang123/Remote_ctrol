@@ -42,6 +42,8 @@ public:
   void setPtz(double pan, double tilt, double zoom);
   void setPtzPreset(int action, int presetNo);
   bool cameraAvailable() const;
+  bool ptzAvailable() const;
+  bool ptzNodePresent() const;
   bool ptzPresetAvailable() const;
   bool cameraNodePresent() const;
   void cameraCommand(const QString &command);

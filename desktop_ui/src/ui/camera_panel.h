@@ -33,6 +33,8 @@ private:
   void renderFrame();
   void startCamera();
   void connectPreview();
+  void ensurePtz();
+  void schedulePoseRead();
   void saveFrame();
   void stopJog();
   DesktopConfig config_;
@@ -41,7 +43,7 @@ private:
   ProcessManager *ptzProcess_;   // 云台 485 节点（ptz_pelco），随相机一起起停
   bool offline_, controlEnabled_ = false, waitingForNode_ = false, poseRead_ = false;
   QString pending_, detail_;
-  QElapsedTimer lastFrame_, startup_, rateWindow_;
+  QElapsedTimer lastFrame_, startup_, rateWindow_, poseSettle_;
   int rateFrames_ = 0;
   double fps_ = 0;
   QImage frame_;
@@ -49,8 +51,10 @@ private:
   QPushButton *start_, *connect_, *stopStream_, *stopNode_, *read_, *set_, *save_;
   QDoubleSpinBox *pan_, *tilt_, *zoom_;
   QVector<QPushButton *> directions_;
-  QTimer *jogTimer_;
+  QTimer *jogTimer_, *poseReadTimer_;
   int jogCommand_ = 0;
   bool jogInFlight_ = false, absolutePanTilt_ = true;
   bool patrolBlocked_ = false;
+  bool poseTargetPending_ = false;
+  double targetPan_ = 0, targetTilt_ = 0, targetZoom_ = 1;
 };

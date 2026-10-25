@@ -147,7 +147,7 @@ def test_ptz_renew_reverse_stop_failure_and_parameter_validation(ros):
         response.success = not (request.stop and fail_stop[0])
         response.message = 'isolated PTZ fixture'
         return response
-    peer.create_service(ControlPTZ, '/hk_camera/control_ptz', control)
+    peer.create_service(ControlPTZ, '/ptz/control', control)
     peer.create_subscription(String, '/ptz_patrol/status', lambda msg: statuses.append(json.loads(msg.data)), 10)
     node = add(ptz_module.PtzPatrol())
     spin_until(executor, lambda: statuses and node._ctrl.service_is_ready())
@@ -180,7 +180,7 @@ def test_ptz_stop_requested_during_inflight_start_is_not_lost(ros):
         commands.append(request.stop)
         response.success = True
         return response
-    peer.create_service(ControlPTZ, '/hk_camera/control_ptz', control)
+    peer.create_service(ControlPTZ, '/ptz/control', control)
     node = add(ptz_module.PtzPatrol())
     spin_until(executor, node._ctrl.service_is_ready)
     node.set_parameters_atomically([Parameter('enabled', value=True)])

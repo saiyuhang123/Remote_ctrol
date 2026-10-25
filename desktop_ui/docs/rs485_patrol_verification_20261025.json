@@ -1,0 +1,132 @@
+{
+  "date": "2026-10-25",
+  "protocol": "RS485球机坐标设置与查询协议说明.pdf",
+  "settings": {
+    "port": "/dev/ptz485",
+    "baud": 2400,
+    "address": 1,
+    "tilt_min": -9.0,
+    "tilt_max": 15.0,
+    "tilt_speed": 1,
+    "pan_speed": 2,
+    "sweep_seconds": 6.0,
+    "executor_threads": 2
+  },
+  "automated_tests": {
+    "passed": 45,
+    "ros_domain_id": 226
+  },
+  "live_ros_domain_id": 227,
+  "observed_tilt_min": -8.9,
+  "observed_tilt_max": 14.95,
+  "sweep_seconds": 35.541,
+  "sample_count": 333,
+  "original": [
+    14.89,
+    5.02
+  ],
+  "pitch_directions": [
+    1,
+    -1,
+    1,
+    -1
+  ],
+  "pan_directions": [
+    23,
+    24,
+    23,
+    24,
+    23
+  ],
+  "completed": true,
+  "errors": [],
+  "edges": [
+    {
+      "t": 10.618,
+      "pan": 334.07,
+      "tilt": 14.91,
+      "positioning": false,
+      "pitch": -1,
+      "pan_direction": 24
+    },
+    {
+      "t": 22.419,
+      "pan": 71.37,
+      "tilt": -8.9,
+      "positioning": false,
+      "pitch": 1,
+      "pan_direction": 23
+    },
+    {
+      "t": 35.541,
+      "pan": 39.25,
+      "tilt": 14.95,
+      "positioning": false,
+      "pitch": -1,
+      "pan_direction": 23
+    }
+  ],
+  "resume_direction": -1,
+  "inspection_stop": [
+    [
+      12.27,
+      6.78
+    ],
+    [
+      12.31,
+      6.78
+    ]
+  ],
+  "final_stop": [
+    [
+      34.06,
+      14.97
+    ],
+    [
+      33.97,
+      14.97
+    ]
+  ],
+  "lease_stop_seconds": 0.522,
+  "lease_stop": [
+    [
+      25.85,
+      12.09
+    ],
+    [
+      25.76,
+      12.09
+    ]
+  ],
+  "restored": [
+    14.89,
+    5.02
+  ],
+  "baud_readback": [
+    {
+      "baud": 9600,
+      "queries": {
+        "0x51": null,
+        "0x53": null,
+        "0x55": null
+      }
+    },
+    {
+      "baud": 2400,
+      "queries": {
+        "0x51": {
+          "reply": "FF 01 00 59 05 D1 30",
+          "value": 14.89
+        },
+        "0x53": {
+          "reply": "FF 01 00 5B 01 F6 53",
+          "value": 5.02
+        },
+        "0x55": {
+          "reply": "FF 01 00 5D 00 00 5E",
+          "value": 0.0
+        }
+      }
+    }
+  ]
+}

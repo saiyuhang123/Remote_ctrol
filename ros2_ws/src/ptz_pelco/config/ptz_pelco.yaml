@@ -4,9 +4,11 @@ ptz_pelco:
     baud: 2400               # 实测值（文档写 9600，但这台是 2400）
     address: 1
     retries: 3
-    jog_rate_hz: 5.0         # 点动递进频率
-    jog_step_deg: 1.5        # 每个 tick 走多少度（5Hz × 1.5° ≈ 7.5°/s）
-    zoom_step: 0.2
+    jog_rate_hz: 10.0        # 租约 / 连续运动保活检查频率
+    zoom_backend: sdk       # 镜头用相机 SDK；本机 485 Z 反馈异常，原因待核实
+    sdk_service_timeout: 0.4
+    zoom_step: 1.0           # 仅 zoom_backend=pelco 的其他直连镜头使用
     lease_ms: 500            # 上位机必须在这个周期内续租，否则自动停
-    invert_pan: false        # 方向反了就改这里
+    max_zoom: 23.0           # 初始范围；SDK 读回真实镜头范围后更新
+    invert_pan: false        # 仅反转手动方向，绝对坐标读写保持一致
     invert_tilt: false

@@ -12,7 +12,7 @@
 协议（来自厂商文档）：
     查询 X  FF 01 00 51 00 00 52   →  FF 01 00 59 XH XL SS
     查询 Y  FF 01 00 53 00 00 54   →  FF 01 00 5B YH YL SS
-    查询 Z  FF 01 00 55 00 00 54   →  FF 01 00 5D ZH ZL SS
+    查询 Z  FF 01 00 55 00 00 56   →  FF 01 00 5D ZH ZL SS
     设置 X  FF 01 00 4B XH XL SS
     设置 Y  FF 01 00 4D YH YL SS
     设置 Z  FF 01 00 4F ZH ZL SS
@@ -196,8 +196,8 @@ def main():
             print('读失败：校验后没有有效应答')
         else:
             zoom = xyz[2]
-            # 0.00 = 设备在最小倍率时的上报值；>25 才是异常（变倍过程中的中间值/错帧）
-            note = '' if 0.0 <= zoom <= 25.0 else '   <- 超出文档范围，忽略'
+            # 厂商说明书：100~2000 对应 1~20x；零不等于 1x。
+            note = '' if 1.0 <= zoom <= 20.0 else '   <- 超出说明书 1~20x 范围，不能视为有效倍率'
             print(f'X(水平) {xyz[0]:7.2f}°   Y(垂直) {xyz[1]:7.2f}°   Z(变倍) {zoom:6.2f}x{note}')
     st = STATS
     if sum(st.values()):
