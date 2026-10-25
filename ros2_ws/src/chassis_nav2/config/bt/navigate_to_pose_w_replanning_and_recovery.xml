@@ -1,7 +1,9 @@
-
 <!--
-  Check path validity at 1 Hz. Keep valid Reeds-Shepp paths and their gear order
-  until the goal changes, an obstacle invalidates the path, or control fails.
+  Replan every tick (RateController 1 Hz = 每秒一次)，不再用 IsPathValid 复用旧路径。
+  原因：控制器（原生 RPP）是无状态的，重规划不会打断它；而旧路径一旦保留，
+  车被碰撞判定停住、滑出路径 40cm 后 BT 仍认为"路径有效"，60 秒不重算，
+  RPP 只能继续追一条从旧位姿长出来的路径，前视点落到车侧 → 前进/倒车符号抖动。
+  每秒重算可让新路径从当前位置出发，自然解开这种死锁。
 -->
 <root main_tree_to_execute="MainTree">
   <BehaviorTree ID="MainTree">
@@ -9,13 +11,7 @@
       <PipelineSequence name="NavigateWithReplanning">
         <RateController hz="1.0">
           <RecoveryNode number_of_retries="1" name="ComputePathToPose">
-            <Fallback>
-              <ReactiveSequence>
-                <Inverter><GlobalUpdatedGoal/></Inverter>
-                <IsPathValid path="{path}"/>
-              </ReactiveSequence>
-              <ComputePathToPose goal="{goal}" path="{path}" planner_id="GridBased"/>
-            </Fallback>
+            <ComputePathToPose goal="{goal}" path="{path}" planner_id="GridBased"/>
             <ClearEntireCostmap name="ClearGlobalCostmap-Context" service_name="global_costmap/clear_entirely_global_costmap"/>
           </RecoveryNode>
         </RateController>
@@ -36,7 +32,8 @@
           </Sequence>
           <!-- 阿克曼底盘不能原地转，去掉 Spin 恢复动作（同时避免 spin action server 依赖） -->
           <Wait wait_duration="5"/>
-          <BackUp backup_dist="0.30" backup_speed="0.05"/>
+          <!-- 原 backup_speed 0.05：退 0.3m 要 6 秒，恢复动作太慢；0.15 约 2 秒 -->
+          <BackUp backup_dist="0.30" backup_speed="0.15"/>
         </RoundRobin>
       </ReactiveFallback>
     </RecoveryNode>

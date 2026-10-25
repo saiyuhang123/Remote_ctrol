@@ -78,7 +78,9 @@ controller_server:
     - FollowPath
     progress_checker:
       plugin: nav2_controller::SimpleProgressChecker
-      required_movement_radius: 0.2
+      # 0.05m/20s：慢速终点对齐（5cm/20s ≈ 2.5mm/s）不会误判成没进展；
+      # 真卡住时 20 秒就能 abort → 清图+重规划（必要时 backup），不必等 60 秒。
+      required_movement_radius: 0.05
       movement_time_allowance: 20.0
     general_goal_checker:
       stateful: true  # 进入容差即锁定成功，避免终点附近抖动反复判定
@@ -87,27 +89,39 @@ controller_server:
       xy_goal_tolerance: 0.10
       yaw_goal_tolerance: 0.872664626
     FollowPath:
-      # RPP 保留障碍减速与足迹碰撞检测；按路径顺序执行前进/倒车段，折返点停稳再换向。
-      plugin: chassis_nav2::AckermannPursuitController
-      desired_linear_vel: 0.80
+      # 2026-10-24 换回原生 RPP（无状态）：原 chassis_nav2::AckermannPursuitController
+      # 的 leg_/at_cusp_ 会被 1 Hz 重规划反复清零，折返机动永远做不完。
+      # 切回只需还原本行 plugin。下面 cusp_*/terminal_lookahead_dist/max_angular_vel/
+      # max_reverse_speed/minimum_turning_radius/xy_goal_tolerance 对原生 RPP 无效，
+      # 保留备切回；倒车限速仍由 velocity_smoother.min_velocity(-0.3) 兜住。
+      plugin: nav2_regulated_pure_pursuit_controller::RegulatedPurePursuitController
+      # 0.6 m/s：0.8 时纯跟踪的闭环增益过高，配合 0.9 m 前视会进入 0.5Hz 极限环（S 弯）。
+      # 提交 9200a36 当年就是"提速到 0.6 修复摆动"，ac3304d 提到 0.8 后摆动回来了。
+      desired_linear_vel: 0.60
       max_reverse_speed: 0.30
       minimum_turning_radius: 0.69  # launch 按 hardware.yaml 实测值覆盖
       max_angular_vel: 0.8
       use_velocity_scaled_lookahead_dist: true
       lookahead_time: 1.8
-      min_lookahead_dist: 0.45
-      max_lookahead_dist: 1.0
+      # 前视距离：越小贴线越紧但容易左右纠偏，越大越平滑但终点容易冲过头。
+      # 0.45/1.0 是配合自研 cusp 控制器调的值；原生 RPP + 0.6m/s 用 0.35/1.1。
+      min_lookahead_dist: 0.35
+      max_lookahead_dist: 1.1
       use_interpolation: true
       # 4WS 实测最小半径 0.69m；弯道减速，低速仍保持足够前视，避免短周期左右纠偏。
       use_regulated_linear_velocity_scaling: true
       regulated_linear_scaling_min_radius: 1.2
-      regulated_linear_scaling_min_speed: 0.08
+      regulated_linear_scaling_min_speed: 0.12   # 曲率减速下限；0.08 会让终点段被钉在 8cm/s
       use_cost_regulated_linear_velocity_scaling: true
       inflation_cost_scaling_factor: 3.0
+      cost_scaling_dist: 0.65
       use_collision_detection: true
       max_allowed_time_to_collision_up_to_carrot: 2.0
-      approach_velocity_scaling_dist: 0.6
-      min_approach_linear_velocity: 0.05
+      # 距终点 1.2 m 开始线性减速：0.6 m/s 刹停约需 0.3 m + 0.12 m 反应，0.6 m 余量太紧。
+      approach_velocity_scaling_dist: 1.2
+      # 终点收敛速度下限：0.05m/s 时以 R=0.69 满舵转 36° 要 8.7s，还常被换挡打断；
+      # 0.15 让终点段真的能转起来（实测终点 70% 时间车是停的）。
+      min_approach_linear_velocity: 0.15
       transform_tolerance: 0.5
       xy_goal_tolerance: 0.10
       use_rotate_to_heading: false
@@ -139,16 +153,21 @@ local_costmap:
       - inflation_layer
       inflation_layer:
         plugin: nav2_costmap_2d::InflationLayer
-        # Safety first: padded footprint radius is ~0.33m. Keep a real
-        # inflation band so the global path cannot hug walls/obstacles.
+        # Padded circumscribed radius is ~0.58m; 0.65m leaves a modest
+        # clearance margin. Verify narrow passages and goals near walls.
         cost_scaling_factor: 3.0
-        inflation_radius: 0.40
+        inflation_radius: 0.65
       obstacle_layer:
         plugin: nav2_costmap_2d::ObstacleLayer
         enabled: true
         observation_sources: scan
+        # 2D 激光点在 base_link 里 z=0，但 odom->base_link 的 z≈-0.20，
+        # 变换到代价图坐标系后 z≈-0.20。默认 min_obstacle_height=0.0 会把所有点过滤掉，
+        # 表现为代价图里永远没有任何障碍（不避障）。必须低于 -0.20。
+        min_obstacle_height: -0.30
         scan:
           topic: /scan
+          min_obstacle_height: -0.30
           max_obstacle_height: 2.0
           clearing: true
           marking: true
@@ -180,8 +199,13 @@ global_costmap:
         plugin: nav2_costmap_2d::ObstacleLayer
         enabled: true
         observation_sources: scan
+        # 2D 激光点在 base_link 里 z=0，但 odom->base_link 的 z≈-0.20，
+        # 变换到代价图坐标系后 z≈-0.20。默认 min_obstacle_height=0.0 会把所有点过滤掉，
+        # 表现为代价图里永远没有任何障碍（不避障）。必须低于 -0.20。
+        min_obstacle_height: -0.30
         scan:
           topic: /scan
+          min_obstacle_height: -0.30
           max_obstacle_height: 2.0
           clearing: true
           marking: true
@@ -196,10 +220,10 @@ global_costmap:
         map_subscribe_transient_local: true
       inflation_layer:
         plugin: nav2_costmap_2d::InflationLayer
-        # Safety first: padded footprint radius is ~0.33m. Keep a real
-        # inflation band so the global path cannot hug walls/obstacles.
+        # Padded circumscribed radius is ~0.58m; 0.65m leaves a modest
+        # clearance margin. Verify narrow passages and goals near walls.
         cost_scaling_factor: 3.0
-        inflation_radius: 0.40
+        inflation_radius: 0.65
       always_send_full_costmap: true
 map_server:
   ros__parameters:
@@ -225,14 +249,17 @@ planner_server:
       allow_unknown: false
       minimum_turning_radius: 0.85  # 规划保留转向余量；控制器仍可用实测 0.69m 纠偏
       motion_model_for_search: REEDS_SHEPP
-      # 三点路线长距离返程：保留倒车但减少为规避倒车代价而插入的多次换向。
-      reverse_penalty: 1.05
+      # 2026-10-24：原来"倒车只贵 5%、换向免费"，规划器会在接近目标时插入 10~20cm 的
+      # 微折返（表现为到点前莫名抖一下 S 弯）。提高两者代价，逼它选单段前进路径。
+      reverse_penalty: 2.0
+      change_penalty: 2.0
       # 应 >= 规划半径的 4~5 倍；0.85m 半径不能沿用默认 3m 连接长度。
       analytic_expansion_max_length: 5.0
       angle_quantization_bins: 72
-      # 搜索预算放宽到 1000 万次，由 max_planning_time 5s 兜底最坏耗时。
+      # 搜索预算放宽到 1000 万次，但规划时间必须与 BT 的 1Hz 重规划匹配：
+      # 单次超过 1.5s 会让重规划整个掉队（原来 5.0 太宽）。
       max_iterations: 10000000
-      max_planning_time: 5.0
+      max_planning_time: 1.5
 smoother_server:
   ros__parameters:
     use_sim_time: false

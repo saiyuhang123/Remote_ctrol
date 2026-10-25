@@ -91,7 +91,6 @@ def nav2_overlay(executable, source_file, hw):
 
 
 def clearance_rewrites():
-    # Do not let recorded-route enablement shrink the costmap safety margin.
-    # The padded footprint radius is about 0.33 m; 0.40 m keeps a real
-    # clearance band while still allowing normal doorway passage.
-    return {'inflation_radius':'0.40','cost_scaling_factor':'3.0'}
+    # Do not let recorded-route enablement shrink ordinary navigation clearance.
+    # 0.65 m covers the ~0.58 m padded circumscribed radius with modest margin.
+    return {'inflation_radius':'0.65','cost_scaling_factor':'3.0'}

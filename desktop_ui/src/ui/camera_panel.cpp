@@ -21,7 +21,8 @@
 #include <cmath>
 
 CameraPanel::CameraPanel(const DesktopConfig &config, RosAdapter *ros, bool offline, QWidget *parent)
-  : QWidget(parent), config_(config), ros_(ros), process_(new ProcessManager(config, this)), offline_(offline) {
+  : QWidget(parent), config_(config), ros_(ros), process_(new ProcessManager(config, this)),
+    ptzProcess_(new ProcessManager(config, this)), offline_(offline) {
   setObjectName("cameraPanel"); setMinimumWidth(250);
   auto *layout = new QVBoxLayout(this);
   preview_ = new QLabel("海康相机未连接\n点击启动相机，或连接已有节点");
@@ -102,7 +103,7 @@ CameraPanel::CameraPanel(const DesktopConfig &config, RosAdapter *ros, bool offl
   });
   connect(start_, &QPushButton::clicked, this, &CameraPanel::startCamera);
   connect(connect_, &QPushButton::clicked, this, &CameraPanel::connectPreview);
-  connect(stopNode_, &QPushButton::clicked, this, [this] { stopJog(); if (patrolBlocked_) emit patrolStopRequested(); waitingForNode_ = false; pending_.clear(); process_->stop(); refresh(); });
+  connect(stopNode_, &QPushButton::clicked, this, [this] { stopJog(); if (patrolBlocked_) emit patrolStopRequested(); waitingForNode_ = false; pending_.clear(); process_->stop(); ptzProcess_->stop(); refresh(); });
   connect(stopStream_, &QPushButton::clicked, this, [this] {
     if (offline_ || !pending_.isEmpty()) return;
     stopJog(); if (patrolBlocked_) emit patrolStopRequested(); pending_ = "camera_stop_stream"; ros_->cameraCommand("stop_stream"); refresh();
@@ -117,6 +118,8 @@ CameraPanel::CameraPanel(const DesktopConfig &config, RosAdapter *ros, bool offl
   });
   connect(save_, &QPushButton::clicked, this, &CameraPanel::saveFrame);
   connect(process_, &ProcessManager::output, this, [this](const QString &text) { emit message("相机：" + text); });
+  connect(ptzProcess_, &ProcessManager::output, this, [this](const QString &text) { emit message("云台：" + text); });
+  connect(ptzProcess_, &ProcessManager::runningChanged, this, [this] { refresh(); });
   connect(process_, &ProcessManager::runningChanged, this, [this] { refresh(); });
   connect(process_, &ProcessManager::finished, this, [this](int code) {
     waitingForNode_ = false; poseRead_ = false;
@@ -194,6 +197,8 @@ CameraPanel::~CameraPanel() {
   qApp->removeEventFilter(this); stopJog();
   QObject::disconnect(process_, nullptr, this, nullptr);
   delete process_;
+  QObject::disconnect(ptzProcess_, nullptr, this, nullptr);
+  delete ptzProcess_;
 }
 void CameraPanel::setControlEnabled(bool enabled) { controlEnabled_ = enabled; if (!enabled) stopJog(); refresh(); }
 void CameraPanel::setPatrolBlocked(bool blocked) { patrolBlocked_ = blocked; if (blocked) stopJog(); refresh(); }
@@ -247,6 +252,10 @@ void CameraPanel::startCamera() {
   if (!process_->start({"ros2", "run", "hk_camera", "hk_camera_node", "--ros-args",
       "--params-file", config_.cameraParamsFile, "-p", "auto_login:=true", "-p", "auto_stream:=true",
       "-p", "enable_face_capture:=false"})) waitingForNode_ = false;
+  // 云台控制走 485：hk_camera 已禁用 SDK 云台服务，由 ptz_pelco 提供同名服务。
+  if (!ptzProcess_->running())
+    ptzProcess_->start({"ros2", "run", "ptz_pelco", "ptz_pelco_node", "--ros-args",
+        "--params-file", config_.ptzParamsFile});
   refresh();
 }
 void CameraPanel::connectPreview() {

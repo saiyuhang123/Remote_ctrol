@@ -67,7 +67,7 @@ def test_free_navigation_uses_rpp_with_10cm_50deg_tolerance():
     for name in ('nav2.yaml','nav2_2d_localization.yaml','nav2_carto_localization.yaml'):
         controller=yaml.safe_load((SRC/'chassis_nav2/config'/name).read_text())['controller_server']['ros__parameters']
         assert controller['controller_plugins']==['FollowPath']
-        assert controller['FollowPath']['plugin']=='chassis_nav2::AckermannPursuitController'
+        assert controller['FollowPath']['plugin']=='nav2_regulated_pure_pursuit_controller::RegulatedPurePursuitController'
         assert controller['general_goal_checker']['xy_goal_tolerance']==0.10
         assert abs(controller['general_goal_checker']['yaw_goal_tolerance']-math.radians(50.0))<1e-9
         assert controller['FollowPath']['xy_goal_tolerance']==0.10
@@ -76,11 +76,11 @@ def test_free_navigation_uses_rpp_with_10cm_50deg_tolerance():
         assert planner['allow_unknown'] is False
         assert planner['motion_model_for_search']=='REEDS_SHEPP'
         assert controller['FollowPath']['allow_reversing'] is True
-        assert controller['FollowPath']['desired_linear_vel']==0.80
+        assert controller['FollowPath']['desired_linear_vel']==0.60
         assert hardware['chassis']['max_speed']>=controller['FollowPath']['desired_linear_vel']
         assert controller['FollowPath']['max_reverse_speed']==0.30
-        assert controller['FollowPath']['min_lookahead_dist']==0.45
-        assert controller['FollowPath']['max_lookahead_dist']==1.0
+        assert controller['FollowPath']['min_lookahead_dist']==0.35
+        assert controller['FollowPath']['max_lookahead_dist']==1.1
         smoother=document['velocity_smoother']['ros__parameters']
         assert smoother['scale_velocities']
         assert smoother['max_velocity'][0]>=controller['FollowPath']['desired_linear_vel']
@@ -88,9 +88,14 @@ def test_free_navigation_uses_rpp_with_10cm_50deg_tolerance():
         for costmap_name in ('local_costmap','global_costmap'):
             costmap=document[costmap_name][costmap_name]['ros__parameters']
             assert costmap['footprint_padding']>=0.05
-            assert costmap['inflation_layer']['inflation_radius']>=0.35
+            inflation=costmap['inflation_layer']['inflation_radius']
+            padded_radius=max(math.hypot(x,y) for x,y in hardware['robot_geometry']['footprint'])
+            padded_radius+=costmap['footprint_padding']
+            assert inflation==0.65
+            assert inflation>=padded_radius+costmap['resolution']
+            assert controller['FollowPath']['cost_scaling_dist']==inflation
     from chassis_nav2.recorded_routes import clearance_rewrites
-    assert clearance_rewrites()['inflation_radius']=='0.40'
+    assert clearance_rewrites()['inflation_radius']=='0.65'
 
 
 def test_desktop_recorded_markers_preserve_all_navigation_displays():

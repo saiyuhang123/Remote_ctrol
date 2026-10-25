@@ -38,6 +38,7 @@ private:
   DesktopConfig config_;
   RosAdapter *ros_;
   ProcessManager *process_;
+  ProcessManager *ptzProcess_;   // 云台 485 节点（ptz_pelco），随相机一起起停
   bool offline_, controlEnabled_ = false, waitingForNode_ = false, poseRead_ = false;
   QString pending_, detail_;
   QElapsedTimer lastFrame_, startup_, rateWindow_;

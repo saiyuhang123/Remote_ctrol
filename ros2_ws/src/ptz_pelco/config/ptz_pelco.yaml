@@ -1,0 +1,12 @@
+ptz_pelco:
+  ros__parameters:
+    port: /dev/ptz485        # udev 别名（USB 口 1-10）
+    baud: 2400               # 实测值（文档写 9600，但这台是 2400）
+    address: 1
+    retries: 3
+    jog_rate_hz: 5.0         # 点动递进频率
+    jog_step_deg: 1.5        # 每个 tick 走多少度（5Hz × 1.5° ≈ 7.5°/s）
+    zoom_step: 0.2
+    lease_ms: 500            # 上位机必须在这个周期内续租，否则自动停
+    invert_pan: false        # 方向反了就改这里
+    invert_tilt: false

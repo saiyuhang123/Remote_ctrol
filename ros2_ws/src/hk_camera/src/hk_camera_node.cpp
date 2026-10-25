@@ -81,6 +81,12 @@ void HKCameraNode::loadParameters()
     declare_parameter("face_capture_dir", (QDir::homePath() +
                       "/Remote_ctrol/captures/hk_faces").toStdString());
     declare_parameter("face_queue_limit", 8);
+    // 设备不上报 PTZ 范围（PTZSCOPE 全 0）时会拒绝绝对 pan/tilt。
+    // 置 true 可跳过该校验直接下发 wAction=1，用于验证设备究竟收不收绝对角度。
+    declare_parameter("force_absolute_ptz", false);
+    // 云台控制是否由本节点（SDK）提供。改走 485 时置 false，
+    // 由 ptz_pelco 节点提供同名同类型服务。
+    declare_parameter("enable_ptz_services", true);
 
     login_info_.ip       = get_parameter("ip").as_string();
     login_info_.port     = static_cast<uint16_t>(get_parameter("port").as_int());
@@ -189,6 +195,8 @@ void HKCameraNode::setupServices()
             onStopStream(req, res);
         });
 
+    // 云台控制改走 485 时（ptz_pelco 节点提供同名同类型服务），置 false 让出名字。
+    if (get_parameter("enable_ptz_services").as_bool()) {
     control_ptz_srv_ = create_service<srv::ControlPTZ>("/hk_camera/control_ptz",
         [this](const srv::ControlPTZ::Request::SharedPtr req,
                srv::ControlPTZ::Response::SharedPtr res) { onControlPTZ(req, res); });
@@ -212,6 +220,9 @@ void HKCameraNode::setupServices()
                srv::SetPTZPose::Response::SharedPtr       res) {
             onSetPTZPose(req, res);
         });
+    } else {
+        RCLCPP_INFO(get_logger(), "PTZ 服务已禁用：云台由 ptz_pelco 节点走 485 控制");
+    }
 }
 
 // ============================================================
@@ -623,6 +634,8 @@ void HKCameraNode::onSetPTZPose(
     pose.wTiltPos = *ptz::encode(req->tilt);
     pose.wZoomPos = *ptz::encode(req->zoom);
     // Validate against the device's limits when it supports scope queries.
+    // force_absolute_ptz=true 跳过整段校验（设备不上报 PTZSCOPE 时用于验证硬件是否接受绝对角度）。
+    if (!get_parameter("force_absolute_ptz").as_bool()) {
     NET_DVR_PTZSCOPE scope{};
     DWORD length = 0;
     if (camera_->getDVRConfig(user_id_, NET_DVR_GET_PTZSCOPE, channel_, &scope, &length)) {
@@ -640,6 +653,7 @@ void HKCameraNode::onSetPTZPose(
             res->message = "PTZ coordinates exceed device limits; read current PTZ first";
             return;
         }
+    }
     }
     res->success = camera_->setDVRConfig(user_id_, NET_DVR_SET_PTZPOS, channel_, &pose);
     res->message = res->success ? "PTZ target accepted (read back to confirm arrival)" :

@@ -1,4 +1,8 @@
-# CH340 IMU: stable serial alias, independent of ttyUSB numbering.
-# Give the robot user access after reconnects, including existing login sessions.
-SUBSYSTEM=="tty", ATTRS{idVendor}=="1a86", ATTRS{idProduct}=="7523", OWNER="jkbot", GROUP="dialout", MODE="0660", TAG+="uaccess", SYMLINK+="imu_usb"
-
+# CH340 IMU: 固定到 USB 物理口 1-9（另一个 CH340 是云台 RS485，在 1-10）
+#
+# 坑：udev 规则里的 ATTRS/KERNELS 只能引用"同一个父设备"的属性。
+# 下面这种写法永不匹配——idVendor 来自父设备 1-9，KERNELS=="1-9:1.0" 来自
+# 另一个父设备（接口），跨了两个父设备：
+#   SUBSYSTEM=="tty", ATTRS{idVendor}=="1a86", KERNELS=="1-9:1.0", ...
+# 两个 CH340 又没有序列号，所以只能按 USB 物理口 KERNELS 来区分。
+SUBSYSTEM=="tty", KERNELS=="1-9", OWNER="jkbot", GROUP="dialout", MODE="0660", TAG+="uaccess", SYMLINK+="imu_usb"

@@ -7,6 +7,7 @@ struct DesktopConfig {
   QString resourceDir, projectRoot;
   QString backendUrl, defaultProfile, baseFrame, odomTopic, imageTopic, batteryTopic;
   QString cameraParamsFile;
+  QString ptzParamsFile;   // 云台 485 节点参数（ptz_pelco）
   double maxLinear = .3, maxAngular = .5;
   int feedbackTimeoutMs = 1500, serviceTimeoutMs = 15000;
   static DesktopConfig load(const QString &path, const QString &resources, const QString &project);

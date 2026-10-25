@@ -1,7 +1,7 @@
-
 <!--
-  Keep valid paths through remaining goals; check changed goals and obstacles
-  at 1 Hz. Replan after control failure as well.
+  Replan every tick (RateController 1 Hz = 每秒一次)，不再用 IsPathValid 复用旧路径。
+  原因同 navigate_to_pose：控制器无状态，重规划不会打断它；保留旧路径会让
+  "车被停住、滑出路径"后 BT 仍认为路径有效而不重算，控制器卡在原地抖动。
 -->
 <root main_tree_to_execute="MainTree">
   <BehaviorTree ID="MainTree">
@@ -11,13 +11,7 @@
           <RecoveryNode number_of_retries="1" name="ComputePathThroughPoses">
             <ReactiveSequence>
               <RemovePassedGoals input_goals="{goals}" output_goals="{goals}" radius="0.7"/>
-              <Fallback>
-                <ReactiveSequence>
-                  <Inverter><GlobalUpdatedGoal/></Inverter>
-                  <IsPathValid path="{path}"/>
-                </ReactiveSequence>
-                <ComputePathThroughPoses goals="{goals}" path="{path}" planner_id="GridBased"/>
-              </Fallback>
+              <ComputePathThroughPoses goals="{goals}" path="{path}" planner_id="GridBased"/>
             </ReactiveSequence>
             <ClearEntireCostmap name="ClearGlobalCostmap-Context" service_name="global_costmap/clear_entirely_global_costmap"/>
           </RecoveryNode>
@@ -39,7 +33,8 @@
           </Sequence>
           <!-- 阿克曼底盘不能原地转，去掉 Spin 恢复动作（同时避免 spin action server 依赖） -->
           <Wait wait_duration="5"/>
-          <BackUp backup_dist="0.30" backup_speed="0.05"/>
+          <!-- 原 backup_speed 0.05：退 0.3m 要 6 秒，恢复动作太慢；0.15 约 2 秒 -->
+          <BackUp backup_dist="0.30" backup_speed="0.15"/>
         </RoundRobin>
       </ReactiveFallback>
     </RecoveryNode>

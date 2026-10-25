@@ -1,0 +1,6 @@
+# 云台 RS485（PELCO-D，2400 8N1，地址 1）
+# 两个 CH340 都没有序列号，只能按 USB 物理口区分：
+#   USB 口 1-9  -> ttyUSB0（IMU）
+#   USB 口 1-10 -> ttyUSB1（云台）  ← 本规则
+# 固定成 /dev/ptz485，重启后不会因为枚举顺序变化而找错口。
+SUBSYSTEM=="tty", KERNEL=="ttyUSB*", KERNELS=="1-10:1.0", SYMLINK+="ptz485", GROUP="dialout", MODE="0660"

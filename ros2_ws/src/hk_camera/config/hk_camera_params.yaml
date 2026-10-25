@@ -8,6 +8,8 @@ hk_camera_node:
     channel: 1
     auto_login: true           # 启动时自动登录
     auto_stream: true          # 登录后自动开始取流
+    # 云台控制走 485（ptz_pelco 节点提供 /hk_camera/* 同名服务），本节点不再提供 PTZ 服务
+    enable_ptz_services: false
     enable_face_capture: true  # 登录后接收相机原生人脸抓拍报警
     face_capture_dir: "/home/jkbot/Remote_ctrol/captures/hk_faces"
     face_queue_limit: 8         # 保存队列满时报告丢弃数量，避免阻塞 SDK 回调

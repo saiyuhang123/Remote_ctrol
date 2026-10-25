@@ -22,6 +22,8 @@ DesktopConfig DesktopConfig::load(const QString &path, const QString &resources,
   c.imageTopic = o.value("image_topic").toString("/hk_camera/image_raw");
   c.cameraParamsFile = QDir(c.projectRoot).absoluteFilePath(o.value("camera_params_file").toString(
       "ros2_ws/install/hk_camera/share/hk_camera/config/hk_camera_params.yaml"));
+  c.ptzParamsFile = QDir(c.projectRoot).absoluteFilePath(o.value("ptz_params_file").toString(
+      "ros2_ws/install/ptz_pelco/share/ptz_pelco/config/ptz_pelco.yaml"));
   c.batteryTopic = o.value("battery_topic").toString("/battery_status");
   c.maxLinear = o.value("max_linear").toDouble(.3); c.maxAngular = o.value("max_angular").toDouble(.5);
   c.feedbackTimeoutMs = o.value("feedback_timeout_ms").toInt(1500);

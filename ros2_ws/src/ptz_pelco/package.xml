@@ -1,0 +1,22 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>ptz_pelco</name>
+  <version>0.1.0</version>
+  <description>云台 RS485（PELCO-D）绝对定位与方向控制节点。
+  提供与 hk_camera 相同的服务名/类型（/hk_camera/get_ptz_pose、
+  /hk_camera/set_ptz_pose、/hk_camera/control_ptz），因此上位机无需改动；
+  网络只用于视频流，云台控制全部走 485。</description>
+  <maintainer email="jkbot@todo.todo">jkbot</maintainer>
+  <license>Apache-2.0</license>
+
+  <exec_depend>rclpy</exec_depend>
+  <exec_depend>hk_camera</exec_depend>
+  <exec_depend>python3-serial</exec_depend>
+  <exec_depend>launch</exec_depend>
+  <exec_depend>launch_ros</exec_depend>
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>
