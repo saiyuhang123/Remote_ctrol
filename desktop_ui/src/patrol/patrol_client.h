@@ -25,6 +25,14 @@ struct PatrolPointInfo {
   QString recognitionPrompt;
 };
 
+struct PatrolPointShotsInfo {
+  PatrolPointInfo point;
+  quint64 mapRevision = 0;
+  int devicePanSign = 0;
+  QJsonArray shots;
+  bool loaded = false;
+};
+
 struct PatrolRouteStepInfo {
   QString stepId, pointId, pointName;
   double x = 0.0, y = 0.0, yaw = 0.0, dwellSeconds = 0.0;
@@ -95,6 +103,17 @@ public:
                    bool inspectionEnabled = false, int ptzPreset = 0,
                    const QString &recognitionPrompt = QString());
   void deletePoint(const QString &pointId, quint64 expectedRevision);
+  bool pointShotsReady() const;
+  bool pointShotsBusy() const;
+  PatrolPointShotsInfo pointShots(const QString &pointId) const;
+  void refreshPointShots(const QString &pointId);
+  void recordPointShot(const QString &pointId, const QString &mapId, quint64 mapRevision,
+                       quint64 pointRevision, const QString &shotId, const QString &name,
+                       double settleSeconds);
+  void removePointShot(const QString &pointId, const QString &mapId, quint64 mapRevision,
+                       quint64 pointRevision, const QString &shotId);
+  void clearPointShots(const QString &pointId, const QString &mapId, quint64 mapRevision,
+                       quint64 pointRevision);
   void saveCurrentPoint(const QString &mapId, const QString &name,
                         bool inspectionEnabled = false, int ptzPreset = 0,
                         const QString &recognitionPrompt = QString());
@@ -139,6 +158,7 @@ public:
 signals:
   void mapsChanged();
   void pointsChanged();
+  void pointShotsChanged(const QString &pointId);
   void routesChanged();
   void runsChanged();
   void inspectionResultsChanged();
@@ -150,6 +170,10 @@ signals:
   void roadNetworksChanged();
 
 private:
+  void sendPointShots(quint8 command, const QString &pointId, const QString &mapId = {},
+                      quint64 mapRevision = 0, quint64 pointRevision = 0,
+                      const QString &shotId = {}, const QString &name = {},
+                      double settleSeconds = 1.5);
   struct Impl;
   std::unique_ptr<Impl> impl_;
 };

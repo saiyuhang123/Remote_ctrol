@@ -341,7 +341,8 @@ class PatrolEngine:
                             self._set_status(
                                 state=STATE_INSPECTING, loop_index=loop_index,
                                 step_index=step_index, current_point_name=step.point_name,
-                                message="到达巡检点，正在执行云台抓拍与识别")
+                                message=("到达巡检点，正在执行多视角拍照" if getattr(step, 'shots', None)
+                                         else "到达巡检点，正在执行云台抓拍与识别"))
                             try:
                                 outcome = self.inspection_cb(
                                     step, self.run_id, self.snapshot.map_id,
@@ -365,9 +366,10 @@ class PatrolEngine:
                                              "巡检点抓拍/识别失败")
                                 return self._failed(completed_loops, completed_steps, code,
                                                     detail)
-                            detail = str(getattr(outcome, "text", "") or "识别完成")
+                            detail = (str(outcome.message) if getattr(step, 'shots', None) else
+                                      f"识别完成：{str(getattr(outcome, 'text', '') or '识别完成')[:300]}")
                             self._set_status(state=STATE_DWELLING,
-                                             message=f"识别完成：{detail[:300]}")
+                                             message=detail)
                         dwell_result = self._run_dwell(step, step.dwell_seconds)
                         if dwell_result == "CANCELED":
                             return self._canceled(completed_loops, completed_steps)

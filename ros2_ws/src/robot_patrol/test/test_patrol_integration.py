@@ -60,6 +60,7 @@ class FakeNav(Node):
         self.estop = False
         self.wrong_map = False
         self.tf_age_sec = 0.0
+        self.pose_x = self.pose_y = 0.0
         self.odom_linear_x = 0.0
         self.odom_angular_z = 0.0
         self.publish_odom = True
@@ -129,6 +130,8 @@ class FakeNav(Node):
         transform.header.stamp.sec -= int(self.tf_age_sec)
         transform.header.frame_id = "map"
         transform.child_frame_id = "base_link"
+        transform.transform.translation.x = self.pose_x
+        transform.transform.translation.y = self.pose_y
         transform.transform.rotation.w = 1.0
         self.tf.sendTransform(transform)
 

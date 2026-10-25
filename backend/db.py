@@ -17,7 +17,7 @@ DEFAULT_DB = (Path(os.environ.get("XDG_DATA_HOME", Path.home() / ".local/share")
 DB_PATH = Path(os.environ.get("ROBOT_PATROL_DB", str(DEFAULT_DB))).expanduser()
 WEB_MAP_DIR = Path(os.environ.get("ROBOT_WEB_MAP_DIR",
                                   str(PROJECT_ROOT / "web" / "maps"))).expanduser()
-SUPPORTED_SCHEMA_VERSION = 6
+SUPPORTED_SCHEMA_VERSION = 7
 SUPPORTED_SCHEMA_VERSIONS = frozenset(range(2, SUPPORTED_SCHEMA_VERSION + 1))
 
 _local = threading.local()

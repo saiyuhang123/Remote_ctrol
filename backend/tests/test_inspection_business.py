@@ -16,7 +16,7 @@ def fixture(tmp_path, monkeypatch):
     return _build_fixture(tmp_path, monkeypatch)
 
 
-@pytest.mark.parametrize('version', [2,3,4,5,6])
+@pytest.mark.parametrize('version', [2,3,4,5,6,7])
 def test_backend_accepts_supported_patrol_versions(tmp_path, monkeypatch, version):
     client, mapping, route = fixture(tmp_path, monkeypatch)
     with sqlite3.connect(tmp_path/'patrol.sqlite3') as connection:

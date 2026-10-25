@@ -38,6 +38,7 @@
 #include <QGraphicsView>
 #include <QScrollArea>
 #include <patrol_interfaces/srv/list_points.hpp>
+#include <patrol_interfaces/srv/point_shots.hpp>
 #include <patrol_interfaces/srv/get_runs.hpp>
 #include <patrol_interfaces/srv/get_home_point.hpp>
 #include <patrol_interfaces/srv/road_command.hpp>
@@ -191,6 +192,8 @@ private slots:
     auto *resultsTable = page.findChild<QTableWidget *>(QStringLiteral("patrolInspectionResultsTable"));
     QVERIFY(mapEdit && tabs && registerMap && saveCurrent && start);
     QVERIFY(inspectionEnabled && ptzPreset && savePreset && gotoPreset && prompt);
+    QVERIFY(page.findChild<QPushButton *>("patrolRecordPointShot"));
+    QVERIFY(!page.findChild<QPushButton *>("patrolRecordPointShot")->isEnabled());
     QVERIFY(resultsTable);
     QCOMPARE(mapEdit->text(), yaml);
     QCOMPARE(tabs->count(), 3); // 固定路线录制页暂时从操作界面移除
@@ -203,6 +206,145 @@ private slots:
     QVERIFY(readiness->text().contains(QStringLiteral("未选择已保存路线")));
     QVERIFY(readiness->text().contains(QStringLiteral("巡航后台未就绪")));
     QTest::qWait(300);
+    page.close();
+  }
+
+  void pointShotsCanBeRecordedReplacedAndDeletedFromUi() {
+    using Service = patrol_interfaces::srv::PointShots;
+    auto node = std::make_shared<rclcpp::Node>("point_shots_ui_fixture");
+    patrol_interfaces::msg::MapBinding map;
+    map.map_id = "shots-map"; map.name = "视角测试地图"; map.revision = 3;
+    patrol_interfaces::msg::PatrolPoint point;
+    point.point_id = "shots-point"; point.map_id = map.map_id;
+    point.name = "仪表点"; point.revision = 1;
+    QJsonArray shots;
+    int records = 0, deletes = 0;
+    int deviceSign = 0;
+    bool failRead = false;
+    auto maps = node->create_service<patrol_interfaces::srv::ListMaps>("/patrol/list_maps",
+      [&](const std::shared_ptr<patrol_interfaces::srv::ListMaps::Request>,
+          std::shared_ptr<patrol_interfaces::srv::ListMaps::Response> response) {
+        response->success = true; response->maps.push_back(map); response->active_map = map;
+      });
+    auto points = node->create_service<patrol_interfaces::srv::ListPoints>("/patrol/list_points",
+      [&](const std::shared_ptr<patrol_interfaces::srv::ListPoints::Request>,
+          std::shared_ptr<patrol_interfaces::srv::ListPoints::Response> response) {
+        response->success = true; response->points.push_back(point);
+      });
+    auto views = node->create_service<Service>("/patrol/point_shots",
+      [&](const std::shared_ptr<Service::Request> request, std::shared_ptr<Service::Response> response) {
+        if (request->command == Service::Request::GET && failRead) {
+          response->message = "模拟读取失败"; return;
+        }
+        if (request->command != Service::Request::GET) {
+          if (request->expected_revision != point.revision || request->map_revision != map.revision) {
+            response->message = "版本不符"; return;
+          }
+          const QString id = QString::fromStdString(request->shot_id);
+          if (request->command == Service::Request::RECORD) {
+            ++records;
+            QJsonObject shot{{"shot_id", id}, {"name", QString::fromStdString(request->shot_name)},
+              {"pan_cal", 120.+records}, {"tilt", -8.}, {"zoom", 2.}, {"yaw_cal", .3},
+              {"x_cal", 0.}, {"y_cal", 0.}, {"map_revision", static_cast<int>(map.revision)},
+              {"pan_sign", deviceSign}, {"settle_seconds", request->settle_seconds}};
+            int index = 0;
+            while (index < shots.size() && shots[index].toObject()["shot_id"].toString() != id) ++index;
+            if (index < shots.size()) shots[index] = shot; else shots.append(shot);
+          } else if (request->command == Service::Request::REMOVE) {
+            ++deletes;
+            for (int i = 0; i < shots.size(); ++i)
+              if (shots[i].toObject()["shot_id"].toString() == id) { shots.removeAt(i); break; }
+          } else if (request->command == Service::Request::CLEAR) shots = {};
+          ++point.revision;
+          point.inspection_enabled = !shots.isEmpty();
+        }
+        response->success = true; response->point = point; response->map_revision = map.revision;
+        response->device_pan_sign = static_cast<int8_t>(deviceSign);
+        response->shots_json = QJsonDocument(shots).toJson(QJsonDocument::Compact).toStdString();
+        response->message = "视角已更新";
+      });
+    auto status = node->create_publisher<patrol_interfaces::msg::PatrolStatus>(
+        "/patrol/status", rclcpp::QoS(1).reliable().transient_local());
+    Q_UNUSED(maps); Q_UNUSED(points); Q_UNUSED(views);
+    QTimer spin;
+    connect(&spin, &QTimer::timeout, this, [node] { rclcpp::spin_some(node); });
+    spin.start(10);
+    PatrolClient client;
+    PatrolPage page(&client, "", "amcl", "", "视角录入测试", false);
+    page.resize(1100, 850); page.show();
+    auto *table = page.findChild<QTableWidget *>("patrolPointsTable");
+    auto *combo = page.findChild<QComboBox *>("patrolPointShots");
+    auto *name = page.findChild<QLineEdit *>("patrolPointShotName");
+    auto *record = page.findChild<QPushButton *>("patrolRecordPointShot");
+    auto *remove = page.findChild<QPushButton *>("patrolDeletePointShot");
+    auto *clear = page.findChild<QPushButton *>("patrolClearPointShots");
+    auto *refresh = page.findChild<QPushButton *>("patrolRefreshPointShots");
+    auto *details = page.findChild<QLabel *>("patrolPointShotDetails");
+    QVERIFY(table && combo && name && record && remove && clear && refresh && details);
+    QVERIFY(!page.findChild<QComboBox *>("patrolPointShotPanSign"));
+    QTRY_VERIFY(client.pointShotsReady());
+    QTRY_COMPARE(table->rowCount(), 1);
+    table->selectRow(0);
+    QTRY_VERIFY(client.pointShots("shots-point").loaded);
+    QVERIFY(!record->isEnabled());
+    QVERIFY(details->text().contains("设备方向待确认"));
+    deviceSign = -1;  // Once-only deployment configuration, shared by every new view.
+    refresh->click();
+    QTRY_COMPARE(client.pointShots("shots-point").devicePanSign, -1);
+    name->setText("表计正面");
+    QTRY_VERIFY(record->isEnabled());
+    record->click();
+    QVERIFY(!record->isEnabled());
+    QTRY_COMPARE(records, 1);
+    QTRY_VERIFY(client.pointShots("shots-point").loaded && client.pointShots("shots-point").shots.size() == 1);
+    QTRY_COMPARE(combo->count(), 2); // One saved view plus optional add, never two required.
+    QTRY_VERIFY(!combo->currentData().toString().isEmpty());
+    const QString firstId = combo->currentData().toString();
+    QTRY_VERIFY(details->text().contains("121.00"));
+    QTRY_VERIFY(record->isEnabled());
+    QCOMPARE(shots[0].toObject()["pan_sign"].toInt(), -1);
+    page.findChild<QScrollArea *>("patrolPointEditorScroll")->ensureWidgetVisible(record);
+    page.grab().save("/tmp/ptz_shot_ui_preview.png");
+    name->setText("表计重新构图");
+    record->click();
+    QTRY_COMPARE(records, 2);
+    QTRY_VERIFY(client.pointShots("shots-point").loaded);
+    QTRY_COMPARE(combo->currentData().toString(), firstId);
+    QCOMPARE(shots.size(), 1);
+    QCOMPARE(shots[0].toObject()["name"].toString(), QString("表计重新构图"));
+    QTRY_VERIFY(record->isEnabled());
+    combo->setCurrentIndex(combo->findData(QString()));
+    name->setText("第二个表计");
+    record->click();
+    QTRY_COMPARE(records, 3);
+    QTRY_VERIFY(client.pointShots("shots-point").loaded && client.pointShots("shots-point").shots.size() == 2);
+    QTRY_VERIFY(combo->count() == 2 && !combo->itemData(0).toString().isEmpty() && !combo->itemData(1).toString().isEmpty());
+    patrol_interfaces::msg::PatrolStatus busy;
+    busy.active = true; busy.state = 3; busy.run_id = "fake-active-run";
+    status->publish(busy);
+    QTRY_VERIFY(!record->isEnabled());
+    QVERIFY(!remove->isEnabled());
+    busy.active = false; busy.state = 0; busy.run_id.clear(); status->publish(busy);
+    QTRY_VERIFY(record->isEnabled());
+    combo->setCurrentIndex(0);
+    remove->click();
+    QTRY_COMPARE(deletes, 1);
+    QTRY_VERIFY(client.pointShots("shots-point").loaded && client.pointShots("shots-point").shots.size() == 1);
+    QTRY_VERIFY(clear->isEnabled());
+    clear->click();
+    QTRY_VERIFY(client.pointShots("shots-point").loaded && client.pointShots("shots-point").shots.isEmpty());
+    QTRY_VERIFY(record->isEnabled());
+    failRead = true;
+    refresh->click();
+    QTRY_VERIFY(details->text().contains("读取视角失败"));
+    QVERIFY(!record->isEnabled());
+    failRead = false;
+    refresh->click();
+    QTRY_VERIFY(record->isEnabled());
+    PatrolPage offline(&client, "", "amcl", "", "离线测试", true);
+    QTRY_COMPARE(offline.findChild<QTableWidget *>("patrolPointsTable")->rowCount(), 1);
+    offline.findChild<QTableWidget *>("patrolPointsTable")->selectRow(0);
+    QVERIFY(!offline.findChild<QPushButton *>("patrolRecordPointShot")->isEnabled());
     page.close();
   }
 

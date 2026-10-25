@@ -81,6 +81,7 @@ class Point:
     inspection_enabled: bool = False
     ptz_preset: int = 0
     recognition_prompt: str = ""
+    shots: list = field(default_factory=list)
 
 
 @dataclass
@@ -96,6 +97,7 @@ class RouteStep:
     inspection_enabled: bool = False
     ptz_preset: int = 0
     recognition_prompt: str = ""
+    shots: list = field(default_factory=list)
 
 
 @dataclass
@@ -159,6 +161,7 @@ class RouteSnapshot:
                     "inspection_enabled": bool(getattr(step, "inspection_enabled", False)),
                     "ptz_preset": int(getattr(step, "ptz_preset", 0)),
                     "recognition_prompt": str(getattr(step, "recognition_prompt", "") or ""),
+                    "shots": [shot.as_dict() for shot in getattr(step, "shots", [])],
                 }
                 for step in self.steps
             ],
@@ -218,16 +221,21 @@ class InspectionResult:
     success: bool
     error_code: str = ""
     message: str = ""
+    shot_id: str = ""
+    shot_name: str = ""
+    metadata: dict = field(default_factory=dict)
 
 
 def validate_inspection_settings(enabled: bool, preset: int,
-                                   prompt: str) -> tuple[bool, int, str]:
+                                   prompt: str, has_shots: bool = False) -> tuple[bool, int, str]:
     enabled = bool(enabled)
     try:
         preset = int(preset)
     except (TypeError, ValueError) as error:
         raise PatrolError("INVALID_DATA", "云台预置位编号必须是整数") from error
-    if enabled and not (1 <= preset <= 255):
+    if has_shots and not 0 <= preset <= 255:
+        raise PatrolError("INVALID_DATA", "云台预置位编号必须在 0～255 之间")
+    if enabled and not has_shots and not (1 <= preset <= 255):
         raise PatrolError("INVALID_DATA", "启用巡检动作时必须选择 1～255 的云台预置位")
     return enabled, preset, str(prompt or "")[:2000]
 

@@ -135,3 +135,6 @@ ROS_DOMAIN_ID=226 ROS_LOCALHOST_ONLY=1 ROBOT_PATROL_INTEGRATION=1 \
 - 点位/路线 JSON 导入导出、CLAIM 租约、RViz Marker 预览尚未完成。
 - 暂停通过取消当前 Nav2 goal 后重发同一点实现，最终实车行为需要现场验证。
 - 本轮只在隔离 ROS 域中验证 guard、心跳、mux 锁语义和停止路径，未启动实车底盘或发送真实运动目标。
+## 两个低倍视角拍照（第一版）
+
+已保存点位可在桌面“点位管理 → 到点巡检动作 → 拍摄视角”记录一个或两个 1～4× 视角，也可使用 `ros2 run robot_patrol ptz_shots record`，并从现有单点/路线巡检入口执行。新序列根据标定与当前 `map→base_link` yaw 的差值补偿，确认实际角度和倍率到位后逐张存图，不调用识别。没有视角配置的点保留原预置位行为。标定记录由 `/patrol/point_shots` 服务写入，修改时检查地图、点位版本和任务空闲状态；数据库升级为 v7 并保留迁移前备份。完整准备、标定、测试与图片位置见 [第一版说明](../../../docs/ptz_shot_sequence_v1.md)。

@@ -27,6 +27,7 @@ setup(
             "patrol_guard = robot_patrol.guard:main",
             "inspection_recorder = robot_patrol.inspection_recorder:main",
             "patrol_cli = robot_patrol.cli:main",
+            "ptz_shots = robot_patrol.ptz_shots_cli:main",
         ],
     },
 )

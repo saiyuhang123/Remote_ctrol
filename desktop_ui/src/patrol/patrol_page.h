@@ -82,6 +82,12 @@ private:
   void syncStepTable();
   void updateRoutePreview();
   void updatePointFormFromSelection();
+  QString selectedPointId() const;
+  void loadPointShots();
+  void populatePointShots();
+  void updateShotForm();
+  void recordSelectedShot();
+  void deleteSelectedShot();
   void updateActionStates();
   void setMessage(const QString &message, bool error = false);
   bool confirmDraftDiscard();
@@ -136,6 +142,15 @@ private:
   QPushButton *pointGotoPtzPreset_ = nullptr;
   QPlainTextEdit *pointRecognitionPrompt_ = nullptr;
   QWidget *pointInspectionGroup_ = nullptr;
+  QString shotPointId_, selectedShotId_;
+  QComboBox *pointShotsCombo_ = nullptr;
+  QLineEdit *pointShotName_ = nullptr;
+  QLabel *pointShotDetails_ = nullptr;
+  QDoubleSpinBox *pointShotSettle_ = nullptr;
+  QPushButton *pointRecordShot_ = nullptr;
+  QPushButton *pointDeleteShot_ = nullptr;
+  QPushButton *pointClearShots_ = nullptr;
+  QPushButton *pointRefreshShots_ = nullptr;
   QPushButton *saveCurrentPointButton_ = nullptr;
   QPushButton *upsertPointButton_ = nullptr;
   QPushButton *deletePointButton_ = nullptr;

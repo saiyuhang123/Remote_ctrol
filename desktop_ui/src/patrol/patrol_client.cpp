@@ -3,6 +3,8 @@
 #include <QUuid>
 #include <QDateTime>
 #include <QJsonDocument>
+#include <QHash>
+#include <QTimer>
 #include <algorithm>
 #include <atomic>
 #include <chrono>
@@ -32,6 +34,7 @@
 #include <patrol_interfaces/msg/inspection_result.hpp>
 #include <patrol_interfaces/srv/list_maps.hpp>
 #include <patrol_interfaces/srv/list_points.hpp>
+#include <patrol_interfaces/srv/point_shots.hpp>
 #include <patrol_interfaces/srv/list_routes.hpp>
 #include <patrol_interfaces/srv/register_map.hpp>
 #include <patrol_interfaces/srv/reset_interlock.hpp>
@@ -173,6 +176,7 @@ struct PatrolClient::Impl {
   rclcpp::Client<patrol_interfaces::srv::RegisterMap>::SharedPtr registerMap;
   rclcpp::Client<patrol_interfaces::srv::SetActiveMap>::SharedPtr setActiveMap;
   rclcpp::Client<patrol_interfaces::srv::ListPoints>::SharedPtr listPoints;
+  rclcpp::Client<patrol_interfaces::srv::PointShots>::SharedPtr pointShots;
   rclcpp::Client<patrol_interfaces::srv::UpsertPoint>::SharedPtr upsertPoint;
   rclcpp::Client<patrol_interfaces::srv::DeletePoint>::SharedPtr deletePoint;
   rclcpp::Client<patrol_interfaces::srv::SaveCurrentPoint>::SharedPtr saveCurrentPoint;
@@ -203,6 +207,8 @@ struct PatrolClient::Impl {
   QVector<PatrolMapInfo> mapsData;
   QString activeMapId;
   QVector<PatrolPointInfo> pointsData;
+  QHash<QString, PatrolPointShotsInfo> pointShotsData;
+  std::atomic_bool shotWritePending{false};
   QVector<PatrolRouteInfo> routesData;
   QVector<PatrolRunInfo> runsData;
   QVector<PatrolInspectionResultInfo> inspectionResultsData;
@@ -215,6 +221,7 @@ struct PatrolClient::Impl {
     registerMap = node->create_client<patrol_interfaces::srv::RegisterMap>("/patrol/register_map");
     setActiveMap = node->create_client<patrol_interfaces::srv::SetActiveMap>("/patrol/set_active_map");
     listPoints = node->create_client<patrol_interfaces::srv::ListPoints>("/patrol/list_points");
+    pointShots = node->create_client<patrol_interfaces::srv::PointShots>("/patrol/point_shots");
     upsertPoint = node->create_client<patrol_interfaces::srv::UpsertPoint>("/patrol/upsert_point");
     deletePoint = node->create_client<patrol_interfaces::srv::DeletePoint>("/patrol/delete_point");
     saveCurrentPoint = node->create_client<patrol_interfaces::srv::SaveCurrentPoint>("/patrol/save_current_point");
@@ -544,6 +551,140 @@ void PatrolClient::upsertPoint(const QString &pointId, const QString &mapId, con
   Q_UNUSED(expectedRevision); Q_UNUSED(inspectionEnabled); Q_UNUSED(ptzPreset);
   Q_UNUSED(recognitionPrompt);
   PATROL_UNAVAILABLE(QStringLiteral("保存点位"));
+#endif
+}
+
+bool PatrolClient::pointShotsReady() const {
+#ifdef DESKTOP_HAS_PATROL_INTERFACES
+  return impl_->pointShots->service_is_ready();
+#else
+  return false;
+#endif
+}
+
+bool PatrolClient::pointShotsBusy() const {
+#ifdef DESKTOP_HAS_PATROL_INTERFACES
+  return impl_->shotWritePending.load();
+#else
+  return false;
+#endif
+}
+
+PatrolPointShotsInfo PatrolClient::pointShots(const QString &pointId) const {
+#ifdef DESKTOP_HAS_PATROL_INTERFACES
+  std::lock_guard<std::mutex> lock(impl_->mutex);
+  return impl_->pointShotsData.value(pointId);
+#else
+  Q_UNUSED(pointId);
+  return {};
+#endif
+}
+
+void PatrolClient::refreshPointShots(const QString &pointId) {
+  if (!pointId.isEmpty()) sendPointShots(0, pointId);
+}
+
+void PatrolClient::recordPointShot(const QString &pointId, const QString &mapId, quint64 mapRevision,
+                                    quint64 pointRevision, const QString &shotId, const QString &name,
+                                    double settleSeconds) {
+  sendPointShots(3, pointId, mapId, mapRevision, pointRevision, shotId, name, settleSeconds);
+}
+
+void PatrolClient::removePointShot(const QString &pointId, const QString &mapId, quint64 mapRevision,
+                                    quint64 pointRevision, const QString &shotId) {
+  sendPointShots(4, pointId, mapId, mapRevision, pointRevision, shotId);
+}
+
+void PatrolClient::clearPointShots(const QString &pointId, const QString &mapId, quint64 mapRevision,
+                                    quint64 pointRevision) {
+  sendPointShots(2, pointId, mapId, mapRevision, pointRevision);
+}
+
+void PatrolClient::sendPointShots(quint8 command, const QString &pointId, const QString &mapId,
+                                  quint64 mapRevision, quint64 pointRevision, const QString &shotId,
+                                  const QString &name, double settleSeconds) {
+  const QString operation = command == 0 ? QStringLiteral("读取拍摄视角")
+                            : command == 3 ? QStringLiteral("记录拍摄视角")
+                            : command == 2 ? QStringLiteral("清空拍摄视角") : QStringLiteral("删除拍摄视角");
+#ifdef DESKTOP_HAS_PATROL_INTERFACES
+  using Service = patrol_interfaces::srv::PointShots;
+  if (!pointShotsReady()) {
+    emit operationFinished(operation, false, QStringLiteral("视角服务未就绪，请启动更新后的巡检会话"));
+    return;
+  }
+  const bool write = command != Service::Request::GET;
+  if (write && impl_->shotWritePending.exchange(true)) {
+    emit operationFinished(operation, false, QStringLiteral("正在处理视角，请等待完成"));
+    return;
+  }
+  if (!write) {
+    std::lock_guard<std::mutex> lock(impl_->mutex);
+    impl_->pointShotsData[pointId].loaded = false;
+  }
+  emit pointShotsChanged(pointId);
+  auto request = std::make_shared<Service::Request>();
+  request->command = command; request->point_id = pointId.toStdString();
+  request->map_id = mapId.toStdString(); request->map_revision = mapRevision;
+  request->expected_revision = pointRevision; request->shot_id = shotId.toStdString();
+  request->shot_name = name.toStdString();
+  request->settle_seconds = settleSeconds;
+  auto completed = std::make_shared<std::atomic_bool>(false);
+  const auto finish = [this, pointId, mapId, operation, write, completed](
+                          const Service::Response::SharedPtr &response, const QString &failure) {
+    if (completed->exchange(true)) {
+      // A timed-out write may still commit. Refresh its authoritative result.
+      if (write && response && response->success) {
+        refreshPoints(mapId); refreshRoutes(mapId); refreshPointShots(pointId);
+      }
+      return;
+    }
+    if (write) impl_->shotWritePending.store(false);
+    if (!response || !response->success) {
+      emit pointShotsChanged(pointId);
+      emit operationFinished(operation, false, response ? QString::fromStdString(response->message) : failure);
+      return;
+    }
+    const auto document = QJsonDocument::fromJson(QByteArray::fromStdString(response->shots_json));
+    if (!document.isArray() || QString::fromStdString(response->point.point_id) != pointId) {
+      emit pointShotsChanged(pointId);
+      emit operationFinished(operation, false, QStringLiteral("视角服务返回了无效数据，请刷新重试"));
+      return;
+    }
+    PatrolPointShotsInfo info;
+    info.point = pointInfo(response->point); info.mapRevision = response->map_revision;
+    info.devicePanSign = response->device_pan_sign;
+    info.shots = document.array(); info.loaded = true;
+    {
+      std::lock_guard<std::mutex> lock(impl_->mutex);
+      auto &previous = impl_->pointShotsData[pointId];
+      if (info.point.revision >= previous.point.revision) previous = info;
+    }
+    emit pointShotsChanged(pointId);
+    if (write) {
+      emit operationFinished(operation, true, QString::fromStdString(response->message));
+      refreshPoints(mapId); refreshRoutes(mapId);
+    }
+  };
+  try {
+    impl_->pointShots->async_send_request(request, [this, finish](rclcpp::Client<Service>::SharedFuture future) {
+      try {
+        auto response = future.get();
+        QMetaObject::invokeMethod(this, [finish, response] { finish(response, {}); }, Qt::QueuedConnection);
+      } catch (const std::exception &error) {
+        const QString message = QString::fromUtf8(error.what());
+        QMetaObject::invokeMethod(this, [finish, message] { finish({}, message); }, Qt::QueuedConnection);
+      }
+    });
+    QTimer::singleShot(15000, this, [finish, completed] {
+      if (!completed->load()) finish({}, QStringLiteral("视角请求超时，请刷新点位确认保存结果"));
+    });
+  } catch (const std::exception &error) {
+    finish({}, QString::fromUtf8(error.what()));
+  }
+#else
+  Q_UNUSED(command); Q_UNUSED(pointId); Q_UNUSED(mapId); Q_UNUSED(mapRevision); Q_UNUSED(pointRevision);
+  Q_UNUSED(shotId); Q_UNUSED(name); Q_UNUSED(settleSeconds);
+  PATROL_UNAVAILABLE(operation);
 #endif
 }
 

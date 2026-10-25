@@ -14,7 +14,7 @@ def point_route(store, request, mapping):
         step = RouteStep(point_id=point.point_id, dwell_seconds=0., point_name=point.name,
                          x=point.x, y=point.y, yaw=point.yaw,
                          inspection_enabled=point.inspection_enabled, ptz_preset=point.ptz_preset,
-                         recognition_prompt=point.recognition_prompt)
+                         recognition_prompt=point.recognition_prompt, shots=list(point.shots))
     else:
         enabled, preset, prompt = validate_inspection_settings(
             request.inspection_enabled, request.ptz_preset, request.recognition_prompt)

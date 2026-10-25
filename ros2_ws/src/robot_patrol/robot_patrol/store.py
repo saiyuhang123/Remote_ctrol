@@ -28,7 +28,7 @@ from .models import (
     validate_route_steps,
 )
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 
 
 class PatrolStore(RoadStorage):
@@ -275,6 +275,7 @@ class PatrolStore(RoadStorage):
             "inspection_enabled": "INTEGER NOT NULL DEFAULT 0",
             "ptz_preset": "INTEGER NOT NULL DEFAULT 0",
             "recognition_prompt": "TEXT NOT NULL DEFAULT ''",
+            "ptz_shots_json": "TEXT NOT NULL DEFAULT '[]'",
         }
         for name, declaration in additions.items():
             if name not in columns:
@@ -288,6 +289,11 @@ class PatrolStore(RoadStorage):
             self._conn.execute(
                 "ALTER TABLE inspection_results ADD COLUMN ptz_preset INTEGER "
                 "NOT NULL DEFAULT 0")
+        for name, declaration in {'shot_id': "TEXT NOT NULL DEFAULT ''",
+                                  'shot_name': "TEXT NOT NULL DEFAULT ''",
+                                  'metadata_json': "TEXT NOT NULL DEFAULT '{}'"}.items():
+            if name not in result_columns:
+                self._conn.execute(f'ALTER TABLE inspection_results ADD COLUMN {name} {declaration}')
 
     @staticmethod
     def _map_from_row(row: sqlite3.Row) -> MapBinding:
@@ -307,6 +313,7 @@ class PatrolStore(RoadStorage):
 
     @staticmethod
     def _point_from_row(row: sqlite3.Row) -> Point:
+        from .ptz_shots import parse_shots
         return Point(
             point_id=row["point_id"], map_id=row["map_id"], name=row["name"],
             x=row["x"], y=row["y"], yaw=row["yaw"], source=row["source"],
@@ -315,6 +322,7 @@ class PatrolStore(RoadStorage):
             inspection_enabled=bool(row["inspection_enabled"]),
             ptz_preset=int(row["ptz_preset"]),
             recognition_prompt=str(row["recognition_prompt"] or ""),
+            shots=parse_shots(row['ptz_shots_json']),
         )
 
     @staticmethod
@@ -339,6 +347,8 @@ class PatrolStore(RoadStorage):
             prompt=row["prompt"], image_path=row["image_path"], text=row["text"],
             model=row["model"], success=bool(row["success"]),
             error_code=row["error_code"], message=row["message"],
+            shot_id=row['shot_id'], shot_name=row['shot_name'],
+            metadata=json.loads(row['metadata_json']),
         )
 
     @staticmethod
@@ -488,16 +498,18 @@ class PatrolStore(RoadStorage):
         if not all(math.isfinite(float(v)) for v in (x, y, yaw)):
             raise PatrolError("INVALID_DATA", "点位坐标必须是有限数值")
         name = validate_name(name, "点位名称")
-        inspection_enabled, ptz_preset, recognition_prompt = \
-            validate_inspection_settings(inspection_enabled, ptz_preset,
-                                         recognition_prompt)
         self.get_map(map_id)
         now = now_ns()
         with self._transaction() as conn:
             row = None
             if point_id:
                 row = conn.execute("SELECT * FROM points WHERE point_id = ?", (point_id,)).fetchone()
+            inspection_enabled, ptz_preset, recognition_prompt = validate_inspection_settings(
+                inspection_enabled, ptz_preset, recognition_prompt,
+                has_shots=bool(row and json.loads(row['ptz_shots_json'])))
             if row:
+                if row['map_id'] != map_id and json.loads(row['ptz_shots_json']):
+                    raise PatrolError('MAP_MISMATCH', '已标定视角的点位不能移到其他地图，请先清除视角')
                 if int(expected_revision) != int(row["revision"]):
                     raise PatrolError("STALE_DATA", "点位已被其他会话修改，请刷新后重试")
                 revision = int(row["revision"]) + 1
@@ -533,6 +545,32 @@ class PatrolStore(RoadStorage):
             row = conn.execute("SELECT * FROM points WHERE point_id = ?", (chosen_id,)).fetchone()
             return self._point_from_row(row)
 
+    def replace_point_shots(self, point_id, map_id, map_revision, expected_revision, shots):
+        from .ptz_shots import parse_shots, shots_json
+        import math
+        shots = parse_shots(shots)
+        with self._transaction() as conn:
+            row = conn.execute('SELECT * FROM points WHERE point_id=?', (point_id,)).fetchone()
+            mapping = conn.execute('SELECT * FROM maps WHERE map_id=?', (map_id,)).fetchone()
+            if row is None or mapping is None or row['map_id'] != map_id:
+                raise PatrolError('MAP_MISMATCH', '点位或地图不匹配')
+            if not expected_revision or row['revision'] != expected_revision:
+                raise PatrolError('STALE_DATA', '点位版本已变化，请重新读取后标定')
+            if not map_revision or mapping['revision'] != map_revision:
+                raise PatrolError('STALE_DATA', '地图版本已变化，请重新标定')
+            for shot in shots:
+                if shot.map_revision != map_revision:
+                    raise PatrolError('STALE_DATA', '视角标定与当前地图版本不一致')
+                if math.hypot(shot.x_cal-row['x'], shot.y_cal-row['y']) > .3:
+                    raise PatrolError('INVALID_SHOTS', '请停到距该点 0.3 米内再记录视角')
+            enabled = bool(shots) or (bool(row['inspection_enabled']) and 1 <= row['ptz_preset'] <= 255)
+            now = now_ns()
+            conn.execute('UPDATE points SET ptz_shots_json=?,inspection_enabled=?,revision=revision+1,updated_at=? '
+                         'WHERE point_id=?', (shots_json(shots), int(enabled), now, point_id))
+            conn.execute('UPDATE routes SET revision=revision+1,updated_at=? WHERE route_id IN '
+                         '(SELECT route_id FROM route_steps WHERE point_id=?)', (now, point_id))
+            return self._point_from_row(conn.execute('SELECT * FROM points WHERE point_id=?', (point_id,)).fetchone())
+
     def delete_point(self, point_id: str, expected_revision: int = 0) -> None:
         with self._transaction() as conn:
             row = conn.execute("SELECT * FROM points WHERE point_id = ?", (point_id,)).fetchone()
@@ -554,7 +592,7 @@ class PatrolStore(RoadStorage):
         rows = conn.execute(
             """SELECT s.step_id, s.step_order, s.point_id, s.dwell_seconds,
                       p.name AS point_name, p.x, p.y, p.yaw,
-                      p.inspection_enabled, p.ptz_preset, p.recognition_prompt
+                      p.inspection_enabled, p.ptz_preset, p.recognition_prompt, p.ptz_shots_json
                FROM route_steps s JOIN points p ON p.point_id=s.point_id
                WHERE s.route_id=? ORDER BY s.step_order""", (route_id,)
         ).fetchall()
@@ -566,8 +604,14 @@ class PatrolStore(RoadStorage):
                 inspection_enabled=bool(row["inspection_enabled"]),
                 ptz_preset=int(row["ptz_preset"]),
                 recognition_prompt=str(row["recognition_prompt"] or ""),
+                shots=self._parse_shots(row['ptz_shots_json']),
             ) for row in rows
         ]
+
+    @staticmethod
+    def _parse_shots(value):
+        from .ptz_shots import parse_shots
+        return parse_shots(value)
 
     def _route_from_row(self, conn: sqlite3.Connection, row: sqlite3.Row) -> Route:
         return Route(
@@ -728,14 +772,15 @@ class PatrolStore(RoadStorage):
                 """INSERT OR REPLACE INTO inspection_results(
                    result_id,run_id,map_id,point_id,point_name,loop_index,step_index,
                    started_at,finished_at,ptz_preset,prompt,image_path,
-                   text,model,success,error_code,message)
-                   VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                   text,model,success,error_code,message,shot_id,shot_name,metadata_json)
+                   VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (result.result_id, result.run_id, result.map_id, result.point_id,
                  result.point_name, int(result.loop_index), int(result.step_index),
                  int(result.started_at_ns), int(result.finished_at_ns),
                  int(result.ptz_preset),
                  result.prompt, result.image_path, result.text, result.model,
-                 1 if result.success else 0, result.error_code, result.message),
+                 1 if result.success else 0, result.error_code, result.message,
+                 result.shot_id, result.shot_name, json.dumps(result.metadata, ensure_ascii=False, allow_nan=False)),
             )
 
     def list_inspection_results(self, map_id: str = "", run_id: str = "",

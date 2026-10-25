@@ -29,7 +29,7 @@ class InspectionClient:
     MultiThreadedExecutor while this worker waits on futures.
     """
 
-    def __init__(self, node, store, callback_group=None):
+    def __init__(self, node, store, callback_group=None, pose_provider=None):
         from hk_camera.srv import CapturePicture, PTZPreset
         from ocr_interfaces.srv import RecognizeImage
 
@@ -59,6 +59,8 @@ class InspectionClient:
         self.default_prompt = str(
             node.get_parameter("inspection_default_prompt").value).strip()
         self.ptz_lease = PtzInspectionLease(node, self._call, self._check_control, self.service_timeout, callback_group)
+        from .ptz_sequence import PtzShotSequence
+        self.sequence = PtzShotSequence(self, callback_group, pose_provider)
 
     def _check_control(self, flags):
         if flags is not None and flags.cancel_requested:
@@ -68,6 +70,9 @@ class InspectionClient:
         lease = getattr(self, 'ptz_lease', None)
         if lease is not None:
             lease.check()
+        pose_guard = getattr(self, 'sequence_pose_guard', None)
+        if pose_guard is not None:
+            pose_guard()
 
     def _wait(self, seconds, flags):
         deadline = time.monotonic() + max(0.0, seconds)
@@ -78,7 +83,7 @@ class InspectionClient:
                 return
             time.sleep(min(0.05, remaining))
 
-    def _call(self, client, request, timeout: float, label: str, flags=None):
+    def _call(self, client, request, timeout: float, label: str, flags=None, on_abandoned=None):
         available_until = time.monotonic() + min(3.0, max(0.1, timeout))
         while True:
             self._check_control(flags)
@@ -101,12 +106,15 @@ class InspectionClient:
                     self._check_control(flags)
                     break
         except PatrolError:
-            # ROS services cannot retract a request already received by the
-            # device. Retire the local future and never consume its late result
-            # or dispatch a subsequent camera/recognition operation.
-            future.cancel()
-            if hasattr(client, "remove_pending_request"):
-                client.remove_pending_request(future)
+            # ROS cannot retract a device request. Positioning retains a hook
+            # that stops again after a late reply; other operations retire the
+            # local future and cannot dispatch subsequent capture/recognition.
+            if on_abandoned is not None:
+                on_abandoned(future)
+            else:
+                future.cancel()
+                if hasattr(client, "remove_pending_request"):
+                    client.remove_pending_request(future)
             raise
         error = future.exception()
         if error is not None:
@@ -116,6 +124,8 @@ class InspectionClient:
     def run(self, step, run_id: str, map_id: str, loop_index: int, step_index: int,
             status_cb: Callable[..., Any] | None = None, flags=None) -> InspectionOutcome:
         """Run one point inspection, persist the result, and return the outcome."""
+        if getattr(step, 'shots', None):
+            return self.sequence.run(step, run_id, map_id, loop_index, step_index, status_cb, flags)
         started_at = now_ns()
         prompt = (getattr(step, "recognition_prompt", "") or self.default_prompt).strip()
         image_path = ""

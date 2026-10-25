@@ -39,8 +39,20 @@ robot_patrol:
     inspection_service_timeout_sec: 5.0
     inspection_capture_timeout_sec: 15.0
     inspection_recognition_timeout_sec: 150.0
-    # Device cannot report absolute pan/tilt. Presets are device-side,
-    # repeatable positions; wait this long for the camera to finish moving.
+    # Low-zoom sequence: enabled only on points explicitly calibrated with ptz_shots.
+    # Device-wide, confirmed once: left turn decreases pan -> -1; increases -> 1.
+    # Keep 0 until hardware confirmation. UI and CLI never ask per view.
+    inspection_shot_pan_sign: 0
+    inspection_shot_arrival_timeout_sec: 30.0
+    inspection_shot_poll_sec: 0.3
+    inspection_shot_stable_sec: 0.6
+    inspection_shot_angle_tolerance_deg: 0.3
+    inspection_shot_zoom_tolerance: 0.15
+    inspection_shot_position_tolerance_m: 0.25
+    inspection_shot_base_motion_m: 0.05
+    inspection_shot_base_motion_deg: 1.0
+    inspection_shot_stop_timeout_sec: 1.5
+    # Legacy device-side presets: allow time for the camera to finish moving.
     inspection_preset_settle_sec: 5.0
     inspection_preset_service: "/hk_camera/preset"
     inspection_capture_service: "/hk_camera/capture"

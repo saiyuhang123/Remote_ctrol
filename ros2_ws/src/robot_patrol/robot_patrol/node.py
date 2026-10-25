@@ -21,6 +21,7 @@ from builtin_interfaces.msg import Time as TimeMsg
 from geometry_msgs.msg import Twist
 from nav_msgs.msg import OccupancyGrid, Odometry
 from std_msgs.msg import Bool, String
+from hk_camera.srv import GetPTZPose
 from .tf_feedback import TfFeedback
 
 from patrol_interfaces.action import InspectPoint, ReturnHome, RunRoute
@@ -38,6 +39,7 @@ from patrol_interfaces.srv import (
     ListMaps,
     ListPoints,
     ListRoutes,
+    PointShots,
     RegisterMap,
     SaveCurrentPoint,
     SetActiveMap,
@@ -73,7 +75,7 @@ def _copy_time(value):
     return SimpleNamespace(sec=value.sec, nanosec=value.nanosec)
 
 
-def lookup_tf_pose(node, target_frame, label):
+def lookup_tf_pose(node, target_frame, label, max_age=None):
     """Resolve target_frame -> base_link with the node's TF age guard."""
     try:
         transform = node.tf_buffer.lookup_transform(
@@ -84,6 +86,8 @@ def lookup_tf_pose(node, target_frame, label):
         stamp = transform.header.stamp
         age = (node.get_clock().now() - Time.from_msg(stamp)).nanoseconds / 1_000_000_000.0
         limit = float(node.get_parameter("tf_max_age_sec").value)
+        if max_age is not None:
+            limit = min(limit, max_age)
         if age < -0.5:
             raise PatrolError("STALE_DATA", f"{label} TF 时间超前 {-age:.2f} 秒，请检查时钟同步")
         if age > limit:
@@ -141,6 +145,7 @@ class PatrolNode(Node):
         self.declare_parameter('inspection_capture_timeout_sec', 15.0)
         self.declare_parameter('inspection_recognition_timeout_sec', 150.0)
         self.declare_parameter('inspection_preset_settle_sec', 5.0)
+        self.declare_parameter('inspection_shot_pan_sign', 0)
         self.declare_parameter('inspection_preset_service', '/hk_camera/preset')
         self.declare_parameter('inspection_capture_service', '/hk_camera/capture')
         self.declare_parameter('inspection_recognition_service', '/vision/recognize_image')
@@ -159,6 +164,9 @@ class PatrolNode(Node):
         self._active_map_id = self._store.get_active_map_id()
         self._active_map_lock = threading.RLock()
         self._run_lock = threading.RLock()
+        self._shot_recording = False
+        self._shot_pose_client = self.create_client(
+            GetPTZPose, '/hk_camera/get_ptz_pose', callback_group=self._callback_group)
         self._active_engine: PatrolEngine | None = None
         self._active_driver: Nav2Driver | None = None
         self._active_goal_handle = None
@@ -263,6 +271,7 @@ class PatrolNode(Node):
         service(SetActiveMap, "/patrol/set_active_map", self._on_set_active_map)
         service(ListPoints, "/patrol/list_points", self._on_list_points)
         service(UpsertPoint, "/patrol/upsert_point", self._on_upsert_point)
+        service(PointShots, "/patrol/point_shots", self._on_point_shots)
         service(DeletePoint, "/patrol/delete_point", self._on_delete_point)
         service(SaveCurrentPoint, "/patrol/save_current_point", self._on_save_current_point)
         service(ListRoutes, "/patrol/list_routes", self._on_list_routes)
@@ -288,7 +297,7 @@ class PatrolNode(Node):
         self._publish_executor_heartbeat()
         self.roads = RoadComponent(self)
         self._inspection_client = InspectionClient(
-            self, self._store, callback_group=self._callback_group)
+            self, self._store, callback_group=self._callback_group, pose_provider=self._current_pose)
 
     def destroy_node(self):
         inspection = getattr(self, '_inspection_client', None)
@@ -835,6 +844,107 @@ class PatrolNode(Node):
             response.message = error.message
         return response
 
+    def _on_point_shots(self, request, response):
+        from .ptz_shots import device_pan_sign, parse_shots, shots_json
+        recording = False
+        editing = False
+        try:
+            point = self._store.get_point(request.point_id)
+            mapping = self._store.get_map(point.map_id)
+            if request.command != PointShots.Request.GET:
+                if request.command not in (PointShots.Request.REPLACE, PointShots.Request.CLEAR,
+                                           PointShots.Request.RECORD, PointShots.Request.REMOVE):
+                    raise PatrolError('INVALID_DATA', '未知视角管理命令')
+                with self._run_lock:
+                    if (self._shot_recording or self._run_reserved or self._active_engine is not None or
+                            self._active_goal_handle is not None or self._return_active or
+                            self._return_goal_handle is not None or self._hazard_driver is not None):
+                        raise PatrolError('BUSY', '请先结束巡检或返航，再修改标定视角')
+                    if self._active_map().map_id != mapping.map_id:
+                        raise PatrolError('MAP_MISMATCH', '只能标定当前活跃地图的点位')
+                    if request.map_id != point.map_id:
+                        raise PatrolError('MAP_MISMATCH', '点位或地图不匹配')
+                    if request.expected_revision != point.revision or request.map_revision != mapping.revision:
+                        raise PatrolError('STALE_DATA', '点位或地图版本已变化，请刷新后重试')
+                    self._shot_recording = editing = True
+                    recording = request.command == PointShots.Request.RECORD
+                if recording:
+                    sign = device_pan_sign(self, required=True)
+                    shots = list(point.shots)
+                    index = next((i for i, item in enumerate(shots) if item.shot_id == request.shot_id), len(shots))
+                    if index == len(shots) and len(shots) >= 2:
+                        raise PatrolError('INVALID_SHOTS', '每个点最多两个视角；请选中原视角重新记录或先删除')
+                    if shots and sign != shots[0].pan_sign:
+                        raise PatrolError('INVALID_SHOTS', '已有视角与设备方向配置不一致，请清空后重新记录')
+                    shot = self._record_point_shot(point, mapping.revision, request, sign)
+                    if index == len(shots):
+                        shots.append(shot)
+                    else:
+                        shots[index] = shot
+                elif request.command == PointShots.Request.REMOVE:
+                    shots = [item for item in point.shots if item.shot_id != request.shot_id]
+                    if len(shots) == len(point.shots):
+                        raise PatrolError('INVALID_SHOTS', '未找到所选视角，请刷新后重试')
+                else:
+                    shots = [] if request.command == PointShots.Request.CLEAR else parse_shots(request.shots_json)
+                with self._run_lock:
+                    if self._active_map().map_id != mapping.map_id:
+                        raise PatrolError('MAP_MISMATCH', '活跃地图已变化，请重新选择点位')
+                    if recording and device_pan_sign(self, required=True) != sign:
+                        raise PatrolError('STALE_DATA', '设备配置已变化，请重新记录')
+                    configured_sign = device_pan_sign(self)
+                    if configured_sign and request.command == PointShots.Request.REPLACE and any(
+                            shot.pan_sign != configured_sign for shot in shots):
+                        raise PatrolError('INVALID_SHOTS', '视角方向必须与设备统一配置一致')
+                    point = self._store.replace_point_shots(request.point_id, request.map_id,
+                        request.map_revision, request.expected_revision, shots)
+            response.point = self._to_ros_point(point)
+            response.map_revision = mapping.revision
+            response.map_frame = str(self.get_parameter('map_frame').value)
+            response.base_frame = str(self.get_parameter('base_frame').value)
+            response.device_pan_sign = device_pan_sign(self)
+            response.shots_json = shots_json(point.shots)
+            response.success = True
+            response.message = (f'已保存 {len(point.shots)} 个拍摄视角；到点后按朝向补偿并拍照'
+                if point.shots else '未配置拍摄视角；按原点位巡检设置执行')
+        except PatrolError as error:
+            response.success, response.message = False, error.message
+        except Exception as error:
+            response.success, response.message = False, f'视角操作失败：{error}'
+        finally:
+            if editing:
+                with self._run_lock:
+                    self._shot_recording = False
+        return response
+
+    def _record_point_shot(self, point, map_revision, request, pan_sign):
+        from .ptz_shots import recorded_shot
+        args = SimpleNamespace(shot_id=request.shot_id, name=request.shot_name,
+                               pan_sign=pan_sign, settle_seconds=request.settle_seconds)
+        def pose():
+            return lookup_tf_pose(self, self.get_parameter('map_frame').value, 'map→base_link', max_age=1.)
+
+        def read_actual():
+            client = self._shot_pose_client
+            if not client.wait_for_service(timeout_sec=.5):
+                raise PatrolError('CAMERA_NOT_READY', '相机读数服务未就绪，请先启动相机')
+            future = client.call_async(GetPTZPose.Request())
+            done = threading.Event()
+            future.add_done_callback(lambda _: done.set())
+            if not done.wait(5.):
+                client.remove_pending_request(future)
+                raise PatrolError('CAMERA_TIMEOUT', '读取实际云台位置超时，请检查相机与 485 通信')
+            actual = future.result()
+            if not actual.success:
+                raise PatrolError('CAMERA_READ_FAILED', actual.message or '读取实际云台位置失败')
+            return actual
+
+        before = pose()
+        first = read_actual()
+        time.sleep(.6)
+        second = read_actual()
+        return recorded_shot(point, map_revision, args, before, first, second, pose())
+
     def _on_delete_point(self, request, response):
         try:
             self._store.delete_point(request.point_id, request.expected_revision)
@@ -1088,6 +1198,8 @@ class PatrolNode(Node):
         if self.roads.busy_recording():
             return GoalResponse.REJECT
         with self._run_lock:
+            if self._shot_recording:
+                return GoalResponse.REJECT
             hazard = self._hazard_driver
             if hazard is not None:
                 if not hazard.stop_safe():
@@ -1123,7 +1235,7 @@ class PatrolNode(Node):
         # Match the road service lock order so a passive recording cannot
         # start between goal acceptance and reserving the execution slot.
         with self.roads.lock, self._run_lock:
-            if self.roads.recorder is not None:
+            if self.roads.recorder is not None or self._shot_recording:
                 result.error_code, result.message = 'BUSY', '请先保存或放弃当前录制草稿'
                 result.final_state = STATE_FAILED
                 goal_handle.abort()
@@ -1367,7 +1479,7 @@ class PatrolNode(Node):
         if self.roads.busy_recording():
             return GoalResponse.REJECT
         with self._run_lock:
-            if self._return_active or self._return_goal_handle is not None:
+            if self._shot_recording or self._return_active or self._return_goal_handle is not None:
                 return GoalResponse.REJECT
             self._return_cancel_requested = False
             self._return_safety_reason = ""
@@ -1440,7 +1552,7 @@ class PatrolNode(Node):
         driver = None
         flags = None
         with self.roads.lock, self._run_lock:
-            if self.roads.recorder is not None:
+            if self.roads.recorder is not None or self._shot_recording:
                 result.error_code, result.message = 'BUSY', '请先保存或放弃当前录制草稿'
                 result.final_state = STATE_FAILED
                 goal_handle.abort()

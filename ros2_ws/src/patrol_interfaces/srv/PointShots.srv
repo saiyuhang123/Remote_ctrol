@@ -1,0 +1,28 @@
+# Manage low-zoom calibration through the patrol owner, never by editing SQLite.
+uint8 GET=0
+uint8 REPLACE=1
+uint8 CLEAR=2
+uint8 RECORD=3
+uint8 REMOVE=4
+uint8 command
+string point_id
+string map_id
+uint64 map_revision
+uint64 expected_revision
+string shots_json
+# RECORD reads live camera feedback and TF on the patrol owner; it never moves hardware.
+string shot_id
+string shot_name
+# Kept for old clients. RECORD always uses the device configuration.
+int8 pan_sign
+float64 settle_seconds
+---
+bool success
+string message
+PatrolPoint point
+uint64 map_revision
+string shots_json
+string map_frame
+string base_frame
+# 0 means the device direction has not been confirmed yet.
+int8 device_pan_sign

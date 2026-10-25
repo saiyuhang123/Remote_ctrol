@@ -32,6 +32,7 @@
 #include <QDialog>
 #include <QScrollArea>
 #include <QDateTime>
+#include <QUuid>
 #include <cmath>
 
 namespace {
@@ -90,6 +91,10 @@ PatrolPage::PatrolPage(PatrolClient *client, const QString &initialMapYaml,
   buildUi();
   connect(client_, &PatrolClient::mapsChanged, this, &PatrolPage::onMapsChanged);
   connect(client_, &PatrolClient::pointsChanged, this, &PatrolPage::onPointsChanged);
+  connect(client_, &PatrolClient::pointShotsChanged, this, [this](const QString &pointId) {
+    if (pointId == selectedPointId() && !client_->pointShotsBusy()) populatePointShots();
+    updateActionStates();
+  });
   connect(client_, &PatrolClient::routesChanged, this, &PatrolPage::onRoutesChanged);
   connect(client_, &PatrolClient::runsChanged, this, &PatrolPage::onRunsChanged);
   connect(client_, &PatrolClient::inspectionResultsChanged, this,
@@ -238,10 +243,54 @@ void PatrolPage::buildUi() {
   pointInspectionGroup_ = inspectionGroup;
   auto *inspectionLayout = new QVBoxLayout(inspectionGroup);
   inspectionLayout->setSpacing(7);
-  pointInspectionEnabled_ = new QCheckBox(
-      "到点后转到该云台位置、抓拍并在线识别", inspectionGroup);
+  pointInspectionEnabled_ = new QCheckBox("启用到点巡检", inspectionGroup);
   pointInspectionEnabled_->setObjectName("patrolPointInspectionEnabled");
   inspectionLayout->addWidget(pointInspectionEnabled_);
+  auto *shotsGroup = new QGroupBox("拍摄视角（1～4×）", inspectionGroup);
+  auto *shotsLayout = new QVBoxLayout(shotsGroup);
+  shotsLayout->setSpacing(7);
+  shotsLayout->addWidget(patrolui::hint(
+      "先保存并选择点位，停车后在相机页调好构图，再记录。一个视角即可，最多两个；到点后补偿朝向并拍照存图。", shotsGroup));
+  pointShotsCombo_ = new QComboBox(shotsGroup);
+  pointShotsCombo_->setObjectName("patrolPointShots");
+  shotsLayout->addWidget(pointShotsCombo_);
+  pointShotDetails_ = patrolui::hint("请选择已保存点位", shotsGroup);
+  pointShotDetails_->setObjectName("patrolPointShotDetails");
+  shotsLayout->addWidget(pointShotDetails_);
+  auto *shotForm = new QFormLayout;
+  pointShotName_ = new QLineEdit(shotsGroup);
+  pointShotName_->setObjectName("patrolPointShotName");
+  pointShotName_->setMaxLength(120);
+  pointShotName_->setPlaceholderText("例如：仪表正面");
+  shotForm->addRow("视角名称", pointShotName_);
+  pointShotSettle_ = new QDoubleSpinBox(shotsGroup);
+  pointShotSettle_->setObjectName("patrolPointShotSettle");
+  pointShotSettle_->setRange(0., 10.); pointShotSettle_->setDecimals(1);
+  pointShotSettle_->setSingleStep(.5); pointShotSettle_->setValue(1.5);
+  pointShotSettle_->setSuffix(" 秒");
+  pointShotSettle_->setToolTip("巡检时角度和倍率到位后，额外等待镜头对焦的时间");
+  shotForm->addRow("对焦等待", pointShotSettle_);
+  shotsLayout->addLayout(shotForm);
+  pointRecordShot_ = pageButton("记录当前拍摄视角", shotsGroup, "patrolRecordPointShot");
+  pointRecordShot_->setProperty("primary", true);
+  shotsLayout->addWidget(pointRecordShot_);
+  auto *shotButtons = new QHBoxLayout;
+  pointDeleteShot_ = pageButton("删除所选", shotsGroup, "patrolDeletePointShot");
+  pointClearShots_ = pageButton("清空视角", shotsGroup, "patrolClearPointShots");
+  pointRefreshShots_ = pageButton("刷新", shotsGroup, "patrolRefreshPointShots");
+  shotButtons->addWidget(pointDeleteShot_); shotButtons->addWidget(pointClearShots_);
+  shotButtons->addWidget(pointRefreshShots_);
+  shotsLayout->addLayout(shotButtons);
+  inspectionLayout->addWidget(shotsGroup);
+  auto *legacyToggle = pageButton("原预置位与在线识别设置", inspectionGroup, "patrolLegacyInspectionToggle");
+  legacyToggle->setCheckable(true);
+  inspectionLayout->addWidget(legacyToggle);
+  auto *legacy = new QWidget(inspectionGroup);
+  auto *legacyLayout = new QVBoxLayout(legacy);
+  legacyLayout->setContentsMargins(0, 0, 0, 0);
+  inspectionLayout->addWidget(legacy);
+  legacy->hide();
+  connect(legacyToggle, &QPushButton::toggled, legacy, &QWidget::setVisible);
   auto *inspectionForm = new QFormLayout;
   inspectionForm->setSpacing(7);
   pointPtzPreset_ = new QSpinBox(inspectionGroup);
@@ -251,7 +300,7 @@ void PatrolPage::buildUi() {
   pointPtzPreset_->setToolTip(
       "巡检业务预置位 1～89；90～99 留给云台巡航。请先在右侧“相机”页把云台调到目标视角");
   inspectionForm->addRow("云台预置位", pointPtzPreset_);
-  inspectionLayout->addLayout(inspectionForm);
+  legacyLayout->addLayout(inspectionForm);
   auto *presetButtons = new QHBoxLayout;
   pointSavePtzPreset_ = pageButton("当前云台存为此预置位", inspectionGroup,
                                    "patrolSavePtzPreset");
@@ -259,19 +308,18 @@ void PatrolPage::buildUi() {
                                    "patrolGotoPtzPreset");
   presetButtons->addWidget(pointSavePtzPreset_);
   presetButtons->addWidget(pointGotoPtzPreset_);
-  inspectionLayout->addLayout(presetButtons);
-  inspectionLayout->addWidget(patrolui::hint(
-      "本相机不能回读 pan/tilt 绝对角度，因此巡检点保存的是设备端预置位编号。"
-      "建议使用 1～89；预置位由相机固件定位，重启相机不丢失。", inspectionGroup));
-  inspectionLayout->addWidget(new QLabel("识别提示词（留空返回默认5行短结果）", inspectionGroup));
+  legacyLayout->addLayout(presetButtons);
+  legacyLayout->addWidget(patrolui::hint(
+      "未记录拍摄视角时，使用设备预置位抓拍并在线识别。已记录视角时，优先按角度补偿拍照存图。", inspectionGroup));
+  legacyLayout->addWidget(new QLabel("识别提示词（留空返回默认5行短结果）", inspectionGroup));
   pointRecognitionPrompt_ = new QPlainTextEdit(inspectionGroup);
   pointRecognitionPrompt_->setObjectName("patrolPointRecognitionPrompt");
   pointRecognitionPrompt_->setPlaceholderText(
       "留空默认：设备状态 / 仪表读数 / 指示灯 / 告警文字 / 明显异常；"
       "可填写本点位专用要求。");
   pointRecognitionPrompt_->setMaximumHeight(70);
-  inspectionLayout->addWidget(pointRecognitionPrompt_);
-  inspectionLayout->addWidget(patrolui::hint(
+  legacyLayout->addWidget(pointRecognitionPrompt_);
+  legacyLayout->addWidget(patrolui::hint(
       "路线执行到该点时会调用 GOTO_PRESET，等待云台稳定后自动抓拍并调用 DeepSeek 识别。", inspectionGroup));
   pointFormLayout->addWidget(inspectionGroup);
   saveCurrentPointButton_ = pageButton("保存当前位置为巡检点", pointForm, "patrolSaveCurrentPoint");
@@ -575,6 +623,19 @@ void PatrolPage::buildUi() {
     setMessage(QStringLiteral("正在转到云台预置位 %1…").arg(preset), false);
   });
   connect(deletePointButton_, &QPushButton::clicked, this, &PatrolPage::deleteSelectedPoint);
+  connect(pointRecordShot_, &QPushButton::clicked, this, &PatrolPage::recordSelectedShot);
+  connect(pointDeleteShot_, &QPushButton::clicked, this, &PatrolPage::deleteSelectedShot);
+  connect(pointClearShots_, &QPushButton::clicked, this, [this] {
+    const auto info = client_->pointShots(selectedPointId());
+    if (pointClearShots_->isEnabled() && info.loaded)
+      client_->clearPointShots(info.point.pointId, info.point.mapId, info.mapRevision, info.point.revision);
+  });
+  connect(pointRefreshShots_, &QPushButton::clicked, this, &PatrolPage::loadPointShots);
+  connect(pointShotsCombo_, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this] {
+    selectedShotId_ = pointShotsCombo_->currentData().toString();
+    updateShotForm();
+  });
+  connect(pointShotName_, &QLineEdit::textChanged, this, &PatrolPage::updateActionStates);
   connect(routesTable_, &QTableWidget::itemSelectionChanged, this, [this] {
     const int row = routesTable_->currentRow();
     if (row < 0 || !routesTable_->item(row, 0)) return;
@@ -888,7 +949,8 @@ void PatrolPage::returnHome() {
 }
 
 void PatrolPage::populatePoints() {
-  const int selectedRow = pointsTable_->currentRow();
+  const QString selected = selectedPointId();
+  const QSignalBlocker block(pointsTable_);
   pointsTable_->setRowCount(0);
   const auto list = client_->points();
   pointsCountLabel_->setText(QStringLiteral("%1 个点位").arg(list.size()));
@@ -903,14 +965,16 @@ void PatrolPage::populatePoints() {
     pointsTable_->setItem(row, 2, readOnlyItem(QString::number(point.y, 'f', 3)));
     pointsTable_->setItem(row, 3, readOnlyItem(QString::number(point.yaw * 180.0 / kPi, 'f', 2)));
     const QString action = point.inspectionEnabled
-        ? QStringLiteral("预置位 %1 · 抓拍识别").arg(point.ptzPreset)
+        ? QStringLiteral("云台抓拍巡检")
         : QStringLiteral("仅导航");
     pointsTable_->setItem(row, 4, readOnlyItem(action));
     pointsTable_->setItem(row, 5, readOnlyItem(QString::number(point.revision)));
   }
-  if (selectedRow >= 0 && selectedRow < pointsTable_->rowCount()) pointsTable_->selectRow(selectedRow);
+  for (int row = 0; row < pointsTable_->rowCount(); ++row)
+    if (pointsTable_->item(row, 0)->data(Qt::UserRole).toString() == selected) pointsTable_->selectRow(row);
   updateEmptyTable(pointsTable_);
   populateAvailablePoints();
+  updatePointFormFromSelection();
 }
 
 void PatrolPage::populateAvailablePoints() {
@@ -1040,7 +1104,7 @@ void PatrolPage::syncStepTable() {
     stepsTable_->setItem(row, 2, readOnlyItem(QString::number(step.y, 'f', 3)));
     stepsTable_->setItem(row, 3, readOnlyItem(QString::number(step.dwellSeconds, 'f', 1)));
     const QString action = step.inspectionEnabled
-        ? QStringLiteral("预置位 %1 · 抓拍识别").arg(step.ptzPreset)
+        ? QStringLiteral("云台抓拍巡检")
         : QStringLiteral("仅导航");
     stepsTable_->setItem(row, 4, readOnlyItem(action));
   }
@@ -1077,7 +1141,7 @@ void PatrolPage::updateRoutePreview() {
     number->setBrush(QColor(inspection ? "#047857" : "#1d4ed8"));
     number->setPos(point.x() - 4.0, point.y() - 8.0);
     const QString label = (step.pointName.isEmpty() ? step.pointId : step.pointName) +
-                          (inspection ? QStringLiteral(" · 云台识别") : QString());
+                          (inspection ? QStringLiteral(" · 云台巡检") : QString());
     auto *name = routePreviewScene_->addSimpleText(label);
     name->setBrush(QColor(inspection ? "#047857" : "#334155"));
     name->setPos(point.x() + 12.0, point.y() - 18.0);
@@ -1096,7 +1160,7 @@ void PatrolPage::updateRoutePreview() {
 
 void PatrolPage::updatePointFormFromSelection() {
   const int row = pointsTable_->currentRow();
-  if (row < 0 || !pointsTable_->item(row, 0)) return;
+  if (row < 0 || !pointsTable_->item(row, 0)) { loadPointShots(); return; }
   const QString pointId = pointsTable_->item(row, 0)->data(Qt::UserRole).toString();
   for (const auto &point : client_->points()) {
     if (point.pointId != pointId) continue;
@@ -1107,9 +1171,110 @@ void PatrolPage::updatePointFormFromSelection() {
     pointInspectionEnabled_->setChecked(point.inspectionEnabled);
     pointPtzPreset_->setValue(point.ptzPreset > 0 ? point.ptzPreset : 1);
     pointRecognitionPrompt_->setPlainText(point.recognitionPrompt);
+    loadPointShots();
     updateActionStates();
     return;
   }
+}
+
+QString PatrolPage::selectedPointId() const {
+  const int row = pointsTable_->currentRow();
+  return row >= 0 && pointsTable_->item(row, 0)
+      ? pointsTable_->item(row, 0)->data(Qt::UserRole).toString() : QString();
+}
+
+void PatrolPage::loadPointShots() {
+  const QString pointId = selectedPointId();
+  if (pointId != shotPointId_) {
+    shotPointId_ = pointId;
+    selectedShotId_.clear();
+    const QSignalBlocker block(pointShotsCombo_);
+    pointShotsCombo_->clear();
+    pointShotName_->clear();
+  }
+  if (pointId.isEmpty() || offline_ || !client_->pointShotsReady()) {
+    pointShotDetails_->setText(pointId.isEmpty() ? QStringLiteral("请选择已保存点位")
+        : QStringLiteral("视角服务未就绪，请启动更新后的巡检会话"));
+    updateActionStates();
+    return;
+  }
+  client_->refreshPointShots(pointId);
+}
+
+void PatrolPage::populatePointShots() {
+  const auto info = client_->pointShots(selectedPointId());
+  if (!info.loaded) {
+    pointShotDetails_->setText(QStringLiteral("正在读取已保存视角…"));
+    updateActionStates();
+    return;
+  }
+  const QSignalBlocker block(pointShotsCombo_);
+  pointShotsCombo_->clear();
+  for (const auto &value : info.shots) {
+    const auto shot = value.toObject();
+    pointShotsCombo_->addItem(shot["name"].toString(), shot["shot_id"].toString());
+  }
+  if (info.shots.size() < 2) pointShotsCombo_->addItem(QStringLiteral("＋ 添加拍摄视角"), QString());
+  const int index = pointShotsCombo_->findData(selectedShotId_);
+  pointShotsCombo_->setCurrentIndex(index >= 0 ? index : 0);
+  selectedShotId_ = pointShotsCombo_->currentData().toString();
+  updateShotForm();
+}
+
+void PatrolPage::updateShotForm() {
+  const auto info = client_->pointShots(selectedPointId());
+  if (!info.loaded) { updateActionStates(); return; }
+  QJsonObject selected;
+  bool stale = false;
+  for (const auto &value : info.shots) {
+    const auto shot = value.toObject();
+    stale = stale || shot["map_revision"].toVariant().toULongLong() != info.mapRevision;
+    if (shot["shot_id"].toString() == selectedShotId_) selected = shot;
+  }
+  if (selected.isEmpty()) {
+    pointShotName_->setText(QStringLiteral("视角%1").arg(info.shots.size()+1));
+    pointShotSettle_->setValue(1.5);
+    pointShotDetails_->setText(QStringLiteral("已保存 %1 / 2 个视角。调好相机后点击记录；只需一个时无需添加第二个。")
+                                  .arg(info.shots.size()));
+  } else {
+    pointShotName_->setText(selected["name"].toString());
+    pointShotSettle_->setValue(selected["settle_seconds"].toDouble(1.5));
+    pointShotDetails_->setText(QStringLiteral("已保存 %1 / 2 个视角\n水平 %2° · 俯仰 %3° · %4×\n标定车头朝向 %5°")
+        .arg(info.shots.size()).arg(selected["pan_cal"].toDouble(), 0, 'f', 2)
+        .arg(selected["tilt"].toDouble(), 0, 'f', 2).arg(selected["zoom"].toDouble(), 0, 'f', 2)
+        .arg(selected["yaw_cal"].toDouble()*180./kPi, 0, 'f', 2));
+  }
+  if (stale) pointShotDetails_->setText(pointShotDetails_->text() + QStringLiteral("\n地图已更新，请清空旧视角后重新记录。"));
+  if (info.devicePanSign == 0)
+    pointShotDetails_->setText(pointShotDetails_->text() + QStringLiteral("\n设备方向待确认：完成一次性设备配置后即可记录，所有点位自动沿用。"));
+  else {
+    for (const auto &value : info.shots)
+      if (value.toObject()["pan_sign"].toInt() != info.devicePanSign) {
+        pointShotDetails_->setText(pointShotDetails_->text() + QStringLiteral("\n设备方向配置已更新，请清空旧视角后重新记录。"));
+        break;
+      }
+  }
+  updateActionStates();
+}
+
+void PatrolPage::recordSelectedShot() {
+  if (!pointRecordShot_->isEnabled()) return;
+  const auto info = client_->pointShots(selectedPointId());
+  if (!info.loaded) return;
+  const QString name = pointShotName_->text().trimmed();
+  const double settle = pointShotSettle_->value();
+  if (selectedShotId_.isEmpty()) selectedShotId_ = "view_" + QUuid::createUuid().toString(QUuid::Id128);
+  setMessage(QStringLiteral("正在读取实际角度、倍率与车头朝向，请保持车辆和云台静止…"));
+  client_->recordPointShot(info.point.pointId, info.point.mapId, info.mapRevision,
+                           info.point.revision, selectedShotId_, name, settle);
+}
+
+void PatrolPage::deleteSelectedShot() {
+  if (!pointDeleteShot_->isEnabled()) return;
+  const auto info = client_->pointShots(selectedPointId());
+  if (info.loaded && !selectedShotId_.isEmpty())
+    client_->removePointShot(info.point.pointId, info.point.mapId, info.mapRevision,
+                            info.point.revision, selectedShotId_);
 }
 
 void PatrolPage::saveCurrentPoint() {
@@ -1340,6 +1505,8 @@ void PatrolPage::onStatusChanged() {
 
 void PatrolPage::showOperation(const QString &operation, bool success, const QString &message) {
   setMessage(operation + (success ? QStringLiteral("：") : QStringLiteral("失败：")) + message, !success);
+  if (operation == QStringLiteral("读取拍摄视角") && !success)
+    pointShotDetails_->setText(QStringLiteral("读取视角失败，请点击“刷新”重试。"));
   if (success && operation.contains(QStringLiteral("保存路线"))) {
     routeDirty_ = false;
     client_->refreshRoutes(activeMapId_);
@@ -1412,22 +1579,48 @@ void PatrolPage::updateActionStates() {
   registerMapButton_->setEnabled(available);
   setActiveButton_->setEnabled(available && mapsCombo_->currentIndex() >= 0);
   refreshAllButton_->setEnabled(available);
-  saveCurrentPointButton_->setEnabled(available && hasMap);
-  upsertPointButton_->setEnabled(available && hasMap);
+  const bool shotBusy = client_ && client_->pointShotsBusy();
+  saveCurrentPointButton_->setEnabled(available && hasMap && !shotBusy);
+  upsertPointButton_->setEnabled(available && hasMap && !shotBusy);
   const bool inspectionChecked = pointInspectionEnabled_->isChecked();
-  pointInspectionEnabled_->setEnabled(available && hasMap);
+  pointInspectionEnabled_->setEnabled(available && hasMap && !shotBusy);
   pointPtzPreset_->setEnabled(inspectionChecked);
   pointRecognitionPrompt_->setEnabled(inspectionChecked);
   const bool cameraReady = !offline_ && ros_ && ros_->cameraAvailable() &&
                             ros_->ptzPresetAvailable();
-  pointSavePtzPreset_->setEnabled(inspectionChecked && cameraReady && !activeRun);
-  pointGotoPtzPreset_->setEnabled(inspectionChecked && cameraReady && !activeRun);
+  pointSavePtzPreset_->setEnabled(inspectionChecked && cameraReady && !activeRun && !shotBusy);
+  pointGotoPtzPreset_->setEnabled(inspectionChecked && cameraReady && !activeRun && !shotBusy);
   const QString presetTip = cameraReady
-      ? QStringLiteral("预置位由相机设备保存和闭环定位；本机不读取绝对 pan/tilt")
+      ? QStringLiteral("预置位由相机设备保存；配置拍摄视角后优先执行角度补偿拍照")
       : QStringLiteral("相机服务未就绪；先在右侧“相机”页启动相机");
   pointSavePtzPreset_->setToolTip(presetTip);
   pointGotoPtzPreset_->setToolTip(presetTip);
-  deletePointButton_->setEnabled(available && hasMap && pointsTable_->currentRow() >= 0);
+  deletePointButton_->setEnabled(available && hasMap && pointsTable_->currentRow() >= 0 && !shotBusy);
+  const auto shotInfo = client_ ? client_->pointShots(selectedPointId()) : PatrolPointShotsInfo();
+  const bool shotsReady = !offline_ && available && hasMap && !selectedPointId().isEmpty() &&
+      client_->pointShotsReady() && shotInfo.loaded && shotInfo.point.mapId == activeMapId_;
+  const bool editShots = shotsReady && !activeRun && !client_->hasActiveOrPendingRun() && !shotBusy;
+  bool staleShots = false;
+  for (const auto &value : shotInfo.shots)
+    staleShots = staleShots || value.toObject()["map_revision"].toVariant().toULongLong() != shotInfo.mapRevision ||
+        (shotInfo.devicePanSign != 0 && value.toObject()["pan_sign"].toInt() != shotInfo.devicePanSign);
+  pointShotsCombo_->setEnabled(shotsReady && !shotBusy);
+  pointShotName_->setEnabled(editShots && !staleShots);
+  pointShotSettle_->setEnabled(editShots && !staleShots);
+  pointRecordShot_->setEnabled(editShots && !staleShots && pointShotsCombo_->currentIndex() >= 0 &&
+      (shotInfo.devicePanSign == -1 || shotInfo.devicePanSign == 1) && !pointShotName_->text().trimmed().isEmpty());
+  pointRecordShot_->setText(shotBusy ? QStringLiteral("正在处理视角…")
+      : pointShotsCombo_->currentData().toString().isEmpty() ? QStringLiteral("记录当前拍摄视角")
+                                                         : QStringLiteral("重新记录所选视角"));
+  pointRecordShot_->setToolTip(!shotsReady ? QStringLiteral("先选择已保存点位；视角服务需就绪，读取完成后可记录")
+      : activeRun || client_->hasActiveOrPendingRun() ? QStringLiteral("请先结束巡检或返航")
+      : staleShots ? QStringLiteral("地图或设备配置已更新，请清空旧视角后重新记录")
+      : shotInfo.devicePanSign == 0 ? QStringLiteral("设备方向待确认，完成一次性设备配置后所有点位自动沿用")
+      : QStringLiteral("只读取并保存实际位置，不移动云台；成功后自动启用该点巡检"));
+  pointDeleteShot_->setEnabled(editShots && !selectedShotId_.isEmpty() && (!staleShots || shotInfo.shots.size() == 1));
+  pointClearShots_->setEnabled(editShots && !shotInfo.shots.isEmpty());
+  pointRefreshShots_->setEnabled(!offline_ && available && !selectedPointId().isEmpty() &&
+                                  client_->pointShotsReady() && !shotBusy);
   if (refreshInspectionResultsButton_)
     refreshInspectionResultsButton_->setEnabled(available);
   addStepButton_->setEnabled(available && hasMap);
@@ -1444,6 +1637,7 @@ void PatrolPage::updateActionStates() {
                               startPermission_(&startPermissionReason);
   const QString startPermissionTip = startPermitted ? QString() : startPermissionReason;
   QStringList startBlockers;
+  if (shotBusy) startBlockers << QStringLiteral("正在记录或修改拍摄视角，请等待完成后启动巡检");
   if(recordingDraft_) startBlockers << QStringLiteral("录制草稿尚未处理，请先保存道路或放弃草稿");
   if (offline_) startBlockers << QStringLiteral("当前为离线模式，不能执行巡航");
   if (!available) {

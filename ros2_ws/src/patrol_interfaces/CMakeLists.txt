@@ -35,6 +35,7 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "srv/SetHomePoint.srv"
   "srv/RoadCommand.srv"
   "srv/PtzInspectionControl.srv"
+  "srv/PointShots.srv"
   "action/RunRoute.action"
   "action/InspectPoint.action"
   "action/ReturnHome.action"
