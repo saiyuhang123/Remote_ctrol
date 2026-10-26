@@ -87,6 +87,8 @@ private:
   QPlainTextEdit *logs_ = nullptr;
   QPushButton *start_ = nullptr, *stop_ = nullptr, *save_ = nullptr, *take_ = nullptr, *unlock_ = nullptr;
   QPushButton *sendGoalButton_ = nullptr;
+  QLabel *mapSaveStatus_ = nullptr;
+  QPushButton *openSavedMap_ = nullptr, *loadSavedMap_ = nullptr;
   QPushButton *cancelButton_ = nullptr;
   QPushButton *returnHomeButton_ = nullptr;
   QTabWidget *controlTabs_ = nullptr, *rightTabs_ = nullptr;

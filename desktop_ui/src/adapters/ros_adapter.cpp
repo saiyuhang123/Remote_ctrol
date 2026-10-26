@@ -119,6 +119,7 @@ struct RosAdapter::Impl {
     // Keep clients alive so DDS discovery completes before an operator clicks.
     clients["/map_save"] = node->create_client<std_srvs::srv::Trigger>("/map_save");
     clients["/loop_closure/save_map"] = node->create_client<std_srvs::srv::Trigger>("/loop_closure/save_map");
+    clients["/loop_closure/save_bundle"] = node->create_client<std_srvs::srv::Trigger>("/loop_closure/save_bundle");
     for (const auto *command : {"login", "start_stream", "stop_stream"}) {
       const auto name = std::string("/hk_camera/") + command;
       clients[name] = node->create_client<std_srvs::srv::Trigger>(name);
@@ -289,7 +290,7 @@ struct RosAdapter::Impl {
     auto cancel = [client, done, id] { if (!done->exchange(true)) client->remove_pending_request(id); };
     cancelPending.emplace(key, cancel);
     // Map refinement and export can take longer than ordinary device services.
-    const int timeoutMs = operation == "save_state" && name == "/loop_closure/save_map"
+    const int timeoutMs = operation == "save_state" && name.rfind("/loop_closure/save_", 0) == 0
         ? std::max(config.serviceTimeoutMs, 180000) : config.serviceTimeoutMs;
     QTimer::singleShot(timeoutMs, owner, [this, client, done, id, operation, key] {
       if (!done->exchange(true)) { client->remove_pending_request(id); emit owner->requestFinished(operation, false, "服务响应超时，请检查节点日志和输出文件"); }
@@ -565,9 +566,9 @@ void RosAdapter::recognize() {
 void RosAdapter::saveState(const QString &backend, const QString &prefix) {
   if (backend == "fastlio") {
     auto req = std::make_shared<std_srvs::srv::Trigger::Request>();
-    // The mapping backend validates overlaps before writing the final PCD.
-    // A missing backend must not silently export an unchecked raw map.
-    impl_->request<std_srvs::srv::Trigger>("save_state", "/loop_closure/save_map", req,
+    // Snapshot saving is separate from loop acceptance and never replaces the
+    // selected navigation map. The backend returns its exact artifact paths.
+    impl_->request<std_srvs::srv::Trigger>("save_state", "/loop_closure/save_bundle", req,
         [this](auto r) { emit requestFinished("save_state", r->success, QString::fromStdString(r->message)); });
   }
 #ifdef DESKTOP_HAS_SLAM_TOOLBOX

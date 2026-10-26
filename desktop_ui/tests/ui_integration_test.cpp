@@ -4,12 +4,15 @@
 #include "rviz/rviz_host.h"
 #include <QAction>
 #include <QCheckBox>
+#include <QCryptographicHash>
 #include <QComboBox>
 #include <QDoubleSpinBox>
 #include <QDir>
 #include <QFile>
 #include <QLabel>
 #include <QLineEdit>
+#include <QJsonDocument>
+#include <QJsonObject>
 #include <QPushButton>
 #include <QPlainTextEdit>
 #include <QScreen>
@@ -30,6 +33,7 @@
 #include <rclcpp_action/rclcpp_action.hpp>
 #include <sensor_msgs/point_cloud2_iterator.hpp>
 #include <std_msgs/msg/bool.hpp>
+#include <std_srvs/srv/trigger.hpp>
 #include <tf2_ros/transform_broadcaster.h>
 #include <rviz_common/display.hpp>
 #include <rviz_common/display_group.hpp>
@@ -91,6 +95,60 @@ private slots:
     rclcpp::init(0, nullptr, rclcpp::InitOptions(), rclcpp::SignalHandlerOptions::None);
   }
   void cleanupTestCase() { rclcpp::shutdown(); }
+  void singlePassMapCanBeSavedAndSelectedWithoutStartingMotion() {
+    QTemporaryDir directory; QVERIFY(directory.isValid());
+    const auto active = directory.filePath("active");
+    const auto artifact = directory.filePath("single pass");
+    auto write = [](const QString &path, const QByteArray &data) {
+      QFile file(path); return file.open(QIODevice::WriteOnly) && file.write(data) == data.size();
+    };
+    QVERIFY(write(active + ".pcd", "old navigation PCD"));
+    QVERIFY(write(active + ".yaml", "old navigation YAML"));
+    const QByteArray pcd = [] {
+      QByteArray value = "VERSION 0.7\nFIELDS x y z\nSIZE 4 4 4\nTYPE F F F\nCOUNT 1 1 1\nWIDTH 121\nHEIGHT 1\nPOINTS 121\nDATA ascii\n";
+      for (int x=0; x<=10; ++x) for (int y=0; y<=10; ++y)
+        value += QByteArray::number(x*.04) + " " + QByteArray::number(y*.04) + " 0.3\n";
+      return value;
+    }();
+    auto node = std::make_shared<rclcpp::Node>("single_pass_map_ui_fixture");
+    int movingCommands = 0;
+    auto velocity = node->create_subscription<geometry_msgs::msg::Twist>("/cmd_vel_teleop", 10,
+      [&](geometry_msgs::msg::Twist::ConstSharedPtr m) { if (std::abs(m->linear.x)+std::abs(m->angular.z)>1e-6) ++movingCommands; });
+    auto service = node->create_service<std_srvs::srv::Trigger>("/loop_closure/save_bundle",
+      [&](std::shared_ptr<std_srvs::srv::Trigger::Request>,
+          std::shared_ptr<std_srvs::srv::Trigger::Response> response) {
+        const QJsonObject report{{"status", "no_loop"}, {"geometry_checks_passed", false},
+          {"sha256", QString::fromLatin1(QCryptographicHash::hash(pcd, QCryptographicHash::Sha256).toHex())}};
+        response->success = write(artifact + ".pcd", pcd) &&
+            write(artifact + ".validation.json", QJsonDocument(report).toJson());
+        response->message = QJsonDocument(QJsonObject{{"schema", "fastlio.saved_map.v1"},
+          {"quality", "no_loop"}, {"artifact_prefix", artifact}, {"requested_prefix", active},
+          {"localization_test_allowed", true}, {"message", "单程图已保存"},
+          {"next_action", "停止建图后载入并核对定位"}}).toJson(QJsonDocument::Compact).toStdString();
+      });
+    QTimer spin; connect(&spin, &QTimer::timeout, this, [&] { rclcpp::spin_some(node); }); spin.start(20);
+    const QString root = DESKTOP_UI_SOURCE_DIR;
+    auto config = DesktopConfig::load(root + "/config/desktop.json", root, QDir(root).absoluteFilePath(".."));
+    config.backendUrl = "http://127.0.0.1:9";
+    MainWindow window(config, false); window.show(); QVERIFY(QTest::qWaitForWindowExposed(&window));
+    window.setProfileIndex(1);
+    window.findChild<QLineEdit *>("mapPrefix")->setText(active);
+    window.findChild<QCheckBox *>("enableControl")->setChecked(true);
+    auto *load = window.findChild<QPushButton *>("loadSavedMap"); QVERIFY(load && !load->isEnabled());
+    QTest::qWait(800); QTest::mouseClick(window.findChild<QPushButton *>("saveMap"), Qt::LeftButton);
+    QTRY_VERIFY_WITH_TIMEOUT(load->isEnabled(), 30000);
+    QVERIFY(window.findChild<QLabel *>("mapSaveStatus")->text().contains("未做回环验证"));
+    QFile previous(active + ".pcd"); QVERIFY(previous.open(QIODevice::ReadOnly));
+    QCOMPARE(previous.readAll(), QByteArray("old navigation PCD"));
+    QTest::mouseClick(load, Qt::LeftButton);
+    QCOMPARE(window.findChild<QComboBox *>("profileSelector")->currentIndex(), 0);
+    QCOMPARE(window.findChild<QLineEdit *>("mapPrefix")->text(), artifact);
+    QCOMPARE(window.findChild<QLineEdit *>("navigationYaml")->text(), artifact + ".yaml");
+    QTest::qWait(200); QCOMPARE(movingCommands, 0);
+    const auto capture = qEnvironmentVariable("DESKTOP_MAP_FLOW_CAPTURE");
+    if (!capture.isEmpty()) QVERIFY(window.saveScreenshot(capture));
+    window.findChild<QCheckBox *>("enableControl")->setChecked(false); spin.stop();
+  }
   void initialPoseDoesNotRequireSpeedOrMapOrReadyNav2() {
     auto node = std::make_shared<rclcpp::Node>("initial_pose_without_speed_fixture");
     std::vector<geometry_msgs::msg::PoseWithCovarianceStamped> poses;

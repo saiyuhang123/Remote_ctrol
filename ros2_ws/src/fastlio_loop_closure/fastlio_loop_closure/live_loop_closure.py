@@ -72,7 +72,7 @@ class LiveLoopClosure(Node):
         self.stationary_distance = float(self.declare_parameter('stationary_distance', .12).value)
         self.stationary_angle = math.radians(float(self.declare_parameter('stationary_angle_deg', 2.).value))
         self.search_radius = float(self.declare_parameter('search_radius', 12.).value)
-        self.min_time_diff = float(self.declare_parameter('min_time_diff_sec', 300.).value)
+        self.min_time_diff = float(self.declare_parameter('min_time_diff_sec', 60.).value)
         self.min_index_diff = int(self.declare_parameter('min_index_diff', 30).value)
         self.submap_half = int(self.declare_parameter('submap_half_window', 3).value)
         self.overlap_spacing = float(self.declare_parameter('overlap_spacing_m', 1.).value)
@@ -117,6 +117,8 @@ class LiveLoopClosure(Node):
         self.create_service(Trigger, '/loop_closure/save_map', self.save_callback,
                             callback_group=self.callback_group)
         self.create_service(Trigger, '/map_save', self.save_callback,
+                            callback_group=self.callback_group)
+        self.create_service(Trigger, '/loop_closure/save_bundle', self.save_bundle_callback,
                             callback_group=self.callback_group)
         self.create_timer(5., self.publish_status)
         self.worker = threading.Thread(target=self.worker_loop, daemon=True)
@@ -287,17 +289,119 @@ class LiveLoopClosure(Node):
         self.status_pub.publish(String(data=json.dumps(status, ensure_ascii=False)))
 
     def save_callback(self, request, response):
+        return self.respond_to_save(response, self.save)
+
+    def save_bundle_callback(self, request, response):
+        return self.respond_to_save(response, self.save_bundle)
+
+    def respond_to_save(self, response, operation):
         if not self.save_lock.acquire(blocking=False):
             response.success, response.message = False, '地图正在优化保存，请等待当前任务完成'
             return response
         try:
-            response.success, response.message = self.save()
+            response.success, response.message = operation()
         except Exception as exc:
-            response.success, response.message = False, f'地图未通过检查或保存失败：{exc}；关键帧保留于 {self.session}'
+            response.success, response.message = False, (f'保存未完成：{exc}。关键帧保留于 {self.session}；'
+                '若是目录、磁盘或权限问题，请处理后再次保存；若无关键帧，请检查雷达/IMU是否正常接收。')
             self.get_logger().error(response.message)
         finally:
             self.save_lock.release()
         return response
+
+    def save_bundle(self):
+        """Save an immutable snapshot, independently of loop acceptance.
+
+        The UI projects this exact PCD and lets the operator select its matching
+        PCD/YAML for localization. No active navigation files are replaced here.
+        Legacy save_map remains a strict, compatible export service.
+        """
+        begin = time.monotonic()
+        with self.processing_lock:
+            with self.lock:
+                kfs = list(self.keyframes)
+                rotation = None if self.map_rotation is None else self.map_rotation.copy()
+                error = self.fatal_error
+                tilt = list(self.tilt_errors)
+                unmatched, total = self.unmatched_clouds, self.total_clouds
+            if len(kfs) < 2:
+                raise ValueError('尚无足够关键帧，请等初始化完成后平稳行驶一小段再保存')
+            issues = [error] if error else []
+            if rotation is None or len(tilt) < 10:
+                issues.append('有效 IMU 倾角观测不足')
+            elif np.percentile(tilt, 95) > 3.:
+                issues.append('前端倾角与 IMU 不一致')
+            if unmatched > max(5, total*.01):
+                issues.append('点云与里程计时间配对缺失过多')
+            if not issues:
+                try:
+                    self.finish_matching(kfs)
+                except Exception as exc:
+                    issues.append(f'回环匹配异常：{exc}')
+            matches, rejected = list(self.matches), list(self.rejected_matches)
+        poses = np.array([k.pose for k in kfs])
+        if rotation is not None:
+            poses[:, :3, :3] = rotation @ poses[:, :3, :3]
+            poses[:, :3, 3] = poses[:, :3, 3] @ rotation.T
+        output_poses = poses
+        quality = 'sensor_error' if issues else 'no_loop'
+        reason = '；'.join(issues) if issues else f'合格重叠 {len(matches)} 条，回环检查需要至少 6 条'
+        action = ('检查传感器连接、IMU姿态和时间戳；处理后重新建图。本次数据已归档，暂不用于导航。'
+                  if issues else '单程图已保存，可先查看地图、载入并核对定位；若需要回环修正，请继续经过有固定建筑的旧路段后再次保存。')
+        report = {'keyframes': len(kfs), 'qualified_overlaps': len(matches),
+            'attempted_overlaps': len(matches)+len(rejected), 'overlap_measurements': matches,
+            'rejected_overlap_measurements': rejected, 'session': str(self.session),
+            'last_keyframe_stamp_ns': kfs[-1].stamp_ns, 'geometry_checks_passed': False,
+            'gravity_aligned': rotation is not None,
+            'map_from_lio_rotation': None if rotation is None else rotation.tolist(),
+            'tilt_error_p95_deg': float(np.percentile(tilt, 95)) if tilt else None,
+            'unmatched_clouds': unmatched, 'total_clouds': total,
+            'endpoint_is_not_constrained_to_origin': True,
+            'validation_limits': 'Internal checks only; physical localization/navigation acceptance is still required.'}
+        if not issues and len(matches) >= 6:
+            quality = 'geometry_rejected'
+            action = '地图已归档，回环修正未采用；可继续重走结构明显的旧路段再保存。若多次仍未通过，请保留本次目录作为诊断资料。'
+            try:
+                corrected, validation = refine(poses, matches)
+                report.update(validation)
+                if validation['geometry_checks_passed']:
+                    output_poses = corrected
+                    quality, reason = 'loop_checked', '实测回环和留出重叠检查通过'
+                    action = '可载入本次地图，重新设置车辆位置与朝向，确认实时点云对齐后测试导航。'
+                else:
+                    reason = (f'回环优化检查未通过：位移调整 {validation["max_pose_translation_change_m"]:.2f} m，'
+                              f'角度调整 {validation["max_pose_rotation_change_deg"]:.2f}°，'
+                              f'留出位置误差 {validation["max_heldout_translation_error_m"]:.2f} m')
+            except Exception as exc:
+                reason = f'回环优化未采用：{exc}'
+        directory = self.session/'exports'/str(time.time_ns())
+        directory.mkdir(parents=True)
+        prefix = directory/'map'
+        points = build_map(kfs, output_poses, self.map_voxel)
+        if not len(points) or not np.isfinite(points).all():
+            raise ValueError('地图点云为空或包含无效值，请检查传感器数据')
+        write_pcd(prefix.with_suffix('.pcd'), points)
+        # A failed optimization is never exported, even as a draft: its raw,
+        # gravity-aligned trajectory is used and the rejected fit stays in report.
+        np.save(directory/'poses.npy', output_poses)
+        report.update(status=quality, reason=reason, next_action=action,
+            pcd=str(prefix.with_suffix('.pcd')), points=len(points), voxel_m=self.map_voxel,
+            exported_pose_source='refined' if quality == 'loop_checked' else 'frontend',
+            exported_keyframe_height_range_m=[float(output_poses[:, 2, 3].min()), float(output_poses[:, 2, 3].max())],
+            exported_endpoint_xyz_m=output_poses[-1, :3, 3].tolist(),
+            sha256=hashlib.sha256(prefix.with_suffix('.pcd').read_bytes()).hexdigest(),
+            elapsed_save_sec=time.monotonic()-begin)
+        atomic_json(prefix.with_suffix('.validation.json'), report)
+        payload = {'schema': 'fastlio.saved_map.v1', 'quality': quality,
+            'artifact_prefix': str(prefix), 'requested_prefix': str(self.output_map_path.with_suffix('')),
+            'localization_test_allowed': quality in ('loop_checked', 'no_loop'),
+            'message': reason, 'next_action': action, 'report': str(prefix.with_suffix('.validation.json'))}
+        (directory/'使用说明.txt').write_text(f'地图状态：{quality}\n{reason}\n\n{action}\n\n'
+            'PCD 为本次建图快照；配套 map.yaml/map.pgm 由界面导出。现有导航地图未被替换。\n'
+            f'原始关键帧：{self.session}\n完整检查记录：{payload["report"]}\n', encoding='utf-8')
+        atomic_json(self.session/'last_save.json', payload)
+        if quality == 'loop_checked':
+            self.publish_result(kfs, output_poses, points, rotation)
+        return True, json.dumps(payload, ensure_ascii=False)
 
     def save(self):
         begin = time.monotonic()

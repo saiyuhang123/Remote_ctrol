@@ -8,6 +8,9 @@ class MapSaver : public QObject {
 public:
   MapSaver(const DesktopConfig &config, RosAdapter *ros, QObject *parent = nullptr);
   bool busy() const { return busy_; }
+  QString savedPrefix() const { return savedPrefix_; }
+  QString quality() const { return quality_; }
+  bool canLoadSavedMap() const { return complete_ && loadable_; }
   void save(const Profile &profile, const QString &prefix);
 signals:
   void message(const QString &text);
@@ -19,7 +22,8 @@ private:
   ProcessManager export_;
   ProcessManager webExport_;
   QString resourceDir_, projectRoot_;
-  QString backend_, prefix_, localDetail_;
+  QString backend_, prefix_, requestedPrefix_, localDetail_, savedPrefix_, quality_, guidance_;
+  bool complete_ = false, loadable_ = false;
   bool webExportPending_ = false;
   QDateTime started_;
   quint64 generation_ = 0;

@@ -164,7 +164,7 @@ private slots:
   }
   void mapSaveAllowsRefinementBeyondDeviceTimeout() {
     FixtureExecutor fixture;
-    auto service = mockService<std_srvs::srv::Trigger>(fixture.node, "/loop_closure/save_map", [](auto, auto response) {
+    auto service = mockService<std_srvs::srv::Trigger>(fixture.node, "/loop_closure/save_bundle", [](auto, auto response) {
       std::this_thread::sleep_for(std::chrono::milliseconds(1500)); response->success = true;
     }); fixture.start();
     auto c = config(); c.serviceTimeoutMs = 1000;
@@ -225,7 +225,7 @@ time.sleep(30)
     auto raw = mockService<std_srvs::srv::Trigger>(fixture.node, "/map_save", [&raw_calls](auto, auto r) {
       ++raw_calls; r->success = true; r->message = "raw";
     });
-    auto corrected = mockService<std_srvs::srv::Trigger>(fixture.node, "/loop_closure/save_map", [&corrected_calls](auto, auto r) {
+    auto corrected = mockService<std_srvs::srv::Trigger>(fixture.node, "/loop_closure/save_bundle", [&corrected_calls](auto, auto r) {
       ++corrected_calls; r->success = true; r->message = "corrected";
     });
     fixture.start(); RosAdapter adapter(config()); QSignalSpy results(&adapter, &RosAdapter::requestFinished);
@@ -254,7 +254,7 @@ time.sleep(30)
 
   void mapSaveUsesBackendServiceTypes() {
     FixtureExecutor fixture;
-    auto trigger = mockService<std_srvs::srv::Trigger>(fixture.node, "/loop_closure/save_map", [](auto, auto r) { r->success = true; r->message = "mock PCD saved"; });
+    auto trigger = mockService<std_srvs::srv::Trigger>(fixture.node, "/loop_closure/save_bundle", [](auto, auto r) { r->success = true; r->message = "mock PCD saved"; });
 #ifdef DESKTOP_HAS_SLAM_TOOLBOX
     auto slam = mockService<slam_toolbox::srv::SerializePoseGraph>(fixture.node, "/slam_toolbox/serialize_map", [](auto q, auto r) { r->result = q->filename == "/tmp/desktop_map" ? 0 : 255; });
 #endif

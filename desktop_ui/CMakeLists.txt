@@ -149,6 +149,8 @@ if(BUILD_TESTING)
     set_tests_properties(desktop_ui_integration PROPERTIES TIMEOUT 120 ENVIRONMENT "QT_QPA_PLATFORM=xcb;LIBGL_ALWAYS_SOFTWARE=1;ROS_DOMAIN_ID=219;ROS_LOCALHOST_ONLY=1;ROS_LOG_DIR=${CMAKE_CURRENT_BINARY_DIR}/test_ros_logs")
     add_test(NAME desktop_initial_pose COMMAND ${XVFB_RUN} -a -s "-screen 0 1600x1100x24 +extension GLX +render -noreset" $<TARGET_FILE:desktop_ui_test> initialPoseDoesNotRequireSpeedOrMapOrReadyNav2)
     set_tests_properties(desktop_initial_pose PROPERTIES TIMEOUT 45 ENVIRONMENT "QT_QPA_PLATFORM=xcb;LIBGL_ALWAYS_SOFTWARE=1;ROS_DOMAIN_ID=223;ROS_LOCALHOST_ONLY=1;ROS_LOG_DIR=${CMAKE_CURRENT_BINARY_DIR}/test_ros_logs")
+    add_test(NAME desktop_map_bundle_ui COMMAND ${XVFB_RUN} -a -s "-screen 0 1600x1100x24 +extension GLX +render -noreset" $<TARGET_FILE:desktop_ui_test> singlePassMapCanBeSavedAndSelectedWithoutStartingMotion)
+    set_tests_properties(desktop_map_bundle_ui PROPERTIES TIMEOUT 60 ENVIRONMENT "QT_QPA_PLATFORM=xcb;LIBGL_ALWAYS_SOFTWARE=1;ROS_DOMAIN_ID=214;ROS_LOCALHOST_ONLY=1;ROS_LOG_DIR=${CMAKE_CURRENT_BINARY_DIR}/test_ros_logs")
 
     add_executable(desktop_ui_lifecycle_test tests/ui_lifecycle_test.cpp)
     target_link_libraries(desktop_ui_lifecycle_test PRIVATE desktop_app Qt5::Test)

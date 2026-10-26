@@ -12,7 +12,7 @@ EKF 状态不受本节点影响；修正只在点击保存后计算并写入磁�
 → 后台匹配历史邻近非地面子地图（point-to-point ICP → Huber point-to-plane ICP）
 → 保存时：xyz+yaw 图优化（roll/pitch 沿用前端结果并固定，第一帧固定，
    无终点=原点约束），留出重叠残差验证
-→ 检查通过才原子写入最终 PCD 与 <map>.validation.json
+→ UI 保存独立地图包，分别标记回环通过、单程未验证或数据/优化异常
 ```
 
 地图坐标：以首个有效 IMU 观测为世界重力参考，导出时整体旋转到重力竖直
@@ -38,11 +38,12 @@ EKF 状态不受本节点影响；修正只在点击保存后计算并写入磁�
 /loop_closure/status          std_msgs/String (JSON)，每 5 s
 ```
 
-服务（两个名字等价，均执行完整检查与优化）：
+服务：
 
 ```text
 /loop_closure/save_map        std_srvs/Trigger
 /map_save                     std_srvs/Trigger
+/loop_closure/save_bundle     std_srvs/Trigger（UI 使用，保存与回环验收分开）
 ```
 
 前端 FAST-LIO 自带的原始保存服务在建图模式被重映射为
@@ -50,6 +51,29 @@ EKF 状态不受本节点影响；修正只在点击保存后计算并写入磁�
 它不做任何几何检查，**不能当作最终导航地图**。
 
 ## 保存行为
+
+### UI：保存独立地图包
+
+UI 调用 `/loop_closure/save_bundle`。关键帧足够且文件能正常写入时，单程、
+短路线和没有合格回环都能保存 PCD，UI 随后给同一个 PCD 生成 PGM/YAML。
+每次写入独立的 `session/exports/<时间>/map`，重复保存保留早先快照。
+服务的 `success=true` 表示数据已保存，不等于回环或实车定位验收通过。
+
+返回 `message` 为 `schema=fastlio.saved_map.v1` 的 JSON，包含实际文件前缀、
+原请求前缀、状态、原因、下一步操作和是否允许载入进行定位核对。UI 校验
+PCD SHA256 和报告一致后才导出配套切片，并显示：
+
+- `loop_checked`：实测回环和留出检查通过，导出修正地图，可载入核对定位。
+- `no_loop`：回环约束不足，导出前端单程地图，明确标记未完成回环验证，可载入核对。
+- `geometry_rejected`：回环优化未通过，保存前端地图与拒绝报告；不导出失败优化位姿，不开放直接载入。
+- `sensor_error`：传感器/时间戳/匹配处理异常，尽可能归档已有有效关键帧；显示处理办法，不开放直接载入。
+
+没有足够关键帧、PCD 为空/非有限或实际文件写入失败仍返回失败，并提示目录和处理办法。
+切片失败保留本次 PCD 和原始会话，可再次点击保存重试。保存和切片不会替换
+原导航图，也不会更新网页当前导航图；“载入本次地图”仅选择这套 PCD/YAML，
+不会自动启动导航或发送行驶目标。
+
+### 兼容接口：严格导出
 
 `/loop_closure/save_map`（或 `/map_save`）触发：
 
@@ -62,8 +86,8 @@ EKF 状态不受本节点影响；修正只在点击保存后计算并写入磁�
    并生成 `<map>.validation.json`（含点数与 SHA256）。
 
 失败时返回 `success=false`，最终文件名**不会被写入**；保留
-`<map>_UNVERIFIED.pcd` 候选图与完整会话目录供诊断。桌面端在失败时不会
-继续导出 PGM/YAML 栅格。
+`<map>_UNVERIFIED.pcd` 候选图与完整会话目录供诊断。这两个接口保留旧的
+严格行为，供既有 CLI 和验收脚本兼容；新 UI 不使用它们。
 
 普通重叠匹配质量门限：非地面 fitness ≥0.85
 （0.4 m 对应距离）、RMSE ≤0.20 m；单条修正 XY <2 m、Z <0.4 m、
@@ -80,9 +104,9 @@ RMSE ≤0.22 m，允许 XY <3 m、Z <2 m，但必须同时满足至少 500 个�
 这些检查有相关性，不构成外部真值验证。保存时会补查尚未尝试的最后一帧，
 重复保存不重复加边；这不生成首尾相等约束。
 
-**注意**：`min_time_diff_sec=300` 要求重复路段至少间隔 5 分钟。短路线或
-没有重复经过有建筑/立柱路段时，会因合格匹配不足而无法输出已检查的最终图
-——这是设计行为，候选图与会话保留，不要通过放松门限强行出图。
+历史时间间隔默认改为 `min_time_diff_sec=60`，同时保留至少 30 帧的索引间隔和
+所有匹配质量检查。这只是筛选回环候选的条件，**不是保存地图的最短时长**。
+无回环时保存单程图，不通过放松配准质量门限伪造“回环通过”。
 
 ## 会话与诊断
 
@@ -97,6 +121,9 @@ RMSE ≤0.22 m，允许 XY <3 m、Z <2 m，但必须同时满足至少 500 个�
   session.json           工作流与参数声明
   validation.json        保存后的完整报告
   poses.npy              保存后的优化位姿
+  exports/<时间>/        UI 每次保存的独立地图包：PCD、报告、poses.npy、使用说明
+                         以及 UI 随后导出的 PGM/YAML
+  last_save.json         最近一次 UI 保存结果与实际路径
 ```
 
 `/loop_closure/status` JSON 字段：keyframes、qualified_overlaps、
@@ -109,7 +136,7 @@ session、attempted_overlaps。`error` 非空（如前端位姿 NaN、点云时�
 output_map_path        最终 PCD 路径（必填，来自 pcd_map）
 keyframe_distance      0.8 m        keyframe_angle_deg   10°
 keyframe_max_gap_sec   2 s          静止排除 0.12 m / 2°
-search_radius          12 m         min_time_diff_sec    300 s
+search_radius          12 m         min_time_diff_sec    60 s
 min_index_diff         30           submap_half_window   3
 overlap_spacing_m      1 m          map_voxel            0.10 m
 imu_topic              /imu/data    lio_frame            lio_odom
@@ -118,9 +145,9 @@ imu_topic              /imu/data    lio_frame            lio_odom
 ## UI 集成
 
 `chassis_nav2` 建图模式同时启动本节点与前端。桌面端“保存地图”固定调用
-`/loop_closure/save_map`，服务不存在时提示未就绪，**不再回退到原始
-`/map_save` 原图**；保存服务超时 ≥180 s，成功后才继续 PCD→PGM/YAML 与
-网页地图导出。
+`/loop_closure/save_bundle`，服务不存在时提示重新启动建图流程，不回退到原始
+保存服务；保存服务超时 ≥180 s。UI 提供“打开保存目录”和“载入本次地图”，
+后者须先停止建图流程，且只对回环通过或单程未验证的完整配套地图开放。
 
 ## 重要边界
 

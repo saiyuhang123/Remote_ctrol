@@ -257,10 +257,27 @@ void MainWindow::setupUi() {
   connect(start_, &QPushButton::clicked, this, &MainWindow::startSession);
   auto *sessionActions = new QHBoxLayout;
   save_ = button("保存地图", sessionActions, "saveMap"); stop_ = button("停止流程", sessionActions, "stopSession"); footerLayout->addLayout(sessionActions);
-  save_->setToolTip("保存建图状态和导航 YAML/PGM；FAST-LIO 保存 PCD 后自动切片");
+  save_->setToolTip("FAST-LIO 保存独立地图包并自动生成切片；单程也可保存，现有导航地图继续保留");
   connect(save_, &QPushButton::clicked, this, [this] { if (allowed()) saver_->save(profile(), mapPrefix_->text().trimmed()); });
   stop_->setToolTip("只停止本界面启动的流程，外部节点不受影响");
   connect(stop_, &QPushButton::clicked, this, [this] { if (saver_->busy()) return; cancelPatrolRun(QStringLiteral("停止本界面流程")); controller_->emergencyStop(); process_->stop(); });
+  mapSaveStatus_ = hint("保存后在这里查看地图状态；单程建图也可保存。", footerLayout);
+  mapSaveStatus_->setObjectName("mapSaveStatus"); mapSaveStatus_->setWordWrap(true);
+  auto *savedActions = new QHBoxLayout;
+  openSavedMap_ = button("打开保存目录", savedActions, "openSavedMap");
+  loadSavedMap_ = button("载入本次地图", savedActions, "loadSavedMap");
+  footerLayout->addLayout(savedActions);
+  connect(openSavedMap_, &QPushButton::clicked, this, [this] {
+    if (!saver_->savedPrefix().isEmpty())
+      QDesktopServices::openUrl(QUrl::fromLocalFile(QFileInfo(saver_->savedPrefix()).absolutePath()));
+  });
+  connect(loadSavedMap_, &QPushButton::clicked, this, [this] {
+    if (!allowed() || process_->running() || saver_->busy() || !saver_->canLoadSavedMap() || patrolRunActive()) return;
+    profiles_->setCurrentIndex(0);
+    mapPrefix_->setText(saver_->savedPrefix()); navigationYaml_->setText(saver_->savedPrefix() + ".yaml");
+    log("已选择本次 PCD 和配套切片；启动定位导航后，请重新设置实际位置与朝向并核对点云。此操作不启动行驶。");
+    updateControls();
+  });
   connect(manage_, &QCheckBox::toggled, this, [this] { updateControls(); });
   runtimePageLayout->addWidget(runtimeFooter); controlTabs_->addTab(runtimePage, "运行");
 

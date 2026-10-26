@@ -84,7 +84,17 @@ MainWindow::MainWindow(const DesktopConfig &config, bool offline, QWidget *paren
   connect(saver_, &MapSaver::message, this, &MainWindow::log);
   connect(saver_, &MapSaver::saved, this, [this](bool ok, const QString &text) {
     const auto message = (ok ? "保存成功：" : "保存未完成：") + text;
+    const auto quality = saver_->quality();
+    const QString summary = !ok ? "保存未完成，详情见下方日志。" :
+        quality == "loop_checked" ? "回环检查通过。停止建图后可载入本次地图。" :
+        quality == "no_loop" ? "单程图已保存，未做回环验证。停止建图后可载入并核对定位。" :
+        quality == "sensor_error" ? "数据已归档，请检查传感器和时间戳；暂不用于导航。" :
+        quality == "geometry_rejected" ? "地图已归档，回环修正未采用。可继续重走旧路段后再次保存。" : "地图已保存，详情见日志。";
+    mapSaveStatus_->setText(summary);
+    mapSaveStatus_->setToolTip(message);
+    mapSaveStatus_->setStyleSheet(ok && saver_->quality() == "loop_checked" ? "color: #86d9a3;" : "color: #edc56a;");
     log(message); showOperationResult("save_map", ok, message);
+    updateControls();
   });
   connect(saver_, &MapSaver::busyChanged, this, [this] { updateControls(); });
   connect(process_, &ProcessManager::output, this, &MainWindow::log);
@@ -184,6 +194,9 @@ void MainWindow::updateControls() {
   deviceClient_->setControlEnabled(ok);
   const bool motion = ok && controller_->controlEnabled();
   const bool patrolRunning = patrolClient_ && patrolClient_->hasActiveOrPendingRun();
+  openSavedMap_->setEnabled(!busy && !saver_->savedPrefix().isEmpty());
+  loadSavedMap_->setEnabled(ok && !running && !busy && !patrolRunning && saver_->canLoadSavedMap());
+  loadSavedMap_->setToolTip(running ? "先停止建图流程，再载入本次地图" : "选择本次配套 PCD/YAML；启动导航后需重新设置实际位姿");
   for (auto *b : writeButtons_) { const auto cap = b->property("capability").toString(); b->setEnabled(ok && (!b->property("motion").toBool() || motion) && (cap.isEmpty() || ros_->capabilities().contains(cap))); }
   take_->setEnabled(motion); unlock_->setEnabled(motion && !state_.navigationActive && !patrolRunning && (!state_.estopValid || state_.estopped));
   const bool manual = motion && controller_->manualReady() && !patrolRunning && state_.estopValid && !state_.estopped && state_.navigationKnown && !state_.navigationActive;

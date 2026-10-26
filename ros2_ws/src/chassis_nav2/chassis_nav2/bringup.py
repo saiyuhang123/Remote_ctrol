@@ -341,7 +341,7 @@ def configure(context):
                 'stationary_distance': 0.12,
                 'stationary_angle_deg': 2.0,
                 'search_radius': 12.0,
-                'min_time_diff_sec': 300.0,
+                'min_time_diff_sec': 60.0,
                 'min_index_diff': 30,
                 'submap_half_window': 3,
                 'overlap_spacing_m': 1.0,

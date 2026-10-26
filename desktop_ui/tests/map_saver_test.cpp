@@ -2,6 +2,9 @@
 #include "runtime/map_saver.h"
 #include <QDir>
 #include <QFile>
+#include <QCryptographicHash>
+#include <QJsonDocument>
+#include <QJsonObject>
 #include <QRegularExpression>
 #include <QSignalSpy>
 #include <QTemporaryDir>
@@ -40,15 +43,29 @@ struct MappingFixture {
   std::thread thread;
   std::atomic_bool valid{true};
   std::atomic_bool writePcd{true};
+  bool bundle = false;
+  QString artifactPrefix;
+  QString quality = "no_loop";
   std::atomic_int requests{0};
   rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr service;
   MappingFixture(const QString &prefix) {
-    service = node->create_service<std_srvs::srv::Trigger>("/loop_closure/save_map",
+    service = node->create_service<std_srvs::srv::Trigger>("/loop_closure/save_bundle",
       [this, prefix](std::shared_ptr<std_srvs::srv::Trigger::Request>,
                      std::shared_ptr<std_srvs::srv::Trigger::Response> response) {
         ++requests;
-        response->success = !writePcd || writeFile(prefix + ".pcd", cloud(valid));
+        const auto output = bundle ? artifactPrefix : prefix;
+        response->success = !writePcd || writeFile(output + ".pcd", cloud(valid));
         response->message = "fixture PCD saved";
+        if (bundle) {
+          const QString digest = QString::fromLatin1(QCryptographicHash::hash(cloud(valid), QCryptographicHash::Sha256).toHex());
+          const QJsonObject report{{"status", quality}, {"sha256", digest}, {"geometry_checks_passed", quality == "loop_checked"}};
+          writeFile(output + ".validation.json", QJsonDocument(report).toJson());
+          const QJsonObject payload{{"schema", "fastlio.saved_map.v1"}, {"quality", quality},
+            {"artifact_prefix", output}, {"requested_prefix", prefix},
+            {"localization_test_allowed", quality == "no_loop" || quality == "loop_checked"},
+            {"message", "单程地图"}, {"next_action", "核对定位后试用"}};
+          response->message = QJsonDocument(payload).toJson(QJsonDocument::Compact).toStdString();
+        }
       });
     executor.add_node(node);
     thread = std::thread([this] { executor.spin(); });
@@ -142,6 +159,44 @@ private slots:
     QVERIFY(!saved.at(0).at(0).toBool());
     QCOMPARE(readFile(prefix + ".pgm"), QByteArray("previous pgm"));
     QCOMPARE(readFile(prefix + ".yaml"), QByteArray("previous yaml"));
+  }
+
+  void savesSeparateSinglePassBundleAndKeepsActiveMapIntact() {
+    QTemporaryDir directory;
+    const auto active = directory.filePath("active");
+    const auto artifact = directory.filePath("saved snapshot");
+    QVERIFY(writeFile(active + ".pcd", "old PCD"));
+    QVERIFY(writeFile(active + ".pgm", "old PGM"));
+    QVERIFY(writeFile(active + ".yaml", "old YAML"));
+    MappingFixture fixture(active); fixture.bundle = true; fixture.artifactPrefix = artifact;
+    RosAdapter adapter(config()); MapSaver saver(config(), &adapter);
+    QSignalSpy saved(&saver, &MapSaver::saved);
+    QTest::qWait(800); saver.save(desktopProfiles().at(1), active);
+    QTRY_COMPARE_WITH_TIMEOUT(saved.size(), 1, 30000);
+    QVERIFY2(saved.at(0).at(0).toBool(), qPrintable(saved.at(0).at(1).toString()));
+    QCOMPARE(saver.quality(), QString("no_loop")); QCOMPARE(saver.savedPrefix(), artifact);
+    QVERIFY(saver.canLoadSavedMap());
+    QVERIFY(saved.at(0).at(1).toString().contains("未完成回环验证"));
+    QVERIFY(readFile(artifact + ".pgm").startsWith("P5"));
+    QVERIFY(readFile(artifact + ".yaml").contains("saved snapshot.pgm"));
+    QCOMPARE(readFile(active + ".pcd"), QByteArray("old PCD"));
+    QCOMPARE(readFile(active + ".pgm"), QByteArray("old PGM"));
+    QCOMPARE(readFile(active + ".yaml"), QByteArray("old YAML"));
+  }
+
+  void dataErrorBundleIsArchivedButCannotBeLoadedAsNavigation() {
+    QTemporaryDir directory;
+    const auto active = directory.filePath("active");
+    MappingFixture fixture(active); fixture.bundle = true;
+    fixture.artifactPrefix = directory.filePath("sensor error"); fixture.quality = "sensor_error";
+    RosAdapter adapter(config()); MapSaver saver(config(), &adapter);
+    QSignalSpy saved(&saver, &MapSaver::saved);
+    QTest::qWait(800); saver.save(desktopProfiles().at(1), active);
+    QTRY_COMPARE_WITH_TIMEOUT(saved.size(), 1, 30000);
+    QVERIFY(saved.at(0).at(0).toBool());
+    QVERIFY(!saver.canLoadSavedMap()); QVERIFY(!saver.savedPrefix().isEmpty());
+    QVERIFY(saved.at(0).at(1).toString().contains("传感器数据需要检查"));
+    QVERIFY(!QFileInfo::exists(active + ".pcd"));
   }
 
   void projectionTimeoutPreservesPcdAndOldGrid() {
