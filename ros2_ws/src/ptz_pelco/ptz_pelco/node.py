@@ -897,6 +897,7 @@ class PtzPelcoNode(Node):
             'zoom_jog': self.zoom_jog, 'zoom_backend': self.zoom_backend,
             'patrol': self.patrol is not None, 'patrol_fault': self.patrol_fault,
             'bus': self.link.stats, 'connected': self.link.ser is not None,
+            'last_error': self.last_error,
         }
         self.pub_state.publish(String(data=json.dumps(st)))
         self.link.stats = {'ok': 0, 'no_reply': 0, 'bad_frame': 0, 'bad_sum': 0, 'busy': 0}

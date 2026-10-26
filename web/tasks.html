@@ -5,6 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>巡检任务 · 巡检机器人</title>
 <script src="page-bridge.js"></script>
+<script src="control-access.js"></script>
 <link rel="stylesheet" href="theme.css">
 <script src="ui.js" defer></script>
 </head>
@@ -15,10 +16,12 @@
   <div class="header-status">
     <span id="status" class="bad">未连接</span><span id="controlTag">未取得控制权</span>
     <button class="btn" id="btnClaim">取得控制权</button><button class="btn gray" id="btnRelease" disabled>释放</button>
+    <button class="btn gray" id="btnUnlock" disabled>解除急停（保持静止）</button>
   </div>
 </header>
 <main class="tasks-layout">
   <section>
+    <p id="controlHint" class="form-hint" role="status">等待网关状态</p>
     <div class="card">
       <h2><span class="section-title"><span class="icon" data-icon="route"></span>选择巡检路线</span><span class="tag">本地路线</span></h2>
       <p class="card-description">自由路线可立即执行；固定路线先预览，再按确认的道路启动。</p>
@@ -102,6 +105,7 @@ const $ = id => document.getElementById(id);
 const app = {
   ws: null, session: null, telemetry: null, state: null, selectedRouteId: '',
   routes: [], taskActive: false, pendingStart: null, lastPatrol: null, messageIsError: false,
+  unlockPending: false, unlockRequestId: '',
 };
 const TASK_NAMES = {idle:'空闲', validating:'校验任务', dispatching:'派发目标', navigating:'导航中',
   settling:'确认停稳', dwelling:'点位停留', pausing:'暂停中', paused:'已暂停',
@@ -132,6 +136,7 @@ function connect() {
   app.ws.onclose = () => {
     setConnection(false, '连接断开，3s 后重连…');
     app.session = null; app.telemetry = null; app.lastPatrol = null;
+    app.unlockPending = false; app.unlockRequestId = '';
     app.pendingStart = null; app.taskActive = false; updateUi();
   };
   app.ws.onmessage = event => {
@@ -176,6 +181,7 @@ function connect() {
 connect();
 
 function handleResult(data) {
+  if (RobotControlAccess.result(app, data, setMessage, updateUi)) return;
   if (data.command === 'control_claim') {
     if (data.ok) app.session = data.session_id || app.session;
     else app.session = null;
@@ -281,12 +287,7 @@ function updateUi() {
   const selected = app.routes.find(route => route.route_id === app.selectedRouteId && route.valid);
   const sync = Boolean(app.state && app.state.map_sync_ok && app.state.active_map);
   const home = Boolean(app.state && app.state.home);
-  $('btnClaim').disabled = Boolean(app.session) || Boolean(control.owner_present) ||
-    Boolean(control.local_control) || control.estop_known !== true ||
-    control.estopped === true;
-  $('btnClaim').title = control.estop_known !== true
-    ? '等待本地急停状态反馈' : (control.estopped === true
-      ? '急停保持中，请先在本地解除' : '取得本网页的单一控制权');
+  RobotControlAccess.update(app);
   $('btnRelease').disabled = !owner;
   $('controlTag').textContent = owner ? '本网页控制中' :
     (control.local_control ? '本地控制优先' : (control.owner_present ? '其他网页控制中' : '未取得控制权'));
@@ -299,13 +300,14 @@ function updateUi() {
     (control.estopped ? '急停保持' : '已释放');
   $('estopText').className = control.estop_known !== true ? 'warning' :
     (control.estopped ? 'dangerText' : 'good');
-  $('btnStart').disabled = !owner || !sync || !selected || running;
+  const motionReady = control.estop_known === true && control.estopped === false && !app.telemetry?.desktop?.pending?.estop_release;
+  $('btnStart').disabled = !owner || !motionReady || !sync || !selected || running;
   if (selected?.requires_preview && !window.previewIsCurrent?.()) $('btnStart').disabled = true;
   $('btnPreview').disabled = !owner || !sync || !selected?.requires_preview || running;
   $('btnPause').disabled = !owner || !running || !['route','point'].includes(t.kind);
   $('btnResume').disabled = !owner || !running || !['route','point'].includes(t.kind);
   $('btnCancel').disabled = !owner || !running || !['route','point'].includes(t.kind);
-  $('btnReturn').disabled = !owner || !sync || !home || t.kind === 'return' ||
+  $('btnReturn').disabled = !owner || !motionReady || !sync || !home || t.kind === 'return' ||
     Boolean(t.pending_return);
   $('btnReturnCancel').disabled = !owner ||
     !(t.kind === 'return' || t.pending_return);
@@ -358,6 +360,7 @@ async function loadRecords() {
 }
 
 $('btnClaim').onclick = () => sendRaw({type:'control_claim', request_id:requestId('claim')});
+$('btnUnlock').onclick = () => RobotControlAccess.release(app, sendRaw, setMessage, updateUi);
 $('btnRelease').onclick = () => { if (app.session) sendControl('control_release'); };
 $('btnStart').onclick = () => {
   if (taskRunning()) return;
@@ -400,6 +403,7 @@ $('btnReturn').onclick = () => {
 $('btnReturnCancel').onclick = () => sendControl('return_cancel');
 
 setInterval(loadState, 5000);
+setInterval(() => RobotControlAccess.update(app), 250);
 loadState(); loadRecords();
 </script>
 <script src="map-loader.js"></script>

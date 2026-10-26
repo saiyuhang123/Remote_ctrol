@@ -5,6 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>巡检机器人 · 监控台</title>
 <script src="page-bridge.js"></script>
+<script src="control-access.js"></script>
 <link rel="stylesheet" href="theme.css">
 <script src="ui.js" defer></script>
 </head>
@@ -66,6 +67,8 @@
         <button class="btn" id="btnClaim">取得控制权</button>
         <button class="btn gray" id="btnRelease" disabled>释放控制权</button>
       </div>
+      <button class="btn gray" id="btnUnlock" disabled>解除急停（保持静止）</button>
+      <p id="controlHint" class="form-hint" role="status">等待网关状态</p>
       <div id="actionMessage" role="status"></div>
     </section>
     <section class="card">
@@ -101,6 +104,8 @@
     </section>
     <section class="card">
       <h2><span class="section-title"><span class="icon" data-icon="ptz"></span>云台控制</span><span id="ptzAuto" class="tag">状态未知</span></h2>
+      <button class="btn gray" id="btnPtzPrepare" disabled>启动 / 连接本地云台</button>
+      <p id="ptzMessage" class="form-hint" role="status">复用本地服务：485 移动，网口变倍。</p>
       <div class="row"><span>控制服务</span><b id="ptzService">未知</b></div>
       <div class="row"><span>水平 / 俯仰</span><b id="ptzPose">—</b></div>
       <div class="row"><span>变倍</span><b id="ptzZoom">—</b></div>
@@ -116,6 +121,8 @@
     </section>
     <section class="card">
       <h2><span class="section-title"><span class="icon" data-icon="scan"></span>视觉识别</span></h2>
+      <p class="form-hint">开启时由本地 Qt 按需启动相机、检测与记录组件；已运行时直接复用。</p>
+      <p id="visionMessage" class="form-hint" role="status">等待本地视觉服务状态</p>
       <label class="toggleRow"><span>上位机人脸抓拍 <small id="faceState" class="muted"></small></span><input type="checkbox" id="toggleFace" disabled></label>
       <label class="toggleRow"><span>行人检测 <small id="personState" class="muted"></small></span><input type="checkbox" id="togglePerson" disabled></label>
       <label class="toggleRow"><span>车牌检测 <small id="plateState" class="muted"></small></span><input type="checkbox" id="togglePlate" disabled></label>
@@ -160,6 +167,7 @@ const app = {
   autoFit: true, dragging: false, dragLast: null, stickActive: false,
   telemetryReceivedAt: 0,
   linear: 0, angular: 0, lastTaskKey: '', lastVision: '',
+  pendingVision: {}, unlockPending: false, unlockRequestId: '',
   mapError: '地图加载中…',
 };
 const TASK_NAMES = {idle:'空闲', validating:'校验', dispatching:'派发', navigating:'导航',
@@ -197,6 +205,7 @@ function connect() {
   app.ws.onclose = () => {
     setConnection(false, '连接断开，3s 后重连…');
     releaseStick(false); stopPtzHold(false);
+    app.pendingVision = {}; app.unlockPending = false; app.unlockRequestId = '';
     app.session = null; app.telemetry = null; updateOwnership(); closeVideo(); updateGas({}); updateBattery({}); drawMap();
   };
   app.ws.onerror = () => setConnection(false, 'WebSocket 连接失败');
@@ -230,6 +239,11 @@ function connect() {
 connect();
 
 function handleCommandResult(data) {
+  if (RobotControlAccess.result(app, data, showMessage, updateOwnership)) return;
+  if (data.command === 'ptz_prepare') {
+    $('ptzMessage').textContent = data.message || data.code;
+    return;
+  }
   const isError = !data.ok;
   const detail = data.message || data.code || '';
   if (data.command === 'control_claim') {
@@ -247,6 +261,8 @@ function handleCommandResult(data) {
     updateOwnership();
   } else if (data.command === 'vision_face_capture' ||
              data.command === 'vision_person' || data.command === 'vision_plate') {
+    const pending = app.pendingVision[data.command];
+    if (pending?.request_id === data.request_id && (data.code !== 'PENDING' || !data.ok)) delete app.pendingVision[data.command];
     showMessage(`${data.command}：${detail || (data.ok ? '成功' : '失败')}`, isError);
     if (!data.ok) refreshVisionToggles();
   } else if (data.command === 'ptz_jog' || data.command === 'ptz_stop' || data.command === 'ptz_read') {
@@ -273,13 +289,8 @@ function updateOwnership() {
   const t = app.telemetry || {};
   const control = t.control || {};
   const owner = Boolean(app.session && control.owner_present);
-  const manual = owner && control.mode === 'manual' && !taskRunning();
-  ui.btnClaim.disabled = Boolean(app.session) || Boolean(control.owner_present) ||
-    Boolean(control.local_control) || control.estop_known !== true ||
-    control.estopped === true;
-  ui.btnClaim.title = control.estop_known !== true
-    ? '等待本地急停状态反馈' : (control.estopped === true
-      ? '急停保持中，请先在本地解除' : '取得本网页的单一控制权');
+  const manual = isManual() && !taskRunning();
+  RobotControlAccess.update(app);
   ui.btnRelease.disabled = !owner;
   ui.controlTag.textContent = owner ? '本网页已取得' :
     (control.local_control ? '本地控制优先' : (control.owner_present ? '其他网页控制中' : '未取得'));
@@ -296,13 +307,14 @@ function updateOwnership() {
   $('stick').style.opacity = manual ? '1' : '.45';
   ['toggleFace', 'togglePerson', 'togglePlate'].forEach(id => {
     const el = $(id);
-    el.disabled = !owner || !visionNodeAvailable(id);
+    el.disabled = !owner || !(t.desktop?.vision_available || visionNodeAvailable(id));
   });
   document.querySelectorAll('.ptz').forEach(button => {
-    button.disabled = !owner || ptzLocked();
+    button.disabled = !owner || ptzLocked() || !t.ptz?.driver_ready || !t.ptz?.service_ready;
   });
   $('btnPtzStop').disabled = !owner;
   $('btnPtzRead').disabled = !owner;
+  $('btnPtzPrepare').disabled = !owner || !t.desktop?.camera_available || Boolean(t.desktop?.pending?.ptz_prepare);
   updateTaskStatus(t.patrol);
 }
 
@@ -382,6 +394,7 @@ function updateVision(v) {
   const detectorFresh = v.detector_age !== null && v.detector_age !== undefined &&
                         v.detector_age <= 3;
   const controlReady = Boolean(v.detector_service_ready && detectorFresh);
+  const desktop = app.telemetry?.desktop || {};
   const ready = Boolean(detector.ready && controlReady);
   $('detectorState').textContent = ready ? '上位机已就绪' : (detector.last_error ? '模型异常' : '本地未启动/初始化中');
   $('detectorState').className = ready ? 'good' : 'muted';
@@ -393,10 +406,22 @@ function updateVision(v) {
   $('faceState').textContent = featureText(faceEnabled, detector.face);
   $('personState').textContent = featureText(personEnabled, detector.person);
   $('plateState').textContent = featureText(plateEnabled, detector.plate);
-  const checkboxOwner = isOwner();
-  setCheckbox('toggleFace', faceEnabled, checkboxOwner && controlReady);
-  setCheckbox('togglePerson', personEnabled, checkboxOwner && controlReady);
-  setCheckbox('togglePlate', plateEnabled, checkboxOwner && controlReady);
+  const checkboxOwner = isOwner() && app.ws?.readyState === 1 && Date.now()-app.telemetryReceivedAt < 3000;
+  const canChange = checkboxOwner && (app.telemetry?.desktop?.vision_available || controlReady);
+  $('visionMessage').textContent = !isOwner() ? '先取得网页控制权，再开启需要的检测。' :
+    !desktop.vision_available && !controlReady ? '本地启动接口未就绪，请更新并重新打开 Qt 客户端。' :
+    Object.keys(desktop.pending || {}).some(key => key.startsWith('vision_')) ? '本地组件正在准备，初始化状态和错误同步显示。' :
+    '可分别开启人脸、行人或车牌检测，复用同一套本地组件。';
+  for (const [id, command, feature, wanted] of [
+    ['toggleFace','vision_face_capture','face',faceEnabled],
+    ['togglePerson','vision_person','person',personEnabled],
+    ['togglePlate','vision_plate','plate',plateEnabled]]) {
+    const pending = app.pendingVision[command];
+    const busy = pending || app.telemetry?.desktop?.pending?.[command];
+    setCheckbox(id, pending ? pending.enabled : wanted, canChange && !busy);
+    const stateId = feature === 'face' ? 'faceState' : feature === 'person' ? 'personState' : 'plateState';
+    if (busy) $(stateId).textContent = pending?.enabled === false ? '正在关闭…' : '正在由本地准备…';
+  }
   const recorder = v.recorder || {};
   const ages = [v.detector_age, v.face_age, v.camera_age]
     .filter(value => value !== null && value !== undefined);
@@ -422,11 +447,13 @@ function refreshVisionToggles() {
 
 function updatePtz(p) {
   const pose = p.pose || {}, patrol = p.patrol || {};
-  $('ptzService').textContent = p.service_ready ? '就绪' : '未就绪';
-  $('ptzService').className = p.service_ready ? 'good' : 'muted';
-  $('ptzPose').textContent = (pose.pan !== undefined)
+  const available = p.service_ready && p.driver_ready;
+  $('ptzService').textContent = available ? '本地 485 / 网口服务就绪' : '等待本地设备连接';
+  $('ptzService').className = available ? 'good' : 'muted';
+  const poseFresh = Number.isFinite(p.pose_age) && p.pose_age <= 3 && available;
+  $('ptzPose').textContent = (pose.pan !== undefined && poseFresh)
     ? `${Number(pose.pan).toFixed(1)}° / ${Number(pose.tilt).toFixed(1)}°` : '-';
-  $('ptzZoom').textContent = pose.zoom !== undefined ? Number(pose.zoom).toFixed(1) : '-';
+  $('ptzZoom').textContent = pose.zoom !== undefined && poseFresh ? Number(pose.zoom).toFixed(1) : '等待读取';
   const active = Boolean(patrol.active || patrol.enabled);
   const inspecting = Boolean(patrol.inspection_held);
   $('ptzAuto').textContent = inspecting ? '巡检占用中' : active ? '自动巡航中' : '手动可用';
@@ -436,10 +463,16 @@ function updatePtz(p) {
     ? '未知' : `${Number(p.patrol_age).toFixed(1)}s · ${p.patrol_age <= 2.5 ? '新鲜' : '过期'}`;
   $('ptzFresh').className = p.patrol_age !== null && p.patrol_age !== undefined &&
     p.patrol_age <= 2.5 ? 'good' : 'warning';
-  $('ptzError').textContent = patrol.last_error || '无';
-  $('ptzError').className = patrol.last_error ? 'warning' : 'muted';
+  const error = p.last_error || patrol.last_error || p.driver?.last_error || '';
+  $('ptzError').textContent = error || '无';
+  $('ptzError').className = error ? 'warning' : 'muted';
+  const preparing = app.telemetry?.desktop?.pending?.ptz_prepare;
+  if (!app.telemetry?.desktop?.camera_available)
+    $('ptzMessage').textContent = available ? '已连接现有云台；远程启动入口需要更新后的 Qt。' : '本地启动接口未就绪，请更新并重新打开 Qt 客户端。';
+  $('btnPtzPrepare').title = app.telemetry?.desktop?.camera_available ? '调用 Qt 现有相机与 RS485 云台启动流程' : '需要更新后的 Qt 客户端保持运行';
+  $('btnPtzPrepare').textContent = preparing ? '正在连接本地云台…' : '启动 / 连接本地云台';
   document.querySelectorAll('.ptz').forEach(button => {
-    button.disabled = !isOwner() || p.manual_locked || active;
+    button.disabled = !isOwner() || !available || p.manual_locked || active || Date.now()-app.telemetryReceivedAt >= 3000;
   });
 }
 
@@ -489,13 +522,14 @@ function updateBattery(value) {
   $('batteryFresh').textContent=live?(low?'电量偏低':'数据新鲜'):value.state==='invalid'?'反馈无效':value.state==='waiting' || value.age===undefined || value.age===null?'等待反馈':'反馈已过期';
   $('batteryFresh').dataset.tone=low || !live?'warn':'good';
 }
-setInterval(() => { updateGas(app.telemetry?.gas || {}); updateBattery(app.telemetry?.battery || {}); }, 250);
+setInterval(() => { RobotControlAccess.update(app); updateGas(app.telemetry?.gas || {}); updateBattery(app.telemetry?.battery || {}); }, 250);
 
 // ------------------------------ controls ------------------------------
 ui.btnClaim.onclick = () => {
   showMessage('正在取得控制权…');
   sendRaw({type:'control_claim', request_id:requestId('claim')});
 };
+$('btnUnlock').onclick = () => RobotControlAccess.release(app, sendRaw, showMessage, updateOwnership);
 ui.btnRelease.onclick = () => {
   if (app.session) sendControl('control_release');
 };
@@ -627,7 +661,18 @@ for (const [id, command] of [['toggleFace','vision_face_capture'],
                              ['togglePlate','vision_plate']]) {
   $(id).onchange = event => {
     if (!isOwner()) { event.target.checked = !event.target.checked; showMessage('请先取得控制权', true); return; }
-    sendControl(command, {enabled:event.target.checked});
+    const enabled = event.target.checked, request_id = requestId(command);
+    if (sendControl(command, {enabled, request_id})) {
+      app.pendingVision[command] = {enabled, request_id};
+      showMessage(enabled ? '正在请求本地开启检测组件…' : '正在请求本地关闭检测…');
+      refreshVisionToggles();
+      setTimeout(() => {
+        if (app.pendingVision[command]?.request_id === request_id) {
+          delete app.pendingVision[command]; refreshVisionToggles();
+          showMessage('检测操作等待超时，请查看本地组件状态', true);
+        }
+      }, 42000);
+    }
   };
 }
 
@@ -655,6 +700,9 @@ document.querySelectorAll('.ptz').forEach(button => {
 });
 $('btnPtzStop').onclick = () => { stopPtzHold(false); sendControl('ptz_stop'); };
 $('btnPtzRead').onclick = () => sendControl('ptz_read');
+$('btnPtzPrepare').onclick = () => {
+  if (sendControl('ptz_prepare')) $('ptzMessage').textContent = '正在请求 Qt 启动或连接已有相机与云台…';
+};
 document.addEventListener('visibilitychange', () => {
   if (document.hidden) {
     releaseStick(); stopPtzHold();

@@ -9,6 +9,7 @@
 #include "patrol/patrol_page.h"
 #include "ui_mainwindow.h"
 #include "adapters/local_controller.h"
+#include "adapters/desktop_remote_bridge.h"
 #include "runtime/map_saver.h"
 #include "runtime/process_manager.h"
 #include "rviz/rviz_host.h"
@@ -76,6 +77,7 @@ MainWindow::MainWindow(const DesktopConfig &config, bool offline, QWidget *paren
   closeSafetyTimer_->setInterval(200);
   connect(closeSafetyTimer_, &QTimer::timeout, this, &MainWindow::pollCloseAfterSafetyStop);
   setupUi();
+  remoteBridge_ = new DesktopRemoteBridge(cameraPanel_, visionPanel_, controller_, offline_, this);
   patrolClient_->refreshMaps();
   connect(controller_, &LocalController::message, this, &MainWindow::log);
   connect(ros_, &RosAdapter::message, this, &MainWindow::log);
@@ -119,6 +121,8 @@ MainWindow::MainWindow(const DesktopConfig &config, bool offline, QWidget *paren
   updateControls();
 }
 MainWindow::~MainWindow() {
+  delete remoteBridge_;
+  remoteBridge_ = nullptr;
   saveConsoleLayout();
   layoutReady_ = false;
   if (patrolWindow_) {
@@ -449,6 +453,7 @@ void MainWindow::openPatrolPage() {
                                localizationFile, profile().name, offline_, startPermission,
                                dialog, ros_);
   patrolPage_->setResumePermission(resumePermission);
+  patrolPage_->setReportProjectRoot(config_.projectRoot);
   layout->addWidget(patrolPage_);
   patrolWindow_ = dialog;
   connect(dialog, &QObject::destroyed, this, [this] {

@@ -158,11 +158,23 @@ bool VisionClient::supported() const {
 #endif
 }
 void VisionClient::startFace() {
-  if (impl_->offline || !supported()) return;
-  impl_->queueFeatures({{"enable_face", true}});
+  QString detail;
+  setFeature("enable_face", true, &detail);
+}
+bool VisionClient::setFeature(const QString &parameter, bool enabled, QString *detail) {
+  if (impl_->offline || !supported()) {
+    *detail = "本地视觉接口不可用，请使用正常模式并构建 vision_interfaces"; return false;
+  }
+  if (parameter != "enable_face" && parameter != "enable_person" && parameter != "enable_plate") {
+    *detail = "未知视觉功能"; return false;
+  }
+  impl_->queueFeatures({{parameter, enabled}});
+  *detail = enabled ? "本地已受理开启请求，正在准备相机、记录器与检测模型"
+                    : "本地已受理关闭请求，等待检测状态反馈";
+  return true;
 }
 void VisionClient::stopFace() {
-  if (impl_->offline) return;
+  if (impl_->offline || !supported()) return;
   impl_->queueFeatures({{"enable_face", false}});
 }
 void VisionClient::startDetector(bool person, bool plate) {

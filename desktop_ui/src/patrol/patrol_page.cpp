@@ -1,4 +1,5 @@
 #include "patrol/patrol_page.h"
+#include "patrol/report_viewer.h"
 #include "patrol/patrol_ui_style.h"
 #include "adapters/ros_adapter.h"
 
@@ -32,6 +33,7 @@
 #include <QDialog>
 #include <QScrollArea>
 #include <QDateTime>
+#include <QDir>
 #include <QUuid>
 #include <cmath>
 
@@ -123,6 +125,34 @@ PatrolPage::PatrolPage(PatrolClient *client, const QString &initialMapYaml,
 void PatrolPage::setResumePermission(std::function<bool(QString *)> permission) {
   resumePermission_ = std::move(permission);
   updateActionStates();
+}
+
+void PatrolPage::setReportProjectRoot(const QString &projectRoot) {
+  reportProjectRoot_ = projectRoot;
+}
+
+void PatrolPage::showSelectedReport() {
+  const int row = runsTable_->currentRow();
+  if (row < 0 || !runsTable_->item(row, 0)) {
+    setMessage(QStringLiteral("请先选择一条任务记录"), true);
+    return;
+  }
+  QString root = reportProjectRoot_;
+  if (root.isEmpty()) root = qEnvironmentVariable("ROBOT_PROJECT_ROOT");
+  if (root.isEmpty()) root = QDir(DESKTOP_UI_SOURCE_DIR).absoluteFilePath("..");
+  auto *dialog = new PatrolReportDialog(runsTable_->item(row, 0)->text(), root, this);
+  dialog->show();
+}
+
+void PatrolPage::previewSelectedInspection() {
+  const int row = inspectionResultsTable_->currentRow();
+  if (row < 0 || !inspectionResultsTable_->item(row, 3)) {
+    inspectionPhoto_->setPhoto({});
+    return;
+  }
+  const auto path = inspectionResultsTable_->item(row, 3)->data(Qt::UserRole).toString();
+  const auto caption = inspectionResultsTable_->item(row, 1)->text() + " · " + inspectionResultsTable_->item(row, 4)->text();
+  inspectionPhoto_->setPhoto(path, caption);
 }
 
 void PatrolPage::buildUi() {
@@ -548,6 +578,9 @@ void PatrolPage::buildUi() {
   auto *runsTop = new QHBoxLayout;
   runsTop->addWidget(patrolui::heading("最近任务记录", runsCard));
   runsTop->addStretch();
+  viewReportButton_ = pageButton("查看图文报告 / 导出", runsCard, "patrolViewReport");
+  viewReportButton_->setEnabled(false);
+  runsTop->addWidget(viewReportButton_);
   refreshRunsButton_ = pageButton("刷新记录", runsCard, "patrolRefreshRuns");
   runsTop->addWidget(refreshRunsButton_);
   auto *roadEvents = pageButton("查看道路事件", runsCard, "patrolRoadEvents");
@@ -559,7 +592,7 @@ void PatrolPage::buildUi() {
   runsTable_->setColumnWidth(0, 180);
   runsTable_->horizontalHeader()->setSectionResizeMode(6, QHeaderView::Stretch);
   runsLayout->addWidget(runsTable_, 1);
-  runsLayout->addWidget(patrolui::hint("选中任务后，可查看沿录制道路行驶、等待障碍、绕行及停止等事件。", runsCard));
+  runsLayout->addWidget(patrolui::hint("选中已结束任务，点击“查看图文报告 / 导出”可查看全部照片与视觉记录，并保存 PDF、HTML 或 JSON。", runsCard));
   auto *inspectionHeader = new QHBoxLayout;
   inspectionHeader->addWidget(patrolui::heading("巡检识别结果", runsCard));
   inspectionHeader->addStretch();
@@ -576,7 +609,13 @@ void PatrolPage::buildUi() {
   inspectionResultsTable_->setColumnWidth(1, 130);
   inspectionResultsTable_->setColumnWidth(3, 220);
   inspectionResultsTable_->setColumnWidth(4, 150);
-  runsLayout->addWidget(inspectionResultsTable_, 1);
+  auto *inspectionSplit = new QSplitter(Qt::Horizontal, runsCard);
+  inspectionPhoto_ = new InspectionPhotoView(inspectionSplit);
+  inspectionPhoto_->setObjectName("patrolInspectionPhotoPreview");
+  inspectionSplit->addWidget(inspectionResultsTable_);
+  inspectionSplit->addWidget(inspectionPhoto_);
+  inspectionSplit->setSizes({780, 320});
+  runsLayout->addWidget(inspectionSplit, 1);
   runsOuter->addWidget(runsCard);
   connect(roadEvents, &QPushButton::clicked, this, [this] {
     const int row = runsTable_->currentRow();
@@ -674,12 +713,14 @@ void PatrolPage::buildUi() {
   connect(refreshRunsButton_, &QPushButton::clicked, this, [this] {
     client_->refreshRuns(activeMapId_);
   });
+  connect(viewReportButton_, &QPushButton::clicked, this, &PatrolPage::showSelectedReport);
+  connect(inspectionResultsTable_, &QTableWidget::itemSelectionChanged, this, &PatrolPage::previewSelectedInspection);
   connect(inspectionResultsTable_, &QTableWidget::cellDoubleClicked, this,
           [this](int row, int) {
             if (!inspectionResultsTable_->item(row, 3)) return;
             const QString path = inspectionResultsTable_->item(row, 3)
                                      ->data(Qt::UserRole).toString();
-            if (!path.isEmpty()) setMessage(QStringLiteral("巡检图片：") + path, false);
+            if (!path.isEmpty()) InspectionPhotoView::showPhoto(path, "到点巡检照片", this);
           });
   connect(refreshInspectionResultsButton_, &QPushButton::clicked, this, [this] {
     const int row = runsTable_->currentRow();
@@ -691,6 +732,10 @@ void PatrolPage::buildUi() {
     const int row = runsTable_->currentRow();
     const QString runId = row >= 0 && runsTable_->item(row, 0)
                               ? runsTable_->item(row, 0)->text() : QString();
+    viewReportButton_->setEnabled(!runId.isEmpty());
+    inspectionResultsTable_->setRowCount(0);
+    updateEmptyTable(inspectionResultsTable_);
+    inspectionPhoto_->setPhoto({});
     client_->refreshInspectionResults(activeMapId_, runId, 200);
   });
   connect(routeNameEdit_, &QLineEdit::textChanged, this, [this] {
@@ -1014,6 +1059,10 @@ void PatrolPage::populateRoutes() {
 }
 
 void PatrolPage::populateRuns() {
+  const int selectedRow = runsTable_->currentRow();
+  const auto selectedId = selectedRow >= 0 && runsTable_->item(selectedRow, 0)
+      ? runsTable_->item(selectedRow, 0)->text() : QString();
+  const QSignalBlocker blocker(runsTable_);
   runsTable_->setRowCount(0);
   for (const auto &run : client_->runs()) {
     const int row = runsTable_->rowCount();
@@ -1027,12 +1076,26 @@ void PatrolPage::populateRuns() {
     runsTable_->setItem(row, 6, readOnlyItem(run.message));
   }
   updateEmptyTable(runsTable_);
+  for (int row = 0; row < runsTable_->rowCount(); ++row)
+    if (runsTable_->item(row, 0)->text() == selectedId) { runsTable_->selectRow(row); break; }
+  if (runsTable_->currentRow() < 0 && runsTable_->rowCount()) runsTable_->selectRow(0);
+  viewReportButton_->setEnabled(runsTable_->currentRow() >= 0);
+  inspectionResultsTable_->setRowCount(0);
+  updateEmptyTable(inspectionResultsTable_);
+  inspectionPhoto_->setPhoto({});
+  if (runsTable_->currentRow() >= 0)
+    client_->refreshInspectionResults(activeMapId_, runsTable_->item(runsTable_->currentRow(), 0)->text(), 200);
 }
 
 void PatrolPage::populateInspectionResults() {
   const int selectedRow = inspectionResultsTable_->currentRow();
+  const int runRow = runsTable_->currentRow();
+  const auto runId = runRow >= 0 && runsTable_->item(runRow, 0) ? runsTable_->item(runRow, 0)->text() : QString();
+  const QSignalBlocker blocker(inspectionResultsTable_);
   inspectionResultsTable_->setRowCount(0);
   for (const auto &item : client_->inspectionResults()) {
+    if (!activeMapId_.isEmpty() && item.mapId != activeMapId_) continue;
+    if (!runId.isEmpty() && item.runId != runId) continue;
     const int row = inspectionResultsTable_->rowCount();
     inspectionResultsTable_->insertRow(row);
     inspectionResultsTable_->setItem(row, 0, readOnlyItem(item.startedAtText));
@@ -1058,6 +1121,8 @@ void PatrolPage::populateInspectionResults() {
   updateEmptyTable(inspectionResultsTable_);
   if (selectedRow >= 0 && selectedRow < inspectionResultsTable_->rowCount())
     inspectionResultsTable_->selectRow(selectedRow);
+  else if (inspectionResultsTable_->rowCount()) inspectionResultsTable_->selectRow(0);
+  previewSelectedInspection();
 }
 
 void PatrolPage::loadRouteIntoEditor(const PatrolRouteInfo &route) {

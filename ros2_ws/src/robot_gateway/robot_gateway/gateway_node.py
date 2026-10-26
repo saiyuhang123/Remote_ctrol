@@ -47,6 +47,7 @@ from patrol_interfaces.msg import OperatorHeartbeat, PatrolStatus
 from patrol_interfaces.srv import ControlRun
 from .business import WebBusiness
 from .intercom import Intercom
+from .desktop_relay import DesktopRelay
 
 CONFIG_CANDIDATES = [
     Path(os.environ.get("ROBOT_PROJECT_ROOT", str(Path.home() / "Remote_ctrol")))
@@ -195,6 +196,15 @@ class GatewayNode(Node):
         self._ptz_jog_speed = 3
         self._ptz_jog_until = 0.0
         self._ptz_pending = False
+        self._ptz_pose_started = 0.0
+        self._ptz_pose_future = None
+        self._ptz_driver_status = {}
+        self._ptz_driver_time = 0.0
+        self._ptz_last_error = ''
+        self._ptz_generation = 0
+        self._ptz_motion_future = None
+        self._ptz_stop_future = None
+        self._ptz_requests = {}
         self._last_ptz_pose_poll = 0.0
         self._audio_status = {}
         self._audio_time = 0.0
@@ -222,6 +232,7 @@ class GatewayNode(Node):
         self._params_client = self.create_client(SetParameters, "/detector_node/set_parameters")
         self._ptz_control_client = self.create_client(ControlPTZ, "/hk_camera/control_ptz")
         self._ptz_pose_client = self.create_client(GetPTZPose, "/hk_camera/get_ptz_pose")
+        self._desktop = DesktopRelay(self)
 
         # Telemetry
         self.create_subscription(
@@ -249,6 +260,7 @@ class GatewayNode(Node):
             ("/gas_detector/status", self._on_gas_status),
             ("/gas_detector/data", self._on_gas_data),
             ("/ptz_patrol/status", self._on_ptz_patrol_status),
+            ("/ptz/state", self._on_ptz_driver_status),
             ("/audio/status", self._on_audio_status),
         ):
             self.create_subscription(String, topic, callback, 10)
@@ -376,6 +388,14 @@ class GatewayNode(Node):
     def _on_ptz_patrol_status(self, message):
         self._status_callback("_ptz_patrol_status", "_ptz_patrol_time", message)
 
+    def _on_ptz_driver_status(self, message):
+        self._status_callback("_ptz_driver_status", "_ptz_driver_time", message)
+
+    def _ptz_driver_fresh(self):
+        with self._data_lock:
+            return bool(self._ptz_driver_time and time.monotonic()-self._ptz_driver_time <= 5
+                        and self._ptz_driver_status.get('connected'))
+
     @staticmethod
     def _path_points(path: NavPath | None, frame: str | None):
         if path is None or path.header.frame_id != frame:
@@ -453,6 +473,7 @@ class GatewayNode(Node):
     def _on_estop(self, message: Bool):
         pressed = bool(message.data)
         with self._lock:
+            previous = self._estopped
             self._estopped = pressed
             self._estop_time = time.monotonic()
             if pressed:
@@ -461,7 +482,10 @@ class GatewayNode(Node):
         if pressed:
             with self._control_lock:
                 owned = bool(self._owner_session)
-            if owned:
+            # Device-only ownership may be acquired while a stop is already
+            # latched. Repeated True feedback must not revoke that idle lease.
+            if owned and (previous is False or self._cmd_pub is not None
+                          or self._task_snapshot()['running']):
                 self._schedule_release("急停已触发", cancel_task=True)
 
     def _task_snapshot(self):
@@ -558,6 +582,7 @@ class GatewayNode(Node):
             "audio": self._audio_snapshot(),
             "battery": self._battery_snapshot(),
             "capture": {**self._capture_status, 'available': bool(self._capture_status.get('ready')) and time.monotonic()-self._capture_time<=3},
+            "desktop": self._desktop.snapshot(),
             "patrol": patrol,
             "nav": {
                 "statuses": nav_statuses,
@@ -593,6 +618,9 @@ class GatewayNode(Node):
                 "pose_age": round(ptz_pose_age, 2) if ptz_pose_age is not None else None,
                 "jog": ptz_jog,
                 "service_ready": bool(_safe_ready(self._ptz_control_client)),
+                "driver": dict(self._ptz_driver_status),
+                "driver_ready": self._ptz_driver_fresh(),
+                "last_error": self._ptz_last_error,
                 "manual_locked": self._ptz_blocked(),
             },
         }, ensure_ascii=False)
@@ -681,9 +709,10 @@ class GatewayNode(Node):
 
     def _claim_control(self, websocket):
         now = time.monotonic()
-        estop_ok, estop_code, estop_message = self._estop_check()
-        if not estop_ok:
-            return None, estop_code, estop_message
+        if self._desktop.unlock_pending:
+            return None, 'BUSY', '正在等待本地解除急停，请稍后取得控制权'
+        # Ownership also permits stationary camera/vision work. Every motion
+        # command retains its own fresh estop check below.
         if self._local_task_active():
             return None, "LOCAL_TASK_ACTIVE", "本地已有路线任务在运行"
         with self._control_lock:
@@ -702,7 +731,6 @@ class GatewayNode(Node):
             self._control_mode = "manual"
             self._release_scheduled = False
             self._task_final = {}
-        self._ensure_cmd_pub()
         self.get_logger().info("web control claimed")
         self._broadcast_control_state()
         return token, "", "网页已取得控制权"
@@ -1419,21 +1447,91 @@ class GatewayNode(Node):
         with self._data_lock:
             status = dict(self._ptz_patrol_status)
             inspection = self._patrol_status.get('active') and self._patrol_status.get('state') == 14
-        return bool(status.get("active") or status.get("enabled") or inspection)
+        return bool(status.get("active") or status.get("enabled") or status.get('inspection_held')
+                    or self._ptz_driver_status.get('patrol') or inspection)
 
     def _call_ptz(self, command: int = 0, stop: bool = False,
-                  speed: int = 3):
+                  speed: int = 3, completed=None):
         try:
             if not self._ptz_control_client.service_is_ready():
                 return False, "云台控制服务未就绪"
-            request = ControlPTZ.Request()
-            request.command = int(command)
-            request.speed = max(1, min(7, int(speed)))
-            request.stop = bool(stop)
-            self._ptz_control_client.call_async(request)
+            with self._data_lock:
+                pending = self._ptz_stop_future if stop else self._ptz_motion_future
+                if pending is not None:
+                    return True, '正在等待本地云台回执'
+                if not stop and len(self._ptz_requests) >= 20:
+                    return False, '本地云台请求持续无响应，请检查设备服务'
+                request = ControlPTZ.Request()
+                request.command = int(command)
+                request.speed = max(1, min(7, int(speed)))
+                request.stop = bool(stop)
+                future = self._ptz_control_client.call_async(request)
+                self._ptz_requests[future] = dict(stop=stop, generation=self._ptz_generation,
+                    deadline=time.monotonic()+2, expired=False, completed=completed)
+                if stop:
+                    self._ptz_stop_future = future
+                else:
+                    self._ptz_motion_future = future
+            future.add_done_callback(self._on_ptz_command_done)
             return True, ""
         except Exception as error:  # noqa: BLE001 - shutdown/teardown race
             return False, str(error)
+
+    def _on_ptz_command_done(self, future):
+        with self._data_lock:
+            pending = self._ptz_requests.pop(future, None)
+            if self._ptz_motion_future is future: self._ptz_motion_future = None
+            if self._ptz_stop_future is future: self._ptz_stop_future = None
+            generation = self._ptz_generation
+        if pending is None:
+            return
+        try:
+            result = future.result()
+            ok, message = bool(result and result.success), result.message if result else '本地云台请求已取消'
+        except Exception as error:
+            ok, message = False, str(error)
+        if not pending['stop'] and pending['generation'] != generation:
+            # A released button or expired browser lease may precede a late
+            # device reply. Stop again rather than reviving that old motion.
+            self._call_ptz(stop=True)
+            return
+        if not ok:
+            with self._data_lock:
+                self._ptz_last_error = message or '本地云台拒绝命令'
+                if not pending['stop']:
+                    self._ptz_generation += 1
+                    self._ptz_jog_active = False
+                    self._ptz_jog_until = 0.
+            if not pending['stop']: self._call_ptz(stop=True)
+        elif not pending['expired']:
+            with self._data_lock: self._ptz_last_error = ''
+        if pending['completed'] and not pending['expired']:
+            pending['completed'](ok, message)
+
+    def _expire_ptz_requests(self, now):
+        stop_again, callbacks, retire = False, [], []
+        with self._data_lock:
+            for future, pending in list(self._ptz_requests.items()):
+                if now > pending['deadline'] and not pending['expired']:
+                    pending['expired'] = True
+                    self._ptz_last_error = '本地云台回执超时，已停止续租并请求停止'
+                    if self._ptz_motion_future is future: self._ptz_motion_future = None
+                    if self._ptz_stop_future is future: self._ptz_stop_future = None
+                    if not pending['stop']:
+                        self._ptz_generation += 1
+                        self._ptz_jog_active = False
+                        self._ptz_jog_until = 0.
+                        stop_again = True
+                    if pending['completed']: callbacks.append(pending['completed'])
+                if now > pending['deadline']+30:
+                    self._ptz_requests.pop(future, None)
+                    retire.append(future)
+                    stop_again |= not pending['stop']
+        for callback in callbacks: callback(False, '本地云台回执超时，请检查串口与相机服务')
+        for future in retire:
+            self._ptz_control_client.remove_pending_request(future)
+            future.cancel()
+        if stop_again: self._call_ptz(stop=True)
 
     def _ptz_jog(self, websocket, data: dict):
         action = str(data.get("action", ""))
@@ -1448,44 +1546,59 @@ class GatewayNode(Node):
                                  "PTZ_AUTO_ACTIVE", "云台自动巡航运行中，禁止手动控制",
                                  data.get("request_id", ""))
             return
-        speed = int(data.get("speed", 3) or 3)
-        ok, message = self._call_ptz(command, False, speed)
+        speed = data.get('speed', 3)
+        if type(speed) is not int or not 1 <= speed <= 7:
+            self._command_result(websocket, 'ptz_jog', False, 'INVALID_DATA', '云台速度应为 1～7 的整数', data.get('request_id', ''))
+            return
+        with self._data_lock:
+            if not self._ptz_jog_active or command != self._ptz_jog_command:
+                self._ptz_generation += 1
+            self._ptz_jog_active = True
+            self._ptz_jog_command = command
+            self._ptz_jog_speed = speed
+            self._ptz_jog_until = time.monotonic() + .75
+        def completed(ok, message):
+            self._command_result(websocket, 'ptz_jog', ok, 'READY' if ok else 'PTZ_REJECTED',
+                                 message or ('本地云台已执行' if ok else '本地云台执行失败'), data.get('request_id', ''))
+        ok, message = self._call_ptz(command, False, speed, completed=completed)
         if not ok:
+            with self._data_lock:
+                self._ptz_jog_active = False
+                self._ptz_jog_until = 0.
+                self._ptz_last_error = message
             self._command_result(websocket, "ptz_jog", False,
                                  "PTZ_UNAVAILABLE", message,
                                  data.get("request_id", ""))
             return
-        with self._data_lock:
-            self._ptz_jog_active = True
-            self._ptz_jog_command = command
-            self._ptz_jog_speed = max(1, min(7, speed))
-            # Browser hold commands renew this lease every 200ms. A lost release
-            # or stuck view cannot make the gateway renew the camera forever.
-            self._ptz_jog_until = time.monotonic() + 0.75
-        self._command_result(websocket, "ptz_jog", True, "", "云台持续运动",
-                             data.get("request_id", ""))
-        self._poll_ptz_pose(force=True)
 
     def _ptz_stop(self, websocket=None, request_id: str = ""):
         with self._data_lock:
             was_active = self._ptz_jog_active
+            self._ptz_generation += 1
             self._ptz_jog_active = False
             self._ptz_jog_command = 0
             self._ptz_jog_until = 0.0
-        ok, message = self._call_ptz(stop=True)
-        if websocket is not None:
-            self._command_result(websocket, "ptz_stop", ok,
-                                 "" if ok else "PTZ_UNAVAILABLE",
-                                 message or "云台已停止", request_id)
+        def completed(ok, message):
+            if websocket is not None:
+                self._command_result(websocket, 'ptz_stop', ok, 'READY' if ok else 'PTZ_REJECTED',
+                                     message or ('本地云台已确认停止' if ok else '停止失败'), request_id)
+        ok, message = self._call_ptz(stop=True, completed=completed)
+        if websocket is not None and not ok:
+            self._command_result(websocket, 'ptz_stop', False, 'PTZ_UNAVAILABLE', message, request_id)
         return was_active
 
     def _ptz_read(self, websocket, data: dict):
+        if not self._ptz_pose_client.service_is_ready():
+            self._command_result(websocket, 'ptz_read', False, 'PTZ_UNAVAILABLE', '请先启动/连接本地云台服务', data.get('request_id', ''))
+            return
         self._poll_ptz_pose(force=True)
         self._command_result(websocket, "ptz_read", True, "", "云台状态读取请求已发送",
                              data.get("request_id", ""),
                              ptz=self._ptz_snapshot())
 
     def _poll_ptz_pose(self, force: bool = False):
+        now = time.monotonic()
+        self._expire_ptz_requests(now)
         with self._data_lock:
             jog = self._ptz_jog_active
             command = self._ptz_jog_command
@@ -1493,26 +1606,48 @@ class GatewayNode(Node):
             deadline = self._ptz_jog_until
             pending = self._ptz_pending
             last_poll = self._last_ptz_pose_poll
-        now = time.monotonic()
+            pose_started = self._ptz_pose_started
+            pose_future = self._ptz_pose_future
+        if jog and self._ptz_blocked():
+            self._ptz_stop()
+            return
         if jog and now >= deadline:
             self._ptz_stop()
         elif jog and self._ptz_control_client.service_is_ready():
             # Camera PTZ commands are a 500 ms lease. Renew faster than the
             # lease while the browser keeps the button held.
             self._call_ptz(command, False, speed)
+        if pending and now-pose_started > 3:
+            with self._data_lock:
+                self._ptz_pending = False
+                self._ptz_pose_future = None
+                self._ptz_last_error = '读取云台位置超时，请检查本地服务'
+            if pose_future is not None:
+                self._ptz_pose_client.remove_pending_request(pose_future)
+                pose_future.cancel()
+            pending = False
+        # Match the local panel: read positions after releasing the button.
+        # SDK/serial queries during a hold can starve the 500 ms motion lease.
+        if jog:
+            return
         if pending or not self._ptz_pose_client.service_is_ready():
             return
         if not force and now - last_poll < 1.0:
             return
         with self._data_lock:
             self._ptz_pending = True
+            self._ptz_pose_started = now
             self._last_ptz_pose_poll = now
         future = self._ptz_pose_client.call_async(GetPTZPose.Request())
+        with self._data_lock: self._ptz_pose_future = future
         future.add_done_callback(self._on_ptz_pose_done)
 
     def _on_ptz_pose_done(self, future):
         with self._data_lock:
+            if self._ptz_pose_future is not future:
+                return
             self._ptz_pending = False
+            self._ptz_pose_future = None
         try:
             result = future.result()
             if result.success:
@@ -1525,6 +1660,8 @@ class GatewayNode(Node):
                         "zoom_min": result.zoom_min, "zoom_max": result.zoom_max,
                     }
                     self._ptz_pose_time = time.monotonic()
+            else:
+                with self._data_lock: self._ptz_last_error = result.message or '本地云台位置不可用'
         except Exception:  # noqa: BLE001 - telemetry is best effort
             pass
 
@@ -1582,6 +1719,9 @@ class GatewayNode(Node):
             self._perform_release("网页主动释放控制权", cancel_task=True,
                                   notify_websocket=websocket)
             return
+        if msg_type == 'estop_release':
+            await self._desktop.handle(websocket, data)
+            return
         # Every remaining command requires the current owner token.
         if not self._owner_valid(token):
             self._command_result(websocket, msg_type, False, "NOT_OWNER",
@@ -1595,6 +1735,13 @@ class GatewayNode(Node):
             self._command_result(websocket, msg_type, False, "CONTROL_REVOKED",
                                  "网页控制权正在释放", request_id)
             return
+        if self._desktop.unlock_pending and msg_type in ('cmd_vel', 'route_start', 'point_start', 'return_home', 'route_resume'):
+            self._command_result(websocket, msg_type, False, 'BUSY', '正在解除急停，请等待本地状态确认', request_id)
+            return
+
+        if msg_type in DesktopRelay.commands:
+            await self._desktop.handle(websocket, data)
+            return
 
         if msg_type in WebBusiness.commands:
             await self._business.handle(websocket, data)
@@ -1604,6 +1751,9 @@ class GatewayNode(Node):
             return
 
         if msg_type == "cmd_vel":
+            if self._desktop.unlock_pending:
+                self._command_result(websocket, msg_type, False, 'BUSY', '解除急停处理中，车辆保持静止', request_id)
+                return
             with self._control_lock:
                 mode = self._control_mode
             if mode != "manual":
@@ -1633,6 +1783,11 @@ class GatewayNode(Node):
             self._audio_command(websocket, data)
             return
         if msg_type in ("route_pause", "route_resume", "route_cancel"):
+            if msg_type == 'route_resume':
+                ok, code, message = self._estop_check()
+                if not ok:
+                    self._command_result(websocket, msg_type, False, code, message, request_id)
+                    return
             self._route_control(websocket, data, msg_type)
             return
         if msg_type == "return_home":
@@ -1729,7 +1884,7 @@ async def _handle_client(node: GatewayNode, websocket):
             if not isinstance(data, dict):
                 continue
             try:
-                if data.get('type') in WebBusiness.commands:
+                if data.get('type') in WebBusiness.commands or data.get('type') in DesktopRelay.commands:
                     # PLAN may take seconds. Keep reading control heartbeats,
                     # cancel and e-stop messages while ROS serves the request.
                     if len(jobs) >= 4:

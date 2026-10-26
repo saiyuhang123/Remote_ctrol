@@ -90,6 +90,21 @@ bool LocalController::releaseStop() {
   }
   return ros_->setEmergencyStop(false);
 }
+bool LocalController::releaseStopRemotely(qint64 issuedNs, QString *detail) {
+  auto reject = [detail](const QString &reason) { *detail = reason; return false; };
+  if (enabled_ || manualMoving_ || preparation_.isActive())
+    return reject("本地操作仍启用或正在接管，请先在 Qt 关闭“启用操作”并停稳");
+  if (navActive_ || patrolActive_)
+    return reject("导航或巡检任务尚未结束，请先取消并等待停车");
+  if (!navKnown_)
+    return reject("尚未确认 Nav2 无活动目标，无法解除急停");
+  if (!stationaryFreshFor(500))
+    return reject("需要新鲜里程计连续 500 ms 确认车辆静止，请检查底盘与里程计");
+  if (!ros_->setEmergencyStop(false, issuedNs))
+    return reject("解除急停未执行：请求已过期、收到新急停、存在活动目标或其他速度发布者，请查看 Qt 日志");
+  *detail = "本地已执行解除急停，等待状态反馈；旧任务不会自动恢复";
+  return true;
+}
 bool LocalController::move(double linear, double angular) {
   if (!enabled_ || !manualReady_ || !feedbackFresh() || estopped_ || navActive_ ||
       patrolActive_ || !navKnown_ || !std::isfinite(linear) || !std::isfinite(angular) ||

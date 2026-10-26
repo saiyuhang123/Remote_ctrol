@@ -14,7 +14,7 @@
     socket.send(JSON.stringify(data)); return true;
   }
   function command(data) {
-    if (data.type !== 'control_claim' && data.type !== 'estop') {
+    if (!['control_claim','estop','estop_release'].includes(data.type)) {
       if (!session) {
         post('data', {type:'command_result',command:data.type,request_id:data.request_id,
           ok:false,code:'NOT_OWNER',message:'控制权已释放，请重新取得'});

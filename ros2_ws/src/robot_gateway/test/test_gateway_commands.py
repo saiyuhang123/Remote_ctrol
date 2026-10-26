@@ -226,7 +226,12 @@ def test_ptz_requires_hold_renewal_and_pressed_estop_is_known(gateway, monkeypat
     now = [time.monotonic()]
     monkeypatch.setattr('robot_gateway.gateway_node.time.monotonic', lambda: now[0])
     calls = []
-    node._call_ptz = lambda command=0, stop=False, speed=3: (calls.append(stop) or True, '')
+    def call_ptz(command=0, stop=False, speed=3, completed=None):
+        calls.append(stop)
+        if completed:
+            completed(True, 'isolated PTZ acknowledgement')
+        return True, ''
+    node._call_ptz = call_ptz
     class OfflinePose:
         def service_is_ready(self): return False
     node._ptz_pose_client = OfflinePose()
@@ -253,6 +258,8 @@ def test_face_command_changes_host_parameter_without_sdk_service(gateway, enable
         def service_is_ready(self): return True
         def call_async(self, request):
             self.requests.append(request)
+            node._detector_status = {'face_requested': enabled, 'face': enabled, 'input_ready': True}
+            node._detector_time = time.monotonic()
             future = Future()
             future.set_result(SetParameters.Response(results=[SetParametersResult(successful=True)]))
             return future

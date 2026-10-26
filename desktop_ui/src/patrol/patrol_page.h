@@ -20,6 +20,7 @@ class QGraphicsScene;
 class QGraphicsView;
 class QCloseEvent;
 class RosAdapter;
+class InspectionPhotoView;
 
 class PatrolPage : public QWidget {
   Q_OBJECT
@@ -33,6 +34,7 @@ public:
   PatrolClient *client() const { return client_; }
   QString activeMapId() const { return activeMapId_; }
   void setResumePermission(std::function<bool(QString *)> permission);
+  void setReportProjectRoot(const QString &projectRoot);
 protected:
   void closeEvent(QCloseEvent *event) override;
 
@@ -76,6 +78,8 @@ private:
   void populateRoutes();
   void populateRuns();
   void populateInspectionResults();
+  void showSelectedReport();
+  void previewSelectedInspection();
   void populateAvailablePoints();
   void loadRouteIntoEditor(const PatrolRouteInfo &route);
   void clearRouteEditor();
@@ -191,6 +195,9 @@ private:
 
   QTableWidget *runsTable_ = nullptr;
   QTableWidget *inspectionResultsTable_ = nullptr;
+  InspectionPhotoView *inspectionPhoto_ = nullptr;
+  QPushButton *viewReportButton_ = nullptr;
+  QString reportProjectRoot_;
   QPushButton *refreshRunsButton_ = nullptr;
   QPushButton *refreshInspectionResultsButton_ = nullptr;
 };

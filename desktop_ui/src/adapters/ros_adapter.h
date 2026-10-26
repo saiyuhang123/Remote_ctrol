@@ -35,7 +35,7 @@ public:
   bool navigate(double x, double y, double yaw);
   bool cancelNavigation();
   bool publishVelocity(double linear, double angular);
-  bool setEmergencyStop(bool stopped);
+  bool setEmergencyStop(bool stopped, qint64 remoteIssuedNs = 0);
   void captureBusiness();
   void speak(const QString &text);
   void captureCamera();

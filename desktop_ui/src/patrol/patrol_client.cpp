@@ -212,6 +212,7 @@ struct PatrolClient::Impl {
   QVector<PatrolRouteInfo> routesData;
   QVector<PatrolRunInfo> runsData;
   QVector<PatrolInspectionResultInfo> inspectionResultsData;
+  std::atomic<quint64> inspectionQueryGeneration{0};
   PatrolHomeInfo homeData;
   PatrolStatusInfo statusData;
 
@@ -823,12 +824,14 @@ void PatrolClient::refreshRuns(const QString &mapId, const QString &routeId) {
 void PatrolClient::refreshInspectionResults(const QString &mapId, const QString &runId,
                                             quint32 limit) {
 #ifdef DESKTOP_HAS_PATROL_INTERFACES
+  const auto generation = ++impl_->inspectionQueryGeneration;
   auto request = std::make_shared<patrol_interfaces::srv::GetInspectionResults::Request>();
   request->map_id = mapId.toStdString(); request->run_id = runId.toStdString();
   request->limit = limit;
   impl_->call<patrol_interfaces::srv::GetInspectionResults>(
       "/patrol/get_inspection_results", QStringLiteral("刷新巡检识别结果"), request,
-      [this](const patrol_interfaces::srv::GetInspectionResults::Response &response) {
+      [this, generation](const patrol_interfaces::srv::GetInspectionResults::Response &response) {
+        if (generation != impl_->inspectionQueryGeneration.load()) return;
         if (!response.success) {
           emit errorOccurred(QString::fromStdString(response.message)); return;
         }

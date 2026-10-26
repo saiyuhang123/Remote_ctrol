@@ -127,3 +127,6 @@ VisionPanel::VisionPanel(const DesktopConfig &config, bool offline, QWidget *par
   });
 }
 VisionPanel::~VisionPanel() { delete client_; }
+bool VisionPanel::setRemoteFeature(const QString &parameter, bool enabled, QString *detail) {
+  return client_->setFeature(parameter, enabled, detail);
+}

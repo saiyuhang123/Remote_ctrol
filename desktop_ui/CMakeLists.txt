@@ -6,7 +6,7 @@ set(CMAKE_AUTOMOC ON)
 set(CMAKE_AUTOUIC ON)
 set(CMAKE_AUTORCC ON)
 set(CMAKE_INCLUDE_CURRENT_DIR ON)
-find_package(Qt5 5.15 REQUIRED COMPONENTS Widgets Network Svg Test)
+find_package(Qt5 5.15 REQUIRED COMPONENTS Widgets Network Svg Test Concurrent)
 find_package(yaml-cpp REQUIRED)
 find_package(nav2_map_server REQUIRED)
 find_package(ament_cmake REQUIRED)
@@ -36,11 +36,17 @@ add_library(desktop_map_editor STATIC
 target_include_directories(desktop_map_editor PUBLIC src)
 target_link_libraries(desktop_map_editor PUBLIC Qt5::Widgets ${YAML_CPP_LIBRARIES})
 
+# Native report/photo views use local read-only snapshots and Qt only.
+add_library(desktop_reports STATIC src/patrol/report_viewer.cpp)
+target_include_directories(desktop_reports PUBLIC src)
+target_link_libraries(desktop_reports PUBLIC Qt5::Widgets PRIVATE Qt5::Concurrent)
+
 add_library(desktop_app STATIC
   src/ui/mainwindow.cpp src/ui/mainwindow_layout.cpp src/ui/console_theme.cpp
   src/ui/mainwindow.ui src/ui/camera_panel.cpp
   src/ui/widgets/dashboard.cpp src/rviz/rviz_host.cpp
   src/adapters/ros_adapter.cpp src/adapters/local_controller.cpp
+  src/adapters/desktop_remote_bridge.cpp
   src/runtime/process_manager.cpp src/runtime/map_saver.cpp
   src/patrol/patrol_client.cpp src/patrol/patrol_page.cpp
   src/patrol/recorded_road_page.cpp
@@ -49,7 +55,7 @@ add_library(desktop_app STATIC
   src/devices/gas_readout.cpp
   resources/images.qrc resources/media.qrc resources/console_icons.qrc)
 target_include_directories(desktop_app PUBLIC src src/ui)
-target_link_libraries(desktop_app PUBLIC desktop_protocol desktop_map_editor qt5advanceddocking Qt5::Svg)
+target_link_libraries(desktop_app PUBLIC desktop_protocol desktop_map_editor desktop_reports qt5advanceddocking Qt5::Svg)
 target_compile_definitions(desktop_app PUBLIC DESKTOP_UI_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
 ament_target_dependencies(desktop_app PUBLIC rclcpp rclcpp_action rcl_interfaces nav2_msgs rviz_common rviz_rendering pluginlib nav_msgs geometry_msgs sensor_msgs std_msgs std_srvs action_msgs tf2_ros)
 foreach(dep yunle_msgs hk_camera ocr_interfaces slam_toolbox cartographer_ros_msgs patrol_interfaces vision_interfaces)

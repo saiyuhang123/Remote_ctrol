@@ -6,6 +6,7 @@
 #include <QVector>
 class CameraPanel; class LocalController; class ProcessManager; class MapSaver; class RvizHost; class MapEditorDialog; class PatrolClient; class PatrolPage;
 class VisionPanel;
+class DesktopRemoteBridge;
 class DeviceClient; class DevicePanel;
 class QAction; class QCheckBox; class QComboBox; class QDoubleSpinBox; class QLabel; class QLineEdit; class QTimer;
 class QPlainTextEdit; class QProgressBar; class QPushButton; class QTabWidget; class QToolButton;
@@ -74,6 +75,7 @@ private:
   QDoubleSpinBox *goalX_ = nullptr, *goalY_ = nullptr, *goalYaw_ = nullptr, *speed_ = nullptr, *turn_ = nullptr;
   CameraPanel *cameraPanel_ = nullptr;
   VisionPanel *visionPanel_ = nullptr;
+  DesktopRemoteBridge *remoteBridge_ = nullptr;
   DeviceClient *deviceClient_ = nullptr;
   DevicePanel *devicePanel_ = nullptr;
   QWidget *deviceWindow_ = nullptr;

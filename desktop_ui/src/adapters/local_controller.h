@@ -22,6 +22,7 @@ public:
   void stopManual();
   bool emergencyStop();
   bool releaseStop();
+  bool releaseStopRemotely(qint64 issuedNs, QString *detail);
   bool navigate(double x, double y, double yaw);
   bool cancelNavigation();
 signals:

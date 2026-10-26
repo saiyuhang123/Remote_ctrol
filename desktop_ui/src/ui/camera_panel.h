@@ -20,6 +20,7 @@ public:
   void setControlEnabled(bool enabled);
   void stopInteraction();
   void ensureCamera();
+  bool prepareRemote(QString *detail);
   void setPatrolBlocked(bool blocked);
 signals:
   void message(const QString &text);

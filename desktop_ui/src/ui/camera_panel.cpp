@@ -245,6 +245,18 @@ void CameraPanel::ensureCamera() {
   }
 }
 void CameraPanel::stopInteraction() { stopJog(); }
+bool CameraPanel::prepareRemote(QString *detail) {
+  if (offline_) { *detail = "离线模式不能启动相机或云台"; return false; }
+  if (!ros_->cameraNodePresent() && !QFileInfo::exists(config_.cameraParamsFile)) {
+    *detail = "本地相机参数文件不存在，请在 Qt 核对连接参数"; return false;
+  }
+  if (!ros_->ptzNodePresent() && !QFileInfo::exists(config_.ptzParamsFile)) {
+    *detail = "本地 RS485 云台参数文件不存在，请在 Qt 核对连接参数"; return false;
+  }
+  ensureCamera();
+  *detail = "本地已受理相机与云台启动请求，复用已有节点；等待 RS485 云台和网口镜头服务就绪";
+  return true;
+}
 void CameraPanel::hideEvent(QHideEvent *event) { stopJog(); QWidget::hideEvent(event); }
 bool CameraPanel::eventFilter(QObject *object, QEvent *event) {
   if (event->type() == QEvent::WindowDeactivate || event->type() == QEvent::ApplicationDeactivate) stopJog();

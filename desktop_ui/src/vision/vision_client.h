@@ -11,6 +11,7 @@ public:
   VisionClient(const DesktopConfig &config, bool offline, QObject *parent = nullptr);
   ~VisionClient() override;
   bool supported() const;
+  bool setFeature(const QString &parameter, bool enabled, QString *detail);
   void startFace();
   void stopFace();
   void startDetector(bool person, bool plate);

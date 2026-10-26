@@ -92,6 +92,8 @@ struct RosAdapter::Impl {
   std::atomic_bool navPending{false}, ownedGoalActive{false}, observedNavActive{false}, cancellationKnown{false};
   std::atomic_uint64_t cancelEpoch{0};
   std::atomic_int estopCommand{-1};  // No startup writes; explicit stop/unlock starts feedback.
+  std::mutex emergencyMutex;
+  qint64 lastStopRequestedNs = 0;
   std::map<std::string, rclcpp::ClientBase::SharedPtr> clients;
   rclcpp::TimerBase::SharedPtr timer;
   std::mutex frameMutex;
@@ -151,9 +153,20 @@ struct RosAdapter::Impl {
         state.speed = m->twist.twist.linear.x; state.yawRate = m->twist.twist.angular.z; odomTime = nowMs();
       }));
     subscriptions.push_back(node->create_subscription<std_msgs::msg::Bool>(
-      "/emergency_stop", rclcpp::QoS(10), [this](std_msgs::msg::Bool::ConstSharedPtr m) {
+      "/emergency_stop", rclcpp::QoS(10), [this](std_msgs::msg::Bool::ConstSharedPtr m, const rclcpp::MessageInfo &info) {
         state.estopped = m->data; stopTime = nowMs();
-        if (m->data && estopCommand.load() == 0) estopCommand.store(1);
+        if (m->data) {
+          std::lock_guard<std::mutex> lock(emergencyMutex);
+          const auto own = emergency->get_gid();
+          const auto &sender = info.get_rmw_message_info().publisher_gid;
+          const bool external = !std::equal(sender.data, sender.data + sizeof(sender.data), own.data);
+          if (external)
+            lastStopRequestedNs = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                std::chrono::system_clock::now().time_since_epoch()).count();
+          // Our queued True heartbeat can predate an explicit unlock. Only
+          // another publisher can introduce a new stop through this callback.
+          if (external && estopCommand.load() == 0) estopCommand.store(1);
+        }
       }));
     subscriptions.push_back(node->create_subscription<std_msgs::msg::Bool>(
       "/patrol/guard_ready", rclcpp::QoS(10), [this](std_msgs::msg::Bool::ConstSharedPtr m) {
@@ -306,9 +319,17 @@ bool RosAdapter::publishVelocity(double linear, double angular) {
   msg.angular.z = std::clamp(angular, -impl_->config.maxAngular, impl_->config.maxAngular);
   impl_->velocity->publish(msg); return true;
 }
-bool RosAdapter::setEmergencyStop(bool stopped) {
+bool RosAdapter::setEmergencyStop(bool stopped, qint64 remoteIssuedNs) {
   if (!stopped && (impl_->navPending.load() || impl_->ownedGoalActive.load() ||
                   impl_->observedNavActive.load() || impl_->motionConflict())) return false;
+  std::lock_guard<std::mutex> lock(impl_->emergencyMutex);
+  const auto now = std::chrono::duration_cast<std::chrono::nanoseconds>(
+      std::chrono::system_clock::now().time_since_epoch()).count();
+  if (!stopped && remoteIssuedNs && (impl_->lastStopRequestedNs > remoteIssuedNs ||
+                                     now - remoteIssuedNs > 1000000000LL)) {
+    emit message("远程解除急停已过期或其后收到新的急停，保持当前状态"); return false;
+  }
+  if (stopped) impl_->lastStopRequestedNs = now;
   publishVelocity(0., 0.);
   impl_->estopCommand.store(stopped ? 1 : 0);
   std_msgs::msg::Bool msg; msg.data = stopped; impl_->emergency->publish(msg);

@@ -9,6 +9,7 @@ class VisionPanel : public QWidget {
 public:
   VisionPanel(const DesktopConfig &config, bool offline, QWidget *parent = nullptr);
   ~VisionPanel() override;
+  bool setRemoteFeature(const QString &parameter, bool enabled, QString *detail);
 signals:
   void cameraRequested();
   void message(const QString &text);
