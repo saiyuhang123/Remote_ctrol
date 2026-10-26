@@ -6,8 +6,8 @@ import numpy as np
 from scipy.spatial.transform import Rotation
 import pytest
 
-from fastlio_loop_closure.geometry import (inverse, level_rotation, overlap_is_usable,
-                                         refine, write_pcd)
+from fastlio_loop_closure.geometry import (Keyframe, inverse, level_rotation, overlap_is_usable,
+                                         refine, register_overlap, write_pcd)
 
 
 def graph_fixture():
@@ -86,3 +86,55 @@ def test_failed_pcd_commit_retains_previous_map_and_intensity(tmp_path):
             write_pcd(filename, points+1.)
     assert filename.read_bytes() == original
     assert not filename.with_name('map.pcd.tmp').exists()
+
+
+def verified_match():
+    return {'position_correction_m': [.1, -2.4, 1.5],
+            'rotation_correction_deg': [0., 0., -.7],
+            'measurement_target_from_source': np.eye(4).tolist(),
+            'fitness': .72, 'rmse_m': .19, 'inlier_count': 800,
+            'ground_residual_m': .03, 'reciprocal_translation_m': .08,
+            'reciprocal_rotation_deg': .2, 'initialization_agreements': 3}
+
+
+def test_partial_overlap_with_height_drift_requires_all_verification():
+    match = verified_match()
+    assert overlap_is_usable(match)
+    for key, value in [('ground_residual_m', .3), ('reciprocal_translation_m', .4),
+                       ('reciprocal_rotation_deg', 2.), ('initialization_agreements', 1),
+                       ('inlier_count', 100), ('ground_residual_m', None)]:
+        assert not overlap_is_usable(dict(match, **{key: value})), key
+    assert not overlap_is_usable(dict(match, fitness=.4))
+    assert not overlap_is_usable(dict(match, position_correction_m=[0., 0., 10.]))
+
+
+def test_many_correlated_partial_matches_at_one_position_are_insufficient():
+    raw, _, matches = graph_fixture()
+    for m in matches:
+        m['fitness'] = .72
+        raw[m['source'], :3, 3] = [0., 0., 0.]
+    with pytest.raises(ValueError, match='至少需要 6 米'):
+        refine(raw, matches)
+
+
+def test_ground_initialization_recovers_vertical_and_horizontal_drift():
+    rng = np.random.default_rng(1729)
+    x, y = np.meshgrid(np.linspace(-11, 11, 65), np.linspace(-11, 11, 65))
+    parts = [np.column_stack((x.ravel(), y.ravel(), np.full(x.size, -.4)))]
+    for cx, cy, width, height in [(4., 5., 2.2, 2.3), (-5., -4., 3.4, 3.1), (-6., 5., 2.8, 1.7)]:
+        a, b = np.meshgrid(np.linspace(-width/2, width/2, 30), np.linspace(.15, height, 30))
+        parts.append(np.column_stack((a.ravel()+cx, np.full(a.size, cy), b.ravel())))
+        parts.append(np.column_stack((np.full(a.size, cx-width/2), a.ravel()+cy, b.ravel())))
+        a, b = np.meshgrid(np.linspace(-width/2, width/2, 25), np.linspace(-width/2, width/2, 25))
+        parts.append(np.column_stack((a.ravel()+cx, b.ravel()+cy, np.full(a.size, height))))
+    xyz = np.concatenate(parts).astype(np.float32)
+    intensity = np.ones(len(xyz), dtype=np.float32)
+    kfs = [Keyframe(i, i*1_000_000_000, np.eye(4), xyz, intensity) for i in range(7)]
+    drifted = np.eye(4)
+    drifted[:3, 3] = [0., 2.4, -1.5]
+    kfs[-1] = Keyframe(6, 600_000_000_000, drifted, xyz+rng.normal(0, .005, xyz.shape), intensity)
+    match = register_overlap(kfs, 6, 0, 6)
+    assert overlap_is_usable(match), json.dumps(match)
+    recovered = np.asarray(match['measurement_target_from_source'])
+    assert np.linalg.norm(recovered[:3, 3]) < .05
+    assert np.linalg.norm(np.asarray(match['position_correction_m'])-[0., -2.4, 1.5]) < .05

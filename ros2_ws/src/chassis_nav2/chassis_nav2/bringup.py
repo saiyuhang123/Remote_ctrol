@@ -1,6 +1,7 @@
 """Assemble the real RoboSense/Wit/JD03 pipeline from one hardware file."""
 import json
 import math
+import shutil
 from datetime import datetime
 from pathlib import Path
 import numpy as np
@@ -314,14 +315,14 @@ def configure(context):
         stamp = f"{datetime.now():%Y%m%d_%H%M%S}"
         if output.exists():
             backup = output.with_name(f"{output.stem}_{stamp}{output.suffix}")
-            output.rename(backup)
-            print(f'[bringup] 旧地图已备份为 {backup.name}，本次建图保存到 {output.name}')
-        # Keep a previous validation report paired with its PCD backup; a stale
-        # PASS report must not survive next to a rejected or never-written map.
+            shutil.copy2(output, backup)
+            print(f'[bringup] 旧地图已备份为 {backup.name}；新图通过检查后替换 {output.name}')
+        # Keep the previous map/report available until validated export commits
+        # a new pair. A failed mapping session must not remove a usable map.
         stale_report = output.with_suffix('.validation.json')
         if stale_report.exists():
             report_backup = output.with_name(f"{output.stem}_{stamp}.validation.json")
-            stale_report.rename(report_backup)
+            shutil.copy2(stale_report, report_backup)
             print(f'[bringup] 旧验证报告已同步备份为 {report_backup.name}')
         # The backend owns the final path. It exports only after measured
         # structural overlaps and gravity-preserving refinement pass checks.
@@ -339,11 +340,11 @@ def configure(context):
                 'keyframe_max_gap_sec': 2.0,
                 'stationary_distance': 0.12,
                 'stationary_angle_deg': 2.0,
-                'search_radius': 5.0,
+                'search_radius': 12.0,
                 'min_time_diff_sec': 300.0,
                 'min_index_diff': 30,
                 'submap_half_window': 3,
-                'overlap_spacing_m': 2.0,
+                'overlap_spacing_m': 1.0,
                 'map_voxel': 0.10,
             }],
         )

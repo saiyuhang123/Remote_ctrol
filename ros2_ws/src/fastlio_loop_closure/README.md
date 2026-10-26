@@ -56,7 +56,7 @@ EKF 状态不受本节点影响；修正只在点击保存后计算并写入磁�
 1. 完成所有待处理重叠匹配，汇总合格约束（至少 6 条，每 3 条取 1 条入图，
    其余留出验证）；
 2. 检查前端倾角与 IMU 一致性（p95 ≤ 3°）、点云/里程计时间匹配缺失率等；
-3. xyz+yaw 最小二乘优化，检查优化变形（位移 <2 m、旋转 <1°）、solver 收敛、
+3. xyz+yaw 最小二乘优化，检查优化变形（普通位移 <2 m，经额外验证的中等漂移 <3.5 m，旋转 <1°）、solver 收敛、
    留出重叠残差（平移 <0.4 m、yaw <0.6°）；
 4. 全部通过才原子写入 `output_map_path`（0.10 m 体素，XYZ+intensity），
    并生成 `<map>.validation.json`（含点数与 SHA256）。
@@ -65,9 +65,20 @@ EKF 状态不受本节点影响；修正只在点击保存后计算并写入磁�
 `<map>_UNVERIFIED.pcd` 候选图与完整会话目录供诊断。桌面端在失败时不会
 继续导出 PGM/YAML 栅格。
 
-重叠匹配质量门限（当前按长园区路线标定）：非地面 fitness ≥0.85
+普通重叠匹配质量门限：非地面 fitness ≥0.85
 （0.4 m 对应距离）、RMSE ≤0.20 m；单条修正 XY <2 m、Z <0.4 m、
 roll/pitch 合成 <1.5°、yaw <1°。
+
+2026-10-26 实地数据补充了“部分重叠 / 中等漂移”路径：fitness ≥0.65、
+RMSE ≤0.22 m，允许 XY <3 m、Z <2 m，但必须同时满足至少 500 个非地面内点、
+至少两个初值收敛到相同结果、地面高度一致性 <0.10 m、正反向 ICP 平移闭合差
+<0.15 m / 旋转闭合差 <0.5°。部分重叠还要求源观测覆盖至少 6 m，避免把
+同一位置的多帧当作充分空间支持。图优化仍保留 solver、姿态变形和留出残差检查。
+
+地面平面只用于生成高度初值和辅助核对，最终配准及 fitness 使用非地面结构。
+尝试多个历史子地图及多个位置初值，处理最近子地图视角不足和局部最优。
+这些检查有相关性，不构成外部真值验证。保存时会补查尚未尝试的最后一帧，
+重复保存不重复加边；这不生成首尾相等约束。
 
 **注意**：`min_time_diff_sec=300` 要求重复路段至少间隔 5 分钟。短路线或
 没有重复经过有建筑/立柱路段时，会因合格匹配不足而无法输出已检查的最终图
@@ -90,7 +101,7 @@ roll/pitch 合成 <1.5°、yaw <1°。
 
 `/loop_closure/status` JSON 字段：keyframes、qualified_overlaps、
 processed_keyframes、gravity_reference_ready、unmatched_clouds、error、
-session。`error` 非空（如前端位姿 NaN、点云时间回退）时保存会被拒绝。
+session、attempted_overlaps。`error` 非空（如前端位姿 NaN、点云时间回退）时保存会被拒绝。
 
 ## 主要参数（bringup 建图模式默认值）
 
@@ -98,9 +109,9 @@ session。`error` 非空（如前端位姿 NaN、点云时间回退）时保存�
 output_map_path        最终 PCD 路径（必填，来自 pcd_map）
 keyframe_distance      0.8 m        keyframe_angle_deg   10°
 keyframe_max_gap_sec   2 s          静止排除 0.12 m / 2°
-search_radius          5 m          min_time_diff_sec    300 s
+search_radius          12 m         min_time_diff_sec    300 s
 min_index_diff         30           submap_half_window   3
-overlap_spacing_m      2 m          map_voxel            0.10 m
+overlap_spacing_m      1 m          map_voxel            0.10 m
 imu_topic              /imu/data    lio_frame            lio_odom
 ```
 
@@ -118,6 +129,7 @@ imu_topic              /imu/data    lio_frame            lio_odom
 - 终点不要求回到起点，没有 endpoint=origin 约束；
 - 报告中的几何检查是内部一致性验证（共享结构、留出残差），不是外部
   真值精度认证；上车后仍需做实际定位验收；
-- 重复调用保存会被拒绝（`地图正在优化保存`），等待当前任务完成即可；
+- 保存进行中请等待，完成后再次保存不会重复添加同一条回环约束；
 - 建图启动时若目标路径已有旧图，旧 PCD 与旧 `.validation.json` 会以同
-  一时间戳成对备份，避免遗留报告被误读。
+  一时间戳成对复制备份，原路径继续保留旧图；只有新图通过检查才替换，
+  新建图失败不会移走现有可用地图。

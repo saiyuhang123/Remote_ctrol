@@ -71,11 +71,11 @@ class LiveLoopClosure(Node):
         self.keyframe_max_gap = float(self.declare_parameter('keyframe_max_gap_sec', 2.).value)
         self.stationary_distance = float(self.declare_parameter('stationary_distance', .12).value)
         self.stationary_angle = math.radians(float(self.declare_parameter('stationary_angle_deg', 2.).value))
-        self.search_radius = float(self.declare_parameter('search_radius', 5.).value)
+        self.search_radius = float(self.declare_parameter('search_radius', 12.).value)
         self.min_time_diff = float(self.declare_parameter('min_time_diff_sec', 300.).value)
         self.min_index_diff = int(self.declare_parameter('min_index_diff', 30).value)
         self.submap_half = int(self.declare_parameter('submap_half_window', 3).value)
-        self.overlap_spacing = float(self.declare_parameter('overlap_spacing_m', 2.).value)
+        self.overlap_spacing = float(self.declare_parameter('overlap_spacing_m', 1.).value)
         self.map_voxel = float(self.declare_parameter('map_voxel', .10).value)
         self.frame = str(self.declare_parameter('lio_frame', 'lio_odom').value)
         imu_topic = str(self.declare_parameter('imu_topic', '/imu/data').value)
@@ -212,7 +212,7 @@ class LiveLoopClosure(Node):
             self.fatal_error = f'关键帧保存失败：{exc}'
             self.get_logger().error(self.fatal_error)
 
-    def process_keyframe(self, kfs, i):
+    def process_keyframe(self, kfs, i, force=False):
         if i < self.min_index_diff:
             return
         current = kfs[i]
@@ -223,17 +223,30 @@ class LiveLoopClosure(Node):
             return
         positions = np.array([k.pose[:2, 3] for k in kfs[:eligible_end]])
         distances = np.linalg.norm(positions-current.pose[:2, 3], axis=1)
-        target = int(np.argmin(distances))
-        if distances[target] > self.search_radius:
+        ordered = np.argsort(distances)
+        if distances[ordered[0]] > self.search_radius:
             return
-        if self.last_overlap_position is not None and np.linalg.norm(
+        if not force and self.last_overlap_position is not None and np.linalg.norm(
                 current.pose[:2, 3]-self.last_overlap_position) < self.overlap_spacing:
             return
         self.last_overlap_position = current.pose[:2, 3].copy()
-        match = register_overlap(kfs, i, target, eligible_end, self.submap_half)
+        candidates = []
+        for target in ordered:
+            if distances[target] > self.search_radius:
+                break
+            if all(abs(int(target)-other) >= 3 for other in candidates):
+                candidates.append(int(target))
+            if len(candidates) == 3:
+                break
+        proposals = [register_overlap(kfs, i, target, eligible_end, self.submap_half)
+                     for target in candidates]
+        proposals = [m for m in proposals if m is not None]
+        qualified = [m for m in proposals if overlap_is_usable(m)]
+        pool = qualified or proposals
+        match = max(pool, key=lambda m: m['fitness']-.1*m['rmse_m']) if pool else None
         if overlap_is_usable(match):
             self.matches.append(match)
-            self.get_logger().info(f'overlap {i}->{target}: fitness={match["fitness"]:.3f}, rmse={match["rmse_m"]:.3f} m')
+            self.get_logger().info(f'overlap {i}->{match["target"]}: fitness={match["fitness"]:.3f}, rmse={match["rmse_m"]:.3f} m')
         elif match is not None:
             self.rejected_matches.append(match)
 
@@ -241,6 +254,14 @@ class LiveLoopClosure(Node):
         while self.processed < len(kfs):
             self.process_keyframe(kfs, self.processed)
             self.processed += 1
+
+    def finish_matching(self, kfs):
+        self.process_through(kfs)
+        # A final scan just below the distance sampling threshold is still a
+        # measured overlap. It must pass every registration gate; no identity
+        # edge or equal-start/end pose is synthesized. Repeated saves deduplicate.
+        if kfs and not any(m['source'] == len(kfs)-1 for m in self.matches+self.rejected_matches):
+            self.process_keyframe(kfs, len(kfs)-1, force=True)
 
     def worker_loop(self):
         while self.running:
@@ -259,6 +280,7 @@ class LiveLoopClosure(Node):
         with self.lock:
             status = {'workflow': 'gravity_preserving_measured_overlaps', 'keyframes': len(self.keyframes),
                 'qualified_overlaps': len(self.matches), 'processed_keyframes': self.processed,
+                'attempted_overlaps': len(self.matches)+len(self.rejected_matches),
                 'gravity_reference_ready': self.map_rotation is not None,
                 'unmatched_clouds': self.unmatched_clouds, 'error': self.fatal_error,
                 'session': str(self.session)}
@@ -298,7 +320,7 @@ class LiveLoopClosure(Node):
             if unmatched > max(5, total_clouds*.01):
                 raise ValueError('点云与里程计时间匹配缺失过多')
             self.get_logger().info(f'finishing overlaps and refining {len(kfs)} keyframes')
-            self.process_through(kfs)
+            self.finish_matching(kfs)
             matches = list(self.matches)
             rejected = list(self.rejected_matches)
         poses = np.array([k.pose for k in kfs])
@@ -313,13 +335,16 @@ class LiveLoopClosure(Node):
             corrected, validation = refine(poses, matches)
             report.update(validation)
             if not validation['geometry_checks_passed']:
-                raise ValueError('优化变形或留出重叠残差超过阈值')
+                raise ValueError(f'优化检查未通过：最大位移调整 {validation["max_pose_translation_change_m"]:.2f} m，'
+                                 f'旋转调整 {validation["max_pose_rotation_change_deg"]:.2f}°，'
+                                 f'留出位置误差 {validation["max_heldout_translation_error_m"]:.2f} m')
         except Exception as exc:
             report['reason'] = str(exc)
             atomic_json(self.session/'validation.json', report)
             candidate = self.output_map_path.with_name(self.output_map_path.stem+'_UNVERIFIED.pcd')
             write_pcd(candidate, build_map(kfs, poses, self.map_voxel))
-            return False, f'地图未通过几何检查：{exc}。候选图保留于 {candidate}；会话 {self.session}'
+            return False, (f'地图未通过几何检查：{exc}（合格 {len(matches)} 条，'
+                           f'尝试 {len(matches)+len(rejected)} 处）。候选图保留于 {candidate}；会话 {self.session}')
         points = build_map(kfs, corrected, self.map_voxel)
         report.update(status='GEOMETRY_CHECKS_PASSED_NEEDS_REAL_VEHICLE_LOCALIZATION_CHECK',
             points=len(points), pcd=str(self.output_map_path), elapsed_save_sec=time.monotonic()-begin,

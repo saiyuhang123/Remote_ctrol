@@ -62,6 +62,24 @@ def structures(xyz):
     return xyz[(radius > 2.) & (radius < 35.) & (xyz[:, 2] > .1) & (xyz[:, 2] < 6.)]
 
 
+def ground_surface(xyz):
+    """Ground support, excluded from structural ICP, for seeding/verification."""
+    radius = np.linalg.norm(xyz[:, :2], axis=1)
+    points = xyz[(radius > 2.5) & (radius < 12.) & (xyz[:, 2] > -1.2) & (xyz[:, 2] < .1)]
+    if len(points) < 150:
+        return None
+    ground = cloud(points, .15)
+    if len(ground.points) < 100:
+        return None
+    plane, indices = ground.segment_plane(.07, 3, 200)
+    plane = np.asarray(plane)
+    if plane[2] < 0:
+        plane *= -1
+    if plane[2] < math.cos(math.radians(10.)) or len(indices) < 100 or len(indices) < .5*len(ground.points):
+        return None
+    return plane, np.asarray(ground.points)[indices].mean(axis=0)
+
+
 def register_overlap(kfs, source, target, eligible_end, half_window=3):
     src = cloud(structures(kfs[source].xyz))
     center_inv = inverse(kfs[target].pose)
@@ -69,28 +87,74 @@ def register_overlap(kfs, source, target, eligible_end, half_window=3):
     for k in range(max(0, target-half_window), min(eligible_end, target+half_window+1)):
         transform = center_inv @ kfs[k].pose
         parts.append(kfs[k].xyz @ transform[:3, :3].T + transform[:3, 3])
-    dst = cloud(structures(np.concatenate(parts)))
+    target_xyz = np.concatenate(parts)
+    dst = cloud(structures(target_xyz))
     if len(src.points) < 150 or len(dst.points) < 300:
         return None
     reg = o3d.pipelines.registration
     guess = center_inv @ kfs[source].pose
-    coarse = reg.registration_icp(src, dst, 1., guess,
-        reg.TransformationEstimationPointToPoint(), reg.ICPConvergenceCriteria(max_iteration=60))
     dst.estimate_normals(o3d.geometry.KDTreeSearchParamHybrid(radius=1., max_nn=30))
-    fine = reg.registration_icp(src, dst, .6, coarse.transformation,
-        reg.TransformationEstimationPointToPlane(reg.HuberLoss(.15)),
-        reg.ICPConvergenceCriteria(max_iteration=70))
-    measured = np.array(fine.transformation)
-    ev = reg.evaluate_registration(src, dst, .4, measured)
+    source_ground = ground_surface(kfs[source].xyz)
+    target_ground = ground_surface(target_xyz)
+    seeds = [(guess, 1.)]
+    if source_ground is not None and target_ground is not None:
+        normal, offset = target_ground[0][:3], target_ground[0][3]
+        centroid = source_ground[1]
+        for dx, dy in ((0., 0.), (-2.5, 0.), (2.5, 0.), (0., -2.5), (0., 2.5)):
+            seed = guess.copy()
+            seed[:2, 3] += [dx, dy]
+            dz = -(normal @ (seed[:3, :3] @ centroid + seed[:3, 3])+offset)/normal[2]
+            if abs(dz) <= 2.5:
+                seed[2, 3] += dz
+                seeds.append((seed, 2.5))
+    solutions = []
+    for seed, correspondence in seeds:
+        coarse = reg.registration_icp(src, dst, correspondence, seed,
+            reg.TransformationEstimationPointToPoint(), reg.ICPConvergenceCriteria(max_iteration=60))
+        fine = reg.registration_icp(src, dst, .6, coarse.transformation,
+            reg.TransformationEstimationPointToPlane(reg.HuberLoss(.15)),
+            reg.ICPConvergenceCriteria(max_iteration=70))
+        measured = np.array(fine.transformation)
+        ev = reg.evaluate_registration(src, dst, .4, measured)
+        solutions.append((ev.fitness-.1*ev.inlier_rmse, measured, ev))
+    _, measured, ev = max(solutions, key=lambda item: item[0])
     fitted_pose = kfs[target].pose @ measured
     correction = fitted_pose @ inverse(kfs[source].pose)
     rpy = Rotation.from_matrix(correction[:3, :3].copy()).as_euler('xyz', degrees=True)
     # Measure displacement at the sensor, not at the map origin (lever-arm invariant).
     shift = fitted_pose[:3, 3] - kfs[source].pose[:3, 3]
+    agreements = int(sum(np.linalg.norm(other[:3, 3]-measured[:3, 3]) < .15
+        and Rotation.from_matrix(other[:3, :3].T @ measured[:3, :3]).magnitude() < math.radians(.4)
+        for _, other, _ in solutions))
+    ground_residual = None
+    if source_ground is not None and target_ground is not None:
+        ground_residual = abs(float(target_ground[0][:3] @
+            (measured[:3, :3] @ source_ground[1]+measured[:3, 3])+target_ground[0][3]))
+    reciprocal_translation = reciprocal_rotation = None
+    if ev.fitness >= .65 and ev.inlier_rmse <= .22:
+        src.estimate_normals(o3d.geometry.KDTreeSearchParamHybrid(radius=1., max_nn=30))
+        backward = reg.registration_icp(dst, src, .6, inverse(measured),
+            reg.TransformationEstimationPointToPlane(reg.HuberLoss(.15)),
+            reg.ICPConvergenceCriteria(max_iteration=60))
+        closure = measured @ backward.transformation
+        reciprocal_translation = float(np.linalg.norm(closure[:3, 3]))
+        reciprocal_rotation = float(np.rad2deg(Rotation.from_matrix(closure[:3, :3].copy()).magnitude()))
     return {'source': source, 'target': target,
             'fitness': float(ev.fitness), 'rmse_m': float(ev.inlier_rmse),
             'position_correction_m': shift.tolist(), 'rotation_correction_deg': rpy.tolist(),
+            'inlier_count': len(ev.correspondence_set), 'initialization_agreements': agreements,
+            'ground_residual_m': ground_residual, 'reciprocal_translation_m': reciprocal_translation,
+            'reciprocal_rotation_deg': reciprocal_rotation,
             'measurement_target_from_source': measured.tolist()}
+
+
+def registration_checks_pass(match):
+    values = [match.get('ground_residual_m'), match.get('reciprocal_translation_m'),
+              match.get('reciprocal_rotation_deg')]
+    return bool(all(v is not None and math.isfinite(v) for v in values)
+                and values[0] < .10 and values[1] < .15 and values[2] < .5
+                and match.get('inlier_count', 0) >= 500
+                and match.get('initialization_agreements', 0) >= 2)
 
 
 def overlap_is_usable(match):
@@ -99,11 +163,16 @@ def overlap_is_usable(match):
     shift = np.asarray(match['position_correction_m'])
     angles = np.asarray(match['rotation_correction_deg'])
     measured = np.asarray(match['measurement_target_from_source'])
-    return bool(np.isfinite(measured).all() and np.isfinite(shift).all()
-                and np.isfinite(angles).all() and match['fitness'] >= .85
-                and match['rmse_m'] <= .20 and np.linalg.norm(shift[:2]) < 2.
-                and abs(shift[2]) < .4 and np.linalg.norm(angles[:2]) < 1.5
-                and abs(angles[2]) < 1.)
+    if not (np.isfinite(measured).all() and np.isfinite(shift).all() and np.isfinite(angles).all()
+            and np.linalg.norm(angles[:2]) < 1.5 and abs(angles[2]) < 1.):
+        return False
+    strong = match['fitness'] >= .85 and match['rmse_m'] <= .20
+    small = np.linalg.norm(shift[:2]) < 2. and abs(shift[2]) < .4
+    if strong and small:
+        return True
+    return bool(match['fitness'] >= .65 and match['rmse_m'] <= .22
+                and np.linalg.norm(shift[:2]) < 3. and abs(shift[2]) < 2.
+                and registration_checks_pass(match))
 
 
 def refine(poses, matches):
@@ -112,6 +181,14 @@ def refine(poses, matches):
     n = len(poses)
     if len(matches) < 6:
         raise ValueError('至少需要 6 处合格重叠匹配；请重复经过一段有建筑或立柱的路段')
+    partial = any(m.get('fitness', 1.) < .85 for m in matches)
+    source_positions = poses[[m['source'] for m in matches], :3, 3]
+    source_span = float(np.linalg.norm(np.ptp(source_positions, axis=0)))
+    if partial and source_span < 6.:
+        raise ValueError(f'部分重叠仅覆盖 {source_span:.1f} 米，至少需要 6 米的不同位置观测')
+    extended = any(np.linalg.norm(m.get('position_correction_m', [0., 0., 0.])) >= 2.
+                   for m in matches)
+    shift_limit = 3.5 if extended and all(registration_checks_pass(m) for m in matches) else 2.
     training = matches[::3]
     heldout = [m for k, m in enumerate(matches) if k % 3]
     angles = Rotation.from_matrix(poses[:, :3, :3]).as_euler('xyz')
@@ -182,11 +259,12 @@ def refine(poses, matches):
         rotation.transpose(0, 2, 1) @ R).as_rotvec(), axis=1)).max())
     max_error = max(v['translation_error_m'] for v in validation)
     max_yaw = max(abs(v['yaw_error_deg']) for v in validation)
-    passed = bool(fit.success and np.isfinite(result).all() and max_shift < 2.
+    passed = bool(fit.success and np.isfinite(result).all() and max_shift < shift_limit
                   and max_angle < 1. and max_error < .4 and max_yaw < .6)
     report = {'geometry_checks_passed': passed, 'solver_success': bool(fit.success),
         'solver_message': fit.message, 'training_loops': training, 'heldout_validation': validation,
         'max_pose_translation_change_m': max_shift, 'max_pose_rotation_change_deg': max_angle,
+        'pose_translation_limit_m': shift_limit, 'overlap_source_span_m': source_span,
         'max_heldout_translation_error_m': max_error, 'max_heldout_yaw_error_deg': max_yaw,
         'keyframe_height_range_m': [float(p[:, 2].min()), float(p[:, 2].max())],
         'endpoint_xyz_m': p[-1].tolist(), 'endpoint_is_not_constrained_to_origin': True,
