@@ -12,7 +12,7 @@ from rclpy.callback_groups import ReentrantCallbackGroup
 from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node
 from rclpy.parameter import Parameter
-from hk_camera.srv import ControlPTZ, PTZPreset, CapturePicture
+from hk_camera.srv import ControlPTZ, GetPTZPose, PTZPreset, CapturePicture
 from ocr_interfaces.srv import RecognizeImage
 from patrol_interfaces.srv import PtzInspectionControl
 from robot_patrol.engine import PatrolEngine
@@ -39,7 +39,7 @@ def wait_for(predicate, timeout=4.):
 @pytest.fixture
 def rig(tmp_path):
     rclpy.init()
-    h = NS(events=[], violations=[], recognition_delay=0.)
+    h = NS(events=[], violations=[], recognition_delay=0., pan=125.)
     h.stop_gate, h.recognition_gate = threading.Event(), threading.Event()
     h.stop_gate.set(); h.recognition_gate.set()
     h.stop_requested, h.recognizing = threading.Event(), threading.Event()
@@ -51,8 +51,14 @@ def rig(tmp_path):
         if request.stop:
             h.stop_requested.set()
             h.stop_gate.wait(5.)
+        else:
+            h.pan = (h.pan + (-.5 if request.command == 23 else .5)) % 360.
         h.events.append(('stop_ack' if request.stop else 'jog_ack', None))
         response.success = True
+        return response
+
+    def angles(request, response):
+        response.success, response.pan, response.tilt = True, h.pan, 0.
         return response
 
     def preset(request, response):
@@ -84,6 +90,7 @@ def rig(tmp_path):
 
     for service, name, callback in [(ControlPTZ,'/hk_camera/control_ptz',control),
             (ControlPTZ,'/ptz/control',control),
+            (GetPTZPose,'/ptz/get_angles',angles),
             (PTZPreset,'/hk_camera/preset',preset), (CapturePicture,'/hk_camera/capture',capture),
             (RecognizeImage,'/vision/recognize_image',recognize)]:
         server.create_service(service,name,callback,callback_group=group)
@@ -101,6 +108,7 @@ def rig(tmp_path):
     thread = threading.Thread(target=executor.spin,daemon=True)
     thread.start()
     assert h.ptz._ctrl.wait_for_service(timeout_sec=3.)
+    assert h.ptz._pose.wait_for_service(timeout_sec=3.)
     assert h.inspection.preset.wait_for_service(timeout_sec=3.)
     assert h.protocol.wait_for_service(timeout_sec=3.)
 
@@ -128,8 +136,11 @@ def rig(tmp_path):
                 if h.ptz._inspection_owner:
                     h.violations.append('hold survived next departure')
                 h.events.append(('navigate',step.point_id))
-                # Give the PTZ timer a chance to jog between inspection points.
-                time.sleep(.25)
+                # Resuming now establishes a fresh angle before moving. Wait
+                # for that feedback/command exchange instead of assuming it
+                # completes within a quarter-second simulated drive.
+                if h.ptz.get_parameter('enabled').value:
+                    wait_for(lambda: h.ptz._moving)
                 return super().navigate(step,flags,status_cb)
         def status(value):
             if value.get('state')==5:

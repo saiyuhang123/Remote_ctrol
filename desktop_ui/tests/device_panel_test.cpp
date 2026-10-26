@@ -33,7 +33,7 @@ struct DeviceFixture {
   bool publishPtz = true;
   DeviceFixture() {
     ptz->declare_parameter("enabled", false); ptz->declare_parameter("pan_speed", 2);
-    ptz->declare_parameter("sweep_seconds", 20.); ptz->declare_parameter("pan_min", -1.); ptz->declare_parameter("pan_max", -1.);
+    ptz->declare_parameter("pan_sweep_degrees", 360.); ptz->declare_parameter("pan_min", -1.); ptz->declare_parameter("pan_max", -1.);
     ptz->declare_parameter("tilt_enabled", false); ptz->declare_parameter("tilt_min", -9.);
     ptz->declare_parameter("tilt_max", 15.); ptz->declare_parameter("tilt_speed", 1);
     service = gas->create_service<std_srvs::srv::SetBool>("/gas_detector/set_enabled",
@@ -61,7 +61,9 @@ struct DeviceFixture {
         {"tilt_min", ptz->get_parameter("tilt_min").as_double()}, {"tilt_max", ptz->get_parameter("tilt_max").as_double()},
         {"tilt_speed", static_cast<int>(ptz->get_parameter("tilt_speed").as_int())},
         {"pan", 120.}, {"tilt", -3.},
-        {"pan_speed", static_cast<int>(ptz->get_parameter("pan_speed").as_int())}, {"sweep_seconds", ptz->get_parameter("sweep_seconds").as_double()}});
+        {"pan_speed", static_cast<int>(ptz->get_parameter("pan_speed").as_int())},
+        {"sweep_mode", "angle"}, {"pan_progress_degrees", 42.5},
+        {"pan_sweep_degrees", ptz->get_parameter("pan_sweep_degrees").as_double()}});
     });
     timer.start(100);
   }
@@ -96,6 +98,9 @@ private slots:
     QTRY_VERIFY(button("ptzPatrolStart")->isEnabled());
     QTest::mouseClick(button("ptzPatrolStart"), Qt::LeftButton);
     QTRY_VERIFY(fixture.ptz->get_parameter("enabled").as_bool()); QCOMPARE(camera.count(), 1);
+    QCOMPARE(fixture.ptz->get_parameter("pan_sweep_degrees").as_double(), 360.);
+    QTRY_VERIFY(panel.findChild<QLabel *>("ptzPatrolStatus")->text().contains("每侧 360°"));
+    QTRY_VERIFY(panel.findChild<QLabel *>("ptzPatrolStatus")->text().contains("本侧已转：42.5° / 360.0°"));
     QVERIFY(fixture.ptz->get_parameter("tilt_enabled").as_bool());
     QCOMPARE(fixture.ptz->get_parameter("tilt_min").as_double(), -9.);
     QCOMPARE(fixture.ptz->get_parameter("tilt_max").as_double(), 15.);
@@ -136,7 +141,8 @@ private slots:
     client.status("gas", gas);
     client.gasSample({{"raw_value",150},{"value_scaled",15.0},{"decimals",1},{"unit","ppm"},
       {"state_code",2},{"range_raw",1000},{"low_alarm_raw",30},{"high_alarm_raw",60}});
-    QJsonObject ptz{{"state","stopped"},{"active",false},{"moving",false},{"pan_speed",2},{"sweep_seconds",20.0}};
+    QJsonObject ptz{{"state","stopped"},{"active",false},{"moving",false},{"pan_speed",2},
+                    {"sweep_mode","angle"},{"pan_sweep_degrees",360.0},{"pan_progress_degrees",0.0}};
     client.status("ptz", ptz);
     QCOMPARE(panel.findChild<QLabel *>("gasValue")->text(), QString("150"));
     QVERIFY(panel.findChild<QLabel *>("gasEstimate")->text().contains("≈"));
@@ -169,7 +175,10 @@ private slots:
     toggle->click();QTest::qWait(30);
     tabs->setCurrentIndex(1);
     auto *bounds=panel.findChild<QCheckBox *>("ptzBounds");
+    auto *sweepDegrees=panel.findChild<QDoubleSpinBox *>("ptzSweepDegrees");
+    QVERIFY(sweepDegrees); QCOMPARE(sweepDegrees->value(),360.);
     bounds->setChecked(true);
+    QVERIFY(!sweepDegrees->isEnabled());
     auto *minimum=panel.findChild<QDoubleSpinBox *>("ptzPanMinimum");
     auto *maximum=panel.findChild<QDoubleSpinBox *>("ptzPanMaximum");
     minimum->setValue(200);maximum->setValue(100);

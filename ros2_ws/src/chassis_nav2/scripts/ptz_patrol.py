@@ -2,7 +2,8 @@
 """Independent, opt-in PTZ sweep. Default disabled; compatible with ros2 param.
 
 Renews the RS485 head driver's 500 ms lease. Reports real command acknowledgments
-and keeps stop pending until acknowledged; no navigation dependencies.
+and reverses after the measured horizontal travel reaches the requested angle.
+Keeps stop pending until acknowledged; no navigation dependencies.
 """
 import fcntl
 import json
@@ -19,7 +20,8 @@ from patrol_interfaces.srv import PtzInspectionControl
 
 PAN_LEFT, PAN_RIGHT = 23, 24
 MIN_FLIP_GAP = 3.0
-SETTINGS = ('enabled', 'pan_speed', 'sweep_seconds', 'pan_min', 'pan_max',
+PAN_FEEDBACK_MAX_AGE = 2.0
+SETTINGS = ('enabled', 'pan_speed', 'pan_sweep_degrees', 'pan_min', 'pan_max',
             'tilt_enabled', 'tilt_min', 'tilt_max', 'tilt_speed',
             'home_pan', 'home_tilt', 'home_zoom')
 
@@ -27,7 +29,7 @@ SETTINGS = ('enabled', 'pan_speed', 'sweep_seconds', 'pan_min', 'pan_max',
 class PtzPatrol(Node):
     def __init__(self):
         super().__init__('ptz_patrol')
-        for key, value in dict(enabled=False, pan_speed=2, sweep_seconds=20.0,
+        for key, value in dict(enabled=False, pan_speed=2, pan_sweep_degrees=360.0,
                                pan_min=-1.0, pan_max=-1.0, home_pan=-1.0,
                                home_tilt=-1.0, home_zoom=-1.0, tilt_enabled=False,
                                tilt_min=-9.0, tilt_max=15.0, tilt_speed=1).items():
@@ -51,6 +53,11 @@ class PtzPatrol(Node):
         self._tilt = None
         self._positioning = False
         self._pan_stamp = 0.0
+        self._pan_previous = None
+        self._pan_travel = 0.0
+        self._pan_motion_stamp = time.monotonic()
+        self._pan_motion_anchor = 0.0
+        self._completed_sweeps = 0
         self._error = ''
         self._stop_due = False
         self._home_due = False
@@ -77,8 +84,8 @@ class PtzPatrol(Node):
         lo, hi = values['tilt_min'], values['tilt_max']
         if not (math.isfinite(lo) and math.isfinite(hi) and -90 <= lo < hi <= 25 and hi - lo >= 2):
             raise ValueError('tilt bounds require -90 <= min < max <= 25 and a span >= 2 degrees')
-        if not math.isfinite(values['sweep_seconds']) or not 1 <= values['sweep_seconds'] <= 600:
-            raise ValueError('sweep_seconds must be 1..600 seconds')
+        if not math.isfinite(values['pan_sweep_degrees']) or not 1 <= values['pan_sweep_degrees'] <= 360:
+            raise ValueError('pan_sweep_degrees must be 1..360 degrees')
         lo, hi = values['pan_min'], values['pan_max']
         if not (lo == hi == -1 or 0 <= lo < hi <= 360):
             raise ValueError('pan bounds must both be -1, or 0 <= min < max <= 360')
@@ -108,6 +115,8 @@ class PtzPatrol(Node):
         if values['enabled'] and not self.get_parameter('enabled').value:
             self._last_flip = time.monotonic()
             self._direction = PAN_LEFT
+            self._reset_pan_progress(invalidate=True)
+            self._completed_sweeps = 0
             self._inspection_fault = ''
             self._error = ''
         return SetParametersResult(successful=True)
@@ -150,6 +159,7 @@ class PtzPatrol(Node):
                 return response
             if not self._inspection_owner:
                 self._stop_due = True  # Require an actual camera stop ACK.
+                self._reset_pan_progress(invalidate=True)
             self._inspection_owner = owner
             self._inspection_deadline = time.monotonic()+request.lease_seconds
             self._inspection_fault = ''
@@ -183,6 +193,9 @@ class PtzPatrol(Node):
             self._inspection_owner = ''
             self._remember_release(owner, bool(request.resume))
             self._last_flip = time.monotonic()
+            # Inspection can point the head elsewhere. Resume a new sweep from
+            # the actual post-inspection angle, excluding that repositioning.
+            self._reset_pan_progress(invalidate=True)
         response.success = True
         response.stopped = self._inspection_stopped()
         response.sweep_enabled = bool(self.get_parameter('enabled').value)
@@ -191,7 +204,43 @@ class PtzPatrol(Node):
         return response
 
     def _use_pan_bounds(self):
-        return 0 <= self.get_parameter('pan_min').value < self.get_parameter('pan_max').value <= 360
+        lo, hi = self.get_parameter('pan_min').value, self.get_parameter('pan_max').value
+        return 0 <= lo < hi <= 360 and hi - lo < 360
+
+    def _reset_pan_progress(self, invalidate=False):
+        self._pan_previous = None
+        self._pan_travel = 0.0
+        self._pan_motion_stamp = time.monotonic()
+        self._pan_motion_anchor = 0.0
+        if invalidate:
+            self._pan_stamp = 0.0
+            if self._pose_pending is not None:
+                self._pose.remove_pending_request(self._pose_pending)
+                self._pose_pending = None
+
+    def _accept_pan(self, pan):
+        if not math.isfinite(pan) or not 0 <= pan <= 360:
+            return False
+        self._pan, self._pan_stamp = float(pan), time.monotonic()
+        if self._positioning or self._inspection_owner or self._stop_due or not self.get_parameter('enabled').value:
+            self._pan_previous = None
+            return True
+        if self._pan_previous is not None:
+            # Unwrap 0/360 without counting jitter or a repeated start heading
+            # as a completed revolution. Signed deltas cancel reverse drift.
+            delta = math.remainder(pan - self._pan_previous, 360.)
+            self._pan_travel += delta
+            if abs(self._pan_travel - self._pan_motion_anchor) >= .1:
+                self._pan_motion_stamp = time.monotonic()
+                self._pan_motion_anchor = self._pan_travel
+        self._pan_previous = float(pan)
+        return True
+
+    def _fail_feedback(self, message):
+        self._error = message
+        self._home_due = False
+        self.set_parameters([rclpy.parameter.Parameter('enabled', value=False)])
+        self._stop_due = True
 
     def _tick(self):
         self._expire_inspection()
@@ -201,8 +250,7 @@ class PtzPatrol(Node):
             self._ctrl_pending = None
             self._error = 'PTZ command timed out; stop required before retry'
             self._stop_due = True  # The timed-out command may have executed.
-            if self.get_parameter('tilt_enabled').value:
-                self.set_parameters([rclpy.parameter.Parameter('enabled', value=False)])
+            self.set_parameters([rclpy.parameter.Parameter('enabled', value=False)])
         if self._ctrl_pending is not None:
             return
         enabled = self.get_parameter('enabled').value
@@ -217,17 +265,36 @@ class PtzPatrol(Node):
         if not control.service_is_ready():
             self._error = '等待 485 云台服务，请启动或更新 ptz_pelco 节点'
             return
+        if self._pan_stamp <= 0 or now - self._pan_stamp >= PAN_FEEDBACK_MAX_AGE:
+            if self._moving:
+                self._fail_feedback('485 水平角度反馈超时，已停止巡航')
+                self._command(True)
+            else:
+                # Establish an actual starting angle before any horizontal
+                # move, including horizontal-only sweeps without bounds.
+                self._poll_pose()
+            return
         elapsed = now - self._last_flip
-        flip = elapsed >= self.get_parameter('sweep_seconds').value
-        if not flip and elapsed > MIN_FLIP_GAP and self._use_pan_bounds() and \
-                self._pan is not None and now - self._pan_stamp < 2.0:
-            flip = not (self.get_parameter('pan_min').value < self._pan <
-                        self.get_parameter('pan_max').value)
-        if flip:
-            # Stop the old direction before starting a different direction.
+        if self._moving and not self._positioning and now - self._pan_motion_stamp > 3.0:
+            self._fail_feedback('485 水平角度持续无变化，已停止巡航')
+            self._command(True)
+            return
+        flip = abs(self._pan_travel) >= self._sweep_target()
+        if self._use_pan_bounds():
+            flip = elapsed > MIN_FLIP_GAP and not self._positioning and not (
+                self.get_parameter('pan_min').value < self._pan < self.get_parameter('pan_max').value)
+        if flip and not self._positioning:
             self._direction = PAN_RIGHT if self._direction == PAN_LEFT else PAN_LEFT
             self._last_flip = now
+            self._completed_sweeps += 1
+            self._reset_pan_progress()
+            self._pan_previous = self._pan
         self._command(False)
+
+    def _sweep_target(self):
+        if self.get_parameter('pan_min').value == 0 and self.get_parameter('pan_max').value == 360:
+            return 360.0
+        return self.get_parameter('pan_sweep_degrees').value
 
     def _command(self, stop):
         patrol_mode = bool(self.get_parameter('tilt_enabled').value)
@@ -260,18 +327,20 @@ class PtzPatrol(Node):
             if not result.success:
                 self._error = 'PTZ control failed: ' + result.message
                 self._stop_due = True
-                if patrol_mode:
-                    self.set_parameters([rclpy.parameter.Parameter('enabled', value=False)])
+                self.set_parameters([rclpy.parameter.Parameter('enabled', value=False)])
                 return
-            if not stop:
+            if not stop and self.get_parameter('enabled').value and not self._stop_due:
                 self._error = ''
             self._moving = not stop
             self._positioning = patrol_mode and not stop and result.positioning
             if self._positioning:
                 self._last_flip = time.monotonic()
-            if patrol_mode and result.pose_valid and math.isfinite(result.pan) and math.isfinite(result.tilt):
-                self._pan, self._tilt = result.pan, result.tilt
-                self._pan_stamp = time.monotonic()
+                self._reset_pan_progress()
+            if patrol_mode and not stop:
+                if not result.pose_valid or not math.isfinite(result.tilt) or not self._accept_pan(result.pan):
+                    self._fail_feedback('485 实际角度反馈无效，已停止巡航')
+                else:
+                    self._tilt = result.tilt
             if stop:
                 self._stop_due = False
                 if self._home_due and not self.get_parameter('enabled').value and not self._inspection_owner:
@@ -280,6 +349,7 @@ class PtzPatrol(Node):
         except Exception as error:
             self._error = str(error)
             self._stop_due = True
+            self.set_parameters([rclpy.parameter.Parameter('enabled', value=False)])
         self._publish_status()
 
     def _poll_pose(self):
@@ -287,8 +357,10 @@ class PtzPatrol(Node):
         if self._pose_pending is not None and now >= self._pose_deadline:
             self._pose.remove_pending_request(self._pose_pending)
             self._pose_pending = None
-            self._pan = None
-        if self.get_parameter('tilt_enabled').value or not self._use_pan_bounds() or not self._moving or self._pose_pending is not None:
+            if self.get_parameter('enabled').value and not self._inspection_owner:
+                self._fail_feedback('485 水平角度读取超时，已停止巡航')
+        if (not self.get_parameter('enabled').value or self._inspection_owner or self._stop_due or
+                self._pose_pending is not None or (self.get_parameter('tilt_enabled').value and self._moving)):
             return
         if self._pose.service_is_ready():
             self._pose_pending = self._pose.call_async(GetPTZPose.Request())
@@ -301,10 +373,12 @@ class PtzPatrol(Node):
         self._pose_pending = None
         try:
             result = future.result()
-            self._pan = result.pan if result.success else None
-            self._pan_stamp = time.monotonic()
+            if not result.success or not self._accept_pan(result.pan):
+                if self.get_parameter('enabled').value and not self._inspection_owner:
+                    self._fail_feedback('485 水平角度反馈无效，已停止巡航')
         except Exception:
-            self._pan = None
+            if self.get_parameter('enabled').value and not self._inspection_owner:
+                self._fail_feedback('485 水平角度读取失败，已停止巡航')
 
     def _publish_status(self):
         enabled = self.get_parameter('enabled').value
@@ -319,7 +393,10 @@ class PtzPatrol(Node):
                      inspection_held=bool(self._inspection_owner), inspection_owner=self._inspection_owner,
                      direction='left' if self._direction == PAN_LEFT else 'right',
                      pan=self._pan, pan_speed=self.get_parameter('pan_speed').value,
-                     sweep_seconds=self.get_parameter('sweep_seconds').value,
+                     pan_sweep_degrees=self._sweep_target(),
+                     pan_progress_degrees=abs(self._pan_travel),
+                     completed_sweeps=self._completed_sweeps,
+                     sweep_mode='bounds' if self._use_pan_bounds() else 'angle',
                      pan_min=self.get_parameter('pan_min').value,
                      pan_max=self.get_parameter('pan_max').value)
         value.update(control_transport='rs485', tilt=self._tilt,

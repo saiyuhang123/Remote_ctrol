@@ -22,7 +22,7 @@ struct DevicePanel::View : QObject {
   using QObject::QObject;
   QLineEdit *port;
   QSpinBox *address, *baudrate, *speed, *tiltSpeed;
-  QDoubleSpinBox *interval, *seconds, *minimum, *maximum, *tiltMinimum, *tiltMaximum;
+  QDoubleSpinBox *interval, *sweepDegrees, *minimum, *maximum, *tiltMinimum, *tiltMaximum;
   QCheckBox *bounds, *tiltSweep;
   QPushButton *gasStart, *gasStop, *ptzStart, *ptzStop;
   QLabel *gasStatus, *gasValue, *gasDetails, *ptzStatus;
@@ -201,8 +201,9 @@ DevicePanel::DevicePanel(DeviceClient *client, bool offline, QWidget *parent)
   auto *ptzForm = new QFormLayout; ptzForm->setSpacing(10);
   v.speed = new QSpinBox(ptzParameters); v.speed->setObjectName("ptzSpeed");
   v.speed->setRange(1, 7); v.speed->setValue(2); ptzForm->addRow("速度档位", v.speed);
-  v.seconds = new QDoubleSpinBox(ptzParameters); v.seconds->setObjectName("ptzSweepSeconds");
-  v.seconds->setRange(1, 600); v.seconds->setValue(20); v.seconds->setSuffix(" s"); ptzForm->addRow("单侧扫掠时间", v.seconds);
+  v.sweepDegrees = new QDoubleSpinBox(ptzParameters); v.sweepDegrees->setObjectName("ptzSweepDegrees");
+  v.sweepDegrees->setRange(1, 360); v.sweepDegrees->setValue(360); v.sweepDegrees->setSuffix("°");
+  ptzForm->addRow("单侧水平转角", v.sweepDegrees);
   parametersLayout->addLayout(ptzForm);
   v.bounds = new QCheckBox("使用水平角度边界", ptzParameters); v.bounds->setObjectName("ptzBounds");
   parametersLayout->addWidget(v.bounds);
@@ -215,7 +216,7 @@ DevicePanel::DevicePanel(DeviceClient *client, bool offline, QWidget *parent)
   angles->addRow("最小水平角", v.minimum); angles->addRow("最大水平角", v.maximum);
   parametersLayout->addWidget(angleFields); angleFields->hide();
   connect(v.bounds, &QCheckBox::toggled, angleFields, &QWidget::setVisible);
-  parametersLayout->addWidget(deviceui::label("水平按时间或角度边界换向；俯仰摆动需要有效角度反馈。", ptzParameters, true));
+  parametersLayout->addWidget(deviceui::label("默认水平转满 360° 后返回；勾选水平边界时在指定范围内往返。", ptzParameters, true));
   v.tiltSweep = new QCheckBox("同时俯仰摆动（485）", ptzParameters);
   v.tiltSweep->setObjectName("ptzTiltSweep"); v.tiltSweep->setChecked(true);
   parametersLayout->addWidget(v.tiltSweep);
@@ -251,7 +252,7 @@ DevicePanel::DevicePanel(DeviceClient *client, bool offline, QWidget *parent)
   });
   connect(v.gasStop, &QPushButton::clicked, this, [this] { view_->gasPending = false; client_->stopGas(); refresh(); });
   connect(v.ptzStart, &QPushButton::clicked, this, [this] {
-    client_->startPtz(view_->speed->value(), view_->seconds->value(), view_->bounds->isChecked() ? view_->minimum->value() : -1,
+    client_->startPtz(view_->speed->value(), view_->sweepDegrees->value(), view_->bounds->isChecked() ? view_->minimum->value() : -1,
                      view_->bounds->isChecked() ? view_->maximum->value() : -1,
                      view_->tiltSweep->isChecked(), view_->tiltMinimum->value(), view_->tiltMaximum->value(), view_->tiltSpeed->value());
   });
@@ -360,7 +361,7 @@ void DevicePanel::refresh() {
   const bool validTilt = !v.tiltSweep->isChecked() || v.tiltMaximum->value() - v.tiltMinimum->value() >= 2;
   v.ptzStart->setEnabled(!offline_ && authorized_ && !v.ptzBlocked && validBounds && validTilt);
   v.ptzStop->setEnabled(!offline_);
-  v.speed->setEnabled(!v.ptzBlocked); v.seconds->setEnabled(!v.ptzBlocked); v.bounds->setEnabled(!v.ptzBlocked);
+  v.speed->setEnabled(!v.ptzBlocked); v.sweepDegrees->setEnabled(!v.ptzBlocked && !v.bounds->isChecked()); v.bounds->setEnabled(!v.ptzBlocked);
   v.minimum->setEnabled(!v.ptzBlocked && v.bounds->isChecked()); v.maximum->setEnabled(!v.ptzBlocked && v.bounds->isChecked());
   v.tiltSweep->setEnabled(!v.ptzBlocked);
   v.tiltMinimum->setEnabled(!v.ptzBlocked && v.tiltSweep->isChecked());
@@ -386,11 +387,21 @@ void DevicePanel::refresh() {
       v.ptz.value("state").toString() == "positioning" ? "正在通过 485 将俯仰调整至摆动范围" :
       v.ptz.value("moving").toBool() ? "正在往返扫掠" : "等待相机 / 处理请求";
   if (ptzFresh) {
-    QString actual = QString("485 · 速度 %1 档 · 单侧 %2 s").arg(v.ptz.value("pan_speed").toInt()).arg(v.ptz.value("sweep_seconds").toDouble());
+    QString actual = QString("485 · 速度 %1 档").arg(v.ptz.value("pan_speed").toInt());
+    if (v.ptz.value("sweep_mode").toString() == "bounds")
+      actual += QString(" · 水平 %1°～%2°").arg(v.ptz.value("pan_min").toDouble()).arg(v.ptz.value("pan_max").toDouble());
+    else if (v.ptz.contains("pan_sweep_degrees"))
+      actual += QString(" · 每侧 %1°").arg(v.ptz.value("pan_sweep_degrees").toDouble());
+    else
+      actual += " · 请重启巡航节点加载转角控制";
     if (v.ptz.value("tilt_enabled").toBool())
       actual += QString("\n俯仰 %1°～%2° · %3 档").arg(v.ptz.value("tilt_min").toDouble())
           .arg(v.ptz.value("tilt_max").toDouble()).arg(v.ptz.value("tilt_speed").toInt());
     ptzText += "\n实际配置：" + actual;
+    if (v.ptz.value("sweep_mode").toString() == "angle" && v.ptz.value("moving").toBool())
+      ptzText += QString("\n本侧已转：%1° / %2°")
+          .arg(v.ptz.value("pan_progress_degrees").toDouble(), 0, 'f', 1)
+          .arg(v.ptz.value("pan_sweep_degrees").toDouble(), 0, 'f', 1);
     v.ptzSummary->setText(actual);
     const auto actualPan = v.ptz.value("pan"), actualTilt = v.ptz.value("tilt");
     if (actualPan.isDouble() && actualTilt.isDouble() && std::isfinite(actualPan.toDouble()) && std::isfinite(actualTilt.toDouble()))

@@ -147,3 +147,33 @@ def test_acknowledged_commands_with_frozen_angles_stop_patrol(sweep, rig):
     wait_for(lambda: not sweep.get_parameter('enabled').value and not sweep._moving, timeout=4.5)
     assert '无变化' in sweep._error
     assert rig.ptz.patrol is None
+
+
+def test_measured_full_revolutions_reverse_both_ways_with_pitch_sweep(sweep, rig):
+    original_move = rig.head.move
+    reversals = []
+    previous_bit, travel = None, 0.
+
+    def moving_head(cmd, pan_speed, tilt_speed):
+        nonlocal previous_bit, travel
+        bit = cmd & 0x06
+        if previous_bit is not None and bit != previous_bit:
+            reversals.append(travel)
+            travel = 0.
+        previous_bit = bit
+        pan, tilt = rig.head.angles
+        pan = (pan + (-12. if bit == 0x04 else 12.)) % 360.
+        tilt = max(-9., min(15., tilt + (1. if cmd & 0x10 else -1.)))
+        rig.head.angles = (pan, tilt)
+        travel += 12.
+        return original_move(cmd, pan_speed, tilt_speed)
+
+    rig.head.move = moving_head
+    start(sweep, rig)
+    wait_for(lambda: len(reversals) >= 2, timeout=20.)
+    assert all(angle >= 360. for angle in reversals[:2])
+    assert sweep._completed_sweeps >= 2
+    assert sweep.get_parameter('enabled').value and not sweep._error
+    assert any(cmd & 0x10 for cmd in rig.head.moves)
+    assert any(cmd & 0x08 for cmd in rig.head.moves)
+    assert not rig.controls and not rig.zoom_sets

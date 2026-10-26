@@ -29,7 +29,7 @@ struct DeviceClient::Impl {
   qint64 ptzBarrierNs = 0;
   QElapsedTimer gasStartup, ptzStartup, ptzAge;
   int speed = 2;
-  double seconds = 20, minimum = -1, maximum = -1;
+  double sweepDegrees = 360, minimum = -1, maximum = -1;
   bool tiltEnabled = true;
   double tiltMinimum = -9, tiltMaximum = 15;
   int tiltSpeed = 1;
@@ -103,7 +103,7 @@ struct DeviceClient::Impl {
     const auto generation = ++ptzGeneration;
     auto request = std::make_shared<Parameters::Request>();
     if (enabled) {
-      for (const auto &parameter : {rclcpp::Parameter("pan_speed", speed), rclcpp::Parameter("sweep_seconds", seconds),
+      for (const auto &parameter : {rclcpp::Parameter("pan_speed", speed), rclcpp::Parameter("pan_sweep_degrees", sweepDegrees),
              rclcpp::Parameter("pan_min", minimum), rclcpp::Parameter("pan_max", maximum),
              rclcpp::Parameter("tilt_enabled", tiltEnabled), rclcpp::Parameter("tilt_min", tiltMinimum),
              rclcpp::Parameter("tilt_max", tiltMaximum), rclcpp::Parameter("tilt_speed", tiltSpeed)})
@@ -189,12 +189,12 @@ void DeviceClient::stopGas() {
   if (i.gasSwitch->service_is_ready()) i.requestGas();
   else if (i.gas->running()) i.gas->stop();
 }
-void DeviceClient::startPtz(int speed, double seconds, double minimum, double maximum,
+void DeviceClient::startPtz(int speed, double sweepDegrees, double minimum, double maximum,
                           bool tiltEnabled, double tiltMinimum, double tiltMaximum, int tiltSpeed) {
   auto &i = *impl_;
   if (i.offline || !i.authorized || i.ptzWanted || i.ptzBusy) return;
   if (i.freshPtz() && i.lastPtzActive) { emit message("云台已经在巡航，请先停止再调整参数"); return; }
-  i.speed = speed; i.seconds = seconds; i.minimum = minimum; i.maximum = maximum;
+  i.speed = speed; i.sweepDegrees = sweepDegrees; i.minimum = minimum; i.maximum = maximum;
   i.tiltEnabled = tiltEnabled; i.tiltMinimum = tiltMinimum; i.tiltMaximum = tiltMaximum; i.tiltSpeed = tiltSpeed;
   i.ptzWanted = i.ptzWaiting = true; i.ptzStartup.restart(); i.setBlocked(true);
   emit cameraRequested();
