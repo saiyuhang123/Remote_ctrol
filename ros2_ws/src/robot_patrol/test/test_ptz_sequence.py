@@ -15,10 +15,13 @@ from rclpy.callback_groups import ReentrantCallbackGroup
 from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node
 from rclpy.parameter import Parameter
+from sensor_msgs.msg import Image
 from hk_camera.srv import ControlPTZ, GetPTZPose, SetPTZPose, CapturePicture
+from ocr_interfaces.srv import RecognizeImage
 from patrol_interfaces.srv import PointShots, PtzInspectionControl
 from robot_patrol.engine import ControlFlags, PatrolEngine
 from robot_patrol.inspection_client import InspectionClient
+from robot_patrol.inspection_prompts import DIGITAL_METER_PROMPT
 from robot_patrol.models import RouteSnapshot
 from robot_patrol.ptz_sequence import DEFAULTS
 from robot_patrol.ptz_shots import shots_json
@@ -42,11 +45,16 @@ def wait_for(predicate, timeout=3.):
 def rig(tmp_path):
     rclpy.init()
     h = NS(events=[], actual=dict(pan=100., tilt=0., zoom=1.), pose=[0., 0., math.radians(2.)],
+        motion_pose=[0., 0., 0.],
         apply_set=True, apply_zoom=True, capture_failures=0, delay_set=False, set_gate=threading.Event(),
         setting=threading.Event(), owner='', renewals=0, moving=False, stop_ok=True,
+        capture_count=0, empty_capture_image=False, vision_ok=True, vision_text=None,
+        delay_recognition=False, recognizing=threading.Event(), recognition_gate=threading.Event(),
+        recognition_finished=threading.Event(),
         block_late_stop=False, stop_gate=threading.Event(), late_stopping=threading.Event(), extra_nodes=[])
     h.set_gate.set()
     h.stop_gate.set()
+    h.recognition_gate.set()
     server, node = Node('fake_shot_devices'), Node('shot_client_fixture')
     group = ReentrantCallbackGroup()
     def get(request, response):
@@ -88,6 +96,25 @@ def rig(tmp_path):
             return response
         Path(request.save_path).write_bytes(b'fake jpeg')
         response.success = True
+        h.capture_count += 1
+        if not h.empty_capture_image:
+            response.image = Image(height=1, width=1, encoding='bgr8', step=3,
+                                   data=bytes([h.capture_count, 0, 0]))
+        if getattr(h, 'on_capture', None):
+            h.on_capture()
+        return response
+    def recognize(request, response):
+        assert h.owner, 'recognition without sweep hold'
+        h.events.append(('recognize', dict(prompt=request.prompt, image=bytes(request.image.data))))
+        h.recognizing.set()
+        if h.delay_recognition:
+            assert h.recognition_gate.wait(3.)
+        response.success = h.vision_ok
+        response.text = h.vision_text if h.vision_text is not None else f'仪表读数：{request.image.data[0]}.20 V'
+        response.model = 'deepseek-fake'
+        response.message = 'OK' if h.vision_ok else 'fake network failure'
+        response.processing_time_ms = 12.5
+        h.recognition_finished.set()
         return response
     def inspection(request, response):
         if request.command == 3:
@@ -101,12 +128,13 @@ def rig(tmp_path):
     for kind, name, callback in [
         (GetPTZPose,'/hk_camera/get_ptz_pose',get), (SetPTZPose,'/hk_camera/set_ptz_pose',set_pose),
         (ControlPTZ,'/hk_camera/control_ptz',stop), (CapturePicture,'/hk_camera/capture',capture),
+        (RecognizeImage,'/vision/recognize_image',recognize),
         (PtzInspectionControl,'/ptz_patrol/inspection_control',inspection)]:
         server.create_service(kind, name, callback, callback_group=group)
     for key, value in dict(inspection_image_dir=str(tmp_path/'images'),inspection_service_timeout_sec=1.,
         inspection_capture_timeout_sec=1.,inspection_recognition_timeout_sec=1.,inspection_preset_settle_sec=0.,
         inspection_preset_service='/hk_camera/preset',inspection_capture_service='/hk_camera/capture',
-        inspection_recognition_service='/vision/recognize_image',inspection_default_prompt='legacy').items():
+        inspection_recognition_service='/vision/recognize_image',inspection_default_prompt=DIGITAL_METER_PROMPT).items():
         node.declare_parameter(key, value)
     for name, value in DEFAULTS.items():
         node.declare_parameter(name, {'arrival_timeout_sec':.4,'poll_sec':.02,'stable_sec':.03,
@@ -118,13 +146,15 @@ def rig(tmp_path):
     h.store.create_run('run1', 'route', h.mapping.map_id, 1, 1, {'steps':[]}, 1, 1, 1)
     h.step = NS(point_id=h.point.point_id, point_name='P', shots=h.point.shots,
         inspection_enabled=True, ptz_preset=0, x=0., y=0., yaw=0., dwell_seconds=0.)
-    h.inspection = InspectionClient(node,h.store,group,pose_provider=lambda:tuple(h.pose))
+    h.inspection = InspectionClient(node,h.store,group,pose_provider=lambda:tuple(h.pose),
+                                   motion_pose_provider=lambda:tuple(h.motion_pose))
     h.executor = MultiThreadedExecutor(num_threads=6)
     for member in (node,server):
         h.executor.add_node(member)
     worker = threading.Thread(target=h.executor.spin,daemon=True)
     worker.start()
-    for client in (h.inspection.sequence.get,h.inspection.sequence.set,h.inspection.sequence.stop,h.inspection.capture,h.inspection.ptz_lease.client):
+    for client in (h.inspection.sequence.get,h.inspection.sequence.set,h.inspection.sequence.stop,
+                   h.inspection.capture,h.inspection.recognize,h.inspection.ptz_lease.client):
         assert client.wait_for_service(timeout_sec=3.)
     h.run = lambda flags=None: h.inspection.run(h.step,'run1',h.mapping.map_id,1,1,flags=flags)
     h.node = node
@@ -133,6 +163,7 @@ def rig(tmp_path):
     finally:
         h.set_gate.set()
         h.stop_gate.set()
+        h.recognition_gate.set()
         h.inspection.finish(False)
         h.executor.shutdown(timeout_sec=4.)
         worker.join(4.)
@@ -142,7 +173,7 @@ def rig(tmp_path):
         h.store.close()
 
 
-def test_two_views_run_through_engine_without_preset_or_recognition(rig):
+def test_two_views_run_through_engine_with_recognition_for_each_captured_image(rig):
     h=rig
     snapshot=RouteSnapshot('route',h.mapping.map_id,'route',1,[h.step])
     engine=PatrolEngine(h.store,snapshot,'run1',1,'owner',FakeDriver(),lambda _:None,min_dispatch_interval=0.,
@@ -153,12 +184,110 @@ def test_two_views_run_through_engine_without_preset_or_recognition(rig):
     assert len(captures)==2
     assert captures[0]==pytest.approx(dict(pan=1.,tilt=-8.,zoom=2.))
     assert captures[1]==pytest.approx(dict(pan=87.,tilt=-5.,zoom=3.))
+    recognitions=[request for kind,request in h.events if kind=='recognize']
+    assert [request['image'] for request in recognitions]==[b'\x01\x00\x00',b'\x02\x00\x00']
+    assert all(request['prompt']==DIGITAL_METER_PROMPT for request in recognitions)
+    assert [kind for kind,_ in h.events if kind in ('capture','recognize')]==[
+        'capture','recognize','capture','recognize']
     results=h.store.list_inspection_results(h.mapping.map_id,'run1')
     assert {r.shot_id for r in results}=={'wide','side'} and all(r.success for r in results)
     for result in results:
         assert result.metadata['robot_pose']['yaw']==pytest.approx(math.radians(2.))
         assert Path(result.image_path).read_bytes()==b'fake jpeg'
+        assert result.model=='deepseek-fake' and result.prompt==DIGITAL_METER_PROMPT
+        assert result.text in ('仪表读数：1.20 V','仪表读数：2.20 V')
+        assert result.metadata['text']==result.text
+        assert result.metadata['recognition']['success']
+        assert result.metadata['recognition']['processing_time_ms']==12.5
     assert len(list(h.inspection.image_dir.rglob('*.json')))==2
+
+
+@pytest.mark.parametrize('prompt',['','   ','只读取面板上的电压和电流，保留原样数字'])
+def test_saved_point_prompt_or_digital_meter_default_reaches_vision_service(rig,prompt):
+    rig.step.shots=[rig.point.shots[0]]
+    rig.step.recognition_prompt=prompt
+    assert rig.run().success
+    expected=prompt.strip() or DIGITAL_METER_PROMPT
+    requests=[request for kind,request in rig.events if kind=='recognize']
+    assert requests[0]['prompt']==expected
+    record=rig.store.list_inspection_results(rig.mapping.map_id,'run1')[0]
+    assert record.prompt==expected and record.metadata['prompt']==expected
+
+
+@pytest.mark.parametrize('failure',['api_failure','empty_text','timeout','empty_image'])
+def test_recognition_failures_preserve_photo_and_diagnostics_and_stop_remaining_views(rig,failure):
+    if failure=='api_failure':
+        rig.vision_ok=False
+    elif failure=='empty_text':
+        rig.vision_text='   '
+    elif failure=='timeout':
+        rig.delay_recognition=True
+        rig.recognition_gate.clear()
+        rig.inspection.recognition_timeout=.15
+    else:
+        rig.empty_capture_image=True
+    result=rig.run()
+    assert not result.success
+    assert result.error_code=={'timeout':'INSPECTION_TIMEOUT','empty_image':'INSPECTION_CAPTURE_FAILED'}.get(
+        failure,'INSPECTION_RECOGNITION_FAILED')
+    assert Path(result.image_path).read_bytes()==b'fake jpeg'
+    records=rig.store.list_inspection_results(rig.mapping.map_id,'run1')
+    assert len(records)==1 and not records[0].success
+    assert records[0].metadata['stop_confirmed']
+    assert not records[0].text
+    if failure=='empty_image':
+        assert not any(kind=='recognize' for kind,_ in rig.events)
+    else:
+        diagnostic=records[0].metadata['recognition']
+        assert not diagnostic['success'] and diagnostic['error_code']==result.error_code
+        assert diagnostic['finished_at_ns']>=diagnostic['started_at_ns']
+    assert sum(kind=='capture' for kind,_ in rig.events)==1
+
+
+@pytest.mark.parametrize('operation',['cancel','pause'])
+def test_pending_recognition_is_interruptible_and_late_text_cannot_overwrite_result(rig,operation):
+    rig.delay_recognition=True
+    rig.recognition_gate.clear()
+    flags,results=ControlFlags(),[]
+    worker=threading.Thread(target=lambda:results.append(rig.run(flags)))
+    worker.start()
+    assert rig.recognizing.wait(2.)
+    getattr(flags,'request_'+operation)()
+    worker.join(.8)
+    assert not worker.is_alive()
+    assert results[0].error_code=={'cancel':'CANCELED','pause':'PAUSED'}[operation]
+    record=rig.store.list_inspection_results(rig.mapping.map_id,'run1')[0]
+    assert not record.success and not record.text and Path(record.image_path).is_file()
+    rig.recognition_gate.set()
+    assert rig.recognition_finished.wait(2.)
+    saved=rig.store.list_inspection_results(rig.mapping.map_id,'run1')
+    assert len(saved)==1 and saved[0].result_id==record.result_id and not saved[0].text
+    assert sum(kind=='capture' for kind,_ in rig.events)==1
+
+
+def test_localization_changes_after_capture_do_not_invalidate_the_saved_image(rig):
+    rig.step.shots=[rig.point.shots[0]]
+    rig.delay_recognition=True
+    rig.recognition_gate.clear()
+    results=[]
+    worker=threading.Thread(target=lambda:results.append(rig.run()))
+    worker.start()
+    assert rig.recognizing.wait(2.)
+    rig.pose[0]+=.2
+    rig.motion_pose[0]+=.1
+    rig.recognition_gate.set()
+    worker.join(2.)
+    assert not worker.is_alive() and results[0].success
+    record=rig.store.list_inspection_results(rig.mapping.map_id,'run1')[0]
+    assert record.metadata['pose_guard']['displacement_m']==0.
+    assert record.metadata['capture_validated_at_ns']<=record.metadata['recognition']['started_at_ns']
+
+
+def test_motion_during_capture_aborts_before_sending_image_to_deepseek(rig):
+    rig.on_capture=lambda:rig.motion_pose.__setitem__(0,.1)
+    result=rig.run()
+    assert not result.success and result.error_code=='INSPECTION_BASE_MOVED'
+    assert not any(kind=='recognize' for kind,_ in rig.events)
 
 
 def test_stable_but_wrong_feedback_never_captures(rig):
@@ -170,7 +299,8 @@ def test_stable_but_wrong_feedback_never_captures(rig):
     assert len(rig.store.list_inspection_results(rig.mapping.map_id,'run1'))==1
 
 
-@pytest.mark.parametrize('failure',['missing_pose','far_pose','stale_map','nan_feedback'])
+@pytest.mark.parametrize('failure',['missing_pose','far_pose','stale_map','nan_feedback',
+                                  'missing_motion_source','missing_motion_pose','nan_motion_pose'])
 def test_invalid_pose_or_feedback_never_produces_normal_photo(rig,failure):
     if failure=='missing_pose':
         rig.inspection.sequence.pose_provider=lambda:None
@@ -178,13 +308,20 @@ def test_invalid_pose_or_feedback_never_produces_normal_photo(rig,failure):
         rig.pose[0]=1.
     elif failure=='stale_map':
         rig.store._conn.execute('UPDATE maps SET revision=2')
+    elif failure=='missing_motion_source':
+        rig.inspection.sequence.motion_pose_provider=None
+    elif failure=='missing_motion_pose':
+        rig.inspection.sequence.motion_pose_provider=lambda:None
+    elif failure=='nan_motion_pose':
+        rig.motion_pose[0]=math.nan
     else:
         rig.actual['zoom']=math.nan
     assert not rig.run().success
     assert not any(kind=='capture' for kind,_ in rig.events)
+    assert not any(kind=='set' for kind,_ in rig.events)
 
 
-@pytest.mark.parametrize('operation',['cancel','pause','move'])
+@pytest.mark.parametrize('operation',['cancel','pause','move','lost_odometry'])
 def test_interrupt_pending_set_stops_now_and_after_late_set_reply(rig,operation):
     h=rig
     h.delay_set=True
@@ -194,12 +331,15 @@ def test_interrupt_pending_set_stops_now_and_after_late_set_reply(rig,operation)
     worker.start()
     assert h.setting.wait(2.)
     if operation=='move':
-        h.pose[0]+=.1
+        h.motion_pose[0]+=.1
+    elif operation=='lost_odometry':
+        h.inspection.sequence.motion_pose_provider=lambda:None
     else:
         getattr(flags,'request_'+operation)()
     worker.join(.8)
     assert not worker.is_alive()
-    assert results[0].error_code=={'cancel':'CANCELED','pause':'PAUSED','move':'INSPECTION_BASE_MOVED'}[operation]
+    assert results[0].error_code=={'cancel':'CANCELED','pause':'PAUSED','move':'INSPECTION_BASE_MOVED',
+                                 'lost_odometry':'INSPECTION_POSE_UNAVAILABLE'}[operation]
     assert not any(kind=='capture' for kind,_ in h.events)
     assert any(kind=='stop' for kind,_ in h.events)
     h.set_gate.set()
@@ -208,17 +348,45 @@ def test_interrupt_pending_set_stops_now_and_after_late_set_reply(rig,operation)
     assert not h.moving
 
 
-def test_vehicle_motion_aborts_without_capture(rig):
+@pytest.mark.parametrize('axis,change',[(0,.06),(1,.06),(2,math.radians(1.2))])
+def test_vehicle_motion_aborts_without_capture(rig,axis,change):
     rig.step.shots=[rig.point.shots[0]]
     rig.inspection.sequence.settings['stable_sec']=.15
     results=[]
     worker=threading.Thread(target=lambda:results.append(rig.run()))
     worker.start()
     assert rig.setting.wait(2.)
-    rig.pose[2]+=math.radians(4.)
+    rig.motion_pose[axis]+=change
     worker.join(2.)
     assert not results[0].success and results[0].error_code=='INSPECTION_BASE_MOVED'
     assert not any(kind=='capture' for kind,_ in rig.events)
+    result=rig.store.list_inspection_results(rig.mapping.map_id,'run1')[0]
+    diagnostic=result.metadata['pose_guard']
+    assert diagnostic['pose_source']=='odom→base_link'
+    assert diagnostic['last_odom_pose'][('x','y','yaw')[axis]]==pytest.approx(change)
+    assert diagnostic['map_displacement_m']==0. and diagnostic['map_rotation_deg']==0.
+    assert diagnostic['translation_limit_m']==.05 and diagnostic['rotation_limit_deg']==1.
+    assert diagnostic['displacement_m']==pytest.approx(.06 if axis<2 else 0.)
+    assert diagnostic['rotation_deg']==pytest.approx(1.2 if axis==2 else 0.)
+    manifest=next(rig.inspection.image_dir.rglob('*.json'))
+    assert json.loads(manifest.read_text())['pose_guard']==diagnostic
+    assert result.metadata['stop_confirmed']
+
+
+def test_map_correction_during_positioning_does_not_count_as_vehicle_motion(rig):
+    rig.step.shots=[rig.point.shots[0]]
+    def correct_map():
+        if rig.setting.is_set():
+            rig.pose[:]=[.1,-.1,math.radians(5.)]
+    rig.on_get=correct_map
+    assert rig.run().success
+    result=rig.store.list_inspection_results(rig.mapping.map_id,'run1')[0]
+    assert result.metadata['target']['pan']==pytest.approx(1.)
+    diagnostic=result.metadata['pose_guard']
+    assert diagnostic['displacement_m']==0. and diagnostic['rotation_deg']==0.
+    assert diagnostic['map_displacement_m']==pytest.approx(math.sqrt(.02))
+    assert diagnostic['map_rotation_deg']==pytest.approx(3.)
+    assert len([event for event in rig.events if event[0]=='capture'])==1
 
 
 def test_angles_arrived_but_zoom_did_not_never_captures(rig):
@@ -305,7 +473,9 @@ def test_point_shot_service_updates_owner_store_and_rejects_busy_writes(rig,tmp_
 
 
 def test_cli_calibration_and_saved_point_action_capture_both_views(rig,tmp_path):
+    from geometry_msgs.msg import TransformStamped
     from rclpy.action import ActionClient
+    from tf2_ros import StaticTransformBroadcaster
     from patrol_interfaces.action import InspectPoint
     from robot_patrol.node import PatrolNode
     from robot_patrol.map_metadata import read_map_binding
@@ -324,6 +494,15 @@ def test_cli_calibration_and_saved_point_action_capture_both_views(rig,tmp_path)
     ])
     fake=FakeNav(execute_duration=.1)
     fake.pose_x=fake.pose_y=-.5
+    # FakeNav publishes map->base_link; a fixed map->odom also exposes the
+    # continuous odometry frame used by the production motion guard.
+    odom_tf=StaticTransformBroadcaster(fake)
+    transform=TransformStamped()
+    transform.header.frame_id='map'
+    transform.child_frame_id='odom'
+    transform.header.stamp=fake.get_clock().now().to_msg()
+    transform.transform.rotation.w=1.
+    odom_tf.sendTransform(transform)
     rig.extra_nodes.extend([owner,fake])
     rig.executor.add_node(owner)
     rig.executor.add_node(fake)
@@ -359,6 +538,7 @@ def test_cli_calibration_and_saved_point_action_capture_both_views(rig,tmp_path)
     records=owner._store.list_inspection_results(mapping.map_id,result.run_id)
     assert len(records)==2 and all(record.success for record in records)
     assert {record.shot_id for record in records}=={'wide','side'}
+    assert all(record.metadata['pose_guard']['baseline']['x']==pytest.approx(-.5) for record in records)
 
 
 def test_changed_device_direction_requires_recalibration_before_any_motion(rig):

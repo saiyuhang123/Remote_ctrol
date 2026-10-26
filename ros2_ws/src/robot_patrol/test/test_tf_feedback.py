@@ -71,7 +71,8 @@ def test_dedicated_tf_survives_blocked_patrol_callbacks_and_still_expires():
 
 
 @pytest.mark.parametrize('age',[.05,2.,-1.])
-def test_pose_age_errors_distinguish_old_tf_from_a_clock_ahead(age):
+@pytest.mark.parametrize('frame',['map','odom'])
+def test_pose_age_errors_distinguish_old_tf_from_a_clock_ahead(age,frame):
     from types import SimpleNamespace as NS
     from rclpy.clock import ClockType
     from rclpy.time import Time
@@ -81,11 +82,16 @@ def test_pose_age_errors_distinguish_old_tf_from_a_clock_ahead(age):
     now=Time(nanoseconds=3_000_000_000,clock_type=ClockType.ROS_TIME)
     tf=TransformStamped();tf.header.stamp=Time(nanoseconds=round((3-age)*1e9)).to_msg()
     tf.transform.rotation.w=1.
-    node=NS(tf_buffer=NS(lookup_transform=lambda *args:tf),
-            get_parameter=lambda key:NS(value={'map_frame':'map','base_frame':'base_link','tf_max_age_sec':1.5}[key]),
+    def lookup(target,source,_time):
+        assert target==frame and source=='base_link'
+        return tf
+    node=NS(tf_buffer=NS(lookup_transform=lookup),
+            get_parameter=lambda key:NS(value={'map_frame':'map','odom_frame':'odom',
+                                              'base_frame':'base_link','tf_max_age_sec':1.5}[key]),
             get_clock=lambda:NS(now=lambda:now))
+    provider=PatrolNode._current_pose if frame=='map' else PatrolNode._current_odom_pose
     if age==.05:
-        assert PatrolNode._current_pose(node)[:3]==(0.,0.,0.)
+        assert provider(node)[:3]==(0.,0.,0.)
     else:
-        with pytest.raises(PatrolError) as error:PatrolNode._current_pose(node)
+        with pytest.raises(PatrolError) as error:provider(node)
         assert ('延迟 2.00 秒' if age>0 else '时间超前 1.00 秒') in error.value.message

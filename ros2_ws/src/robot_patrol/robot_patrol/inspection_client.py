@@ -10,6 +10,7 @@ from typing import Any, Callable
 
 from .models import InspectionResult, PatrolError, new_id, now_ns
 from .ptz_inspection import PtzInspectionLease
+from .inspection_prompts import DIGITAL_METER_PROMPT
 
 
 @dataclass
@@ -29,7 +30,7 @@ class InspectionClient:
     MultiThreadedExecutor while this worker waits on futures.
     """
 
-    def __init__(self, node, store, callback_group=None, pose_provider=None):
+    def __init__(self, node, store, callback_group=None, pose_provider=None, motion_pose_provider=None):
         from hk_camera.srv import CapturePicture, PTZPreset
         from ocr_interfaces.srv import RecognizeImage
 
@@ -57,10 +58,10 @@ class InspectionClient:
         self.preset_settle_sec = float(
             node.get_parameter("inspection_preset_settle_sec").value)
         self.default_prompt = str(
-            node.get_parameter("inspection_default_prompt").value).strip()
+            node.get_parameter("inspection_default_prompt").value).strip() or DIGITAL_METER_PROMPT
         self.ptz_lease = PtzInspectionLease(node, self._call, self._check_control, self.service_timeout, callback_group)
         from .ptz_sequence import PtzShotSequence
-        self.sequence = PtzShotSequence(self, callback_group, pose_provider)
+        self.sequence = PtzShotSequence(self, callback_group, pose_provider, motion_pose_provider)
 
     def _check_control(self, flags):
         if flags is not None and flags.cancel_requested:
@@ -73,6 +74,9 @@ class InspectionClient:
         pose_guard = getattr(self, 'sequence_pose_guard', None)
         if pose_guard is not None:
             pose_guard()
+
+    def _prompt_for(self, step):
+        return str(getattr(step, 'recognition_prompt', '') or '').strip() or self.default_prompt
 
     def _wait(self, seconds, flags):
         deadline = time.monotonic() + max(0.0, seconds)
@@ -127,7 +131,7 @@ class InspectionClient:
         if getattr(step, 'shots', None):
             return self.sequence.run(step, run_id, map_id, loop_index, step_index, status_cb, flags)
         started_at = now_ns()
-        prompt = (getattr(step, "recognition_prompt", "") or self.default_prompt).strip()
+        prompt = self._prompt_for(step)
         image_path = ""
         text = ""
         model = ""

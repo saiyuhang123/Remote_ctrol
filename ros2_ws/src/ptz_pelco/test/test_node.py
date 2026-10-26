@@ -179,7 +179,44 @@ def test_failed_axis_write_is_not_reported_as_success(rig):
     rig.head.fail_axis = CMD_TILT
     r = rig.call('set', SetPTZPose.Request(pan=126., tilt=-34., zoom=2.))
     assert not r.success
-    assert not rig.zoom_sets and not rig.ptz.pos_valid
+    assert rig.zoom_sets == [(0., 0., 2.)] and not rig.ptz.pos_valid
+
+
+def test_unchanged_zoom_is_not_sent_during_absolute_head_move(rig):
+    assert rig.call('get', GetPTZPose.Request()).success
+    r = rig.call('set', SetPTZPose.Request(pan=132., tilt=-33.59, zoom=1.4))
+    assert r.success
+    assert rig.head.axes == [(CMD_PAN, 132.)]
+    assert not rig.zoom_sets
+    assert not rig.ptz.pos_valid
+
+
+def test_sdk_zoom_stopping_head_does_not_interrupt_subsequent_positioning(rig):
+    assert rig.call('get', GetPTZPose.Request()).success
+    moving = []
+    set_axis = rig.head.set_axis
+    def start_head(cmd, value, repeat=2):
+        moving.append(cmd)
+        return set_axis(cmd, value, repeat)
+    rig.head.set_axis = start_head
+    # This camera's SDK zoom command stops any currently moving head axis.
+    def zoom_stops_head(request, response):
+        moving.clear()
+        response.success = True
+        return response
+    rig.server.create_service(SetPTZPose, '/test/zoom_stops_head', zoom_stops_head)
+    rig.ptz.sdk_set = rig.ptz.create_client(SetPTZPose, '/test/zoom_stops_head',
+                                           callback_group=rig.ptz.sdk_group)
+    assert rig.ptz.sdk_set.wait_for_service(timeout_sec=3.)
+    assert rig.call('set', SetPTZPose.Request(pan=132., tilt=-33.59, zoom=2.)).success
+    assert moving == [CMD_PAN]
+
+
+def test_failed_sdk_zoom_does_not_start_head_positioning(rig):
+    rig.sdk_ok = False
+    r = rig.call('set', SetPTZPose.Request(pan=132., tilt=-33.59, zoom=2.))
+    assert not r.success
+    assert not rig.head.axes and not rig.ptz.pos_valid
 
 
 def test_zoom_is_continuous_and_operator_lease_stops_it(rig):

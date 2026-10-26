@@ -250,7 +250,7 @@ void PatrolPage::buildUi() {
   auto *shotsLayout = new QVBoxLayout(shotsGroup);
   shotsLayout->setSpacing(7);
   shotsLayout->addWidget(patrolui::hint(
-      "先保存并选择点位，停车后在相机页调好构图，再记录。一个视角即可，最多两个；到点后补偿朝向并拍照存图。", shotsGroup));
+      "先保存并选择点位，停车后在相机页调好构图，再记录。一个视角即可，最多两个；到点后补偿朝向、拍照并识别数字仪表。", shotsGroup));
   pointShotsCombo_ = new QComboBox(shotsGroup);
   pointShotsCombo_->setObjectName("patrolPointShots");
   shotsLayout->addWidget(pointShotsCombo_);
@@ -282,7 +282,7 @@ void PatrolPage::buildUi() {
   shotButtons->addWidget(pointRefreshShots_);
   shotsLayout->addLayout(shotButtons);
   inspectionLayout->addWidget(shotsGroup);
-  auto *legacyToggle = pageButton("原预置位与在线识别设置", inspectionGroup, "patrolLegacyInspectionToggle");
+  auto *legacyToggle = pageButton("设备预置位（未记录视角时使用）", inspectionGroup, "patrolLegacyInspectionToggle");
   legacyToggle->setCheckable(true);
   inspectionLayout->addWidget(legacyToggle);
   auto *legacy = new QWidget(inspectionGroup);
@@ -310,17 +310,17 @@ void PatrolPage::buildUi() {
   presetButtons->addWidget(pointGotoPtzPreset_);
   legacyLayout->addLayout(presetButtons);
   legacyLayout->addWidget(patrolui::hint(
-      "未记录拍摄视角时，使用设备预置位抓拍并在线识别。已记录视角时，优先按角度补偿拍照存图。", inspectionGroup));
-  legacyLayout->addWidget(new QLabel("识别提示词（留空返回默认5行短结果）", inspectionGroup));
+      "未记录拍摄视角时，使用设备预置位抓拍并识别。已记录视角时，优先按角度补偿拍照并逐张识别。", inspectionGroup));
+  inspectionLayout->addWidget(new QLabel("数字仪表识别提示词（留空使用默认规则）", inspectionGroup));
   pointRecognitionPrompt_ = new QPlainTextEdit(inspectionGroup);
   pointRecognitionPrompt_->setObjectName("patrolPointRecognitionPrompt");
   pointRecognitionPrompt_->setPlaceholderText(
-      "留空默认：设备状态 / 仪表读数 / 指示灯 / 告警文字 / 明显异常；"
-      "可填写本点位专用要求。");
+      "留空自动读取数字仪表，保留小数点、正负号和单位，看不清写无法辨认。"
+      "也可填写本点位专用提示词。");
   pointRecognitionPrompt_->setMaximumHeight(70);
-  legacyLayout->addWidget(pointRecognitionPrompt_);
-  legacyLayout->addWidget(patrolui::hint(
-      "路线执行到该点时会调用 GOTO_PRESET，等待云台稳定后自动抓拍并调用 DeepSeek 识别。", inspectionGroup));
+  inspectionLayout->addWidget(pointRecognitionPrompt_);
+  inspectionLayout->addWidget(patrolui::hint(
+      "到点后自动确认云台稳定、拍照，再使用 DeepSeek 逐张读取数字仪表。照片和识别结果可在执行记录中查看。", inspectionGroup));
   pointFormLayout->addWidget(inspectionGroup);
   saveCurrentPointButton_ = pageButton("保存当前位置为巡检点", pointForm, "patrolSaveCurrentPoint");
   saveCurrentPointButton_->setProperty("primary", true);

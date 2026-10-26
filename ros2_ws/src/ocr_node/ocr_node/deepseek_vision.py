@@ -141,7 +141,7 @@ class DeepSeekVisionNode(Node):
                     if item.get('text'):
                         parts.append(str(item['text']))
             return '\n'.join(parts).strip()
-        return str(content).strip()
+        return ''
 
     def _post_chat(self, image_bytes: bytes, mime: str, prompt: str) -> dict[str, Any]:
         base_url = self._config['base_url'].rstrip('/')
@@ -159,12 +159,15 @@ class DeepSeekVisionNode(Node):
                 {'type': 'text', 'text': prompt},
                 {'type': 'image_url', 'image_url': {
                     'url': f'data:{mime};base64,{image_b64}',
+                    'detail': 'high',
                 }},
             ],
         })
         body = {
             'model': self._config['model'],
             'messages': messages,
+            # Reserve the short OCR output budget for the final readout.
+            'thinking': {'type': 'disabled'},
             'temperature': 0.1,
             'max_tokens': int(self._config['max_tokens']),
         }
@@ -196,6 +199,12 @@ class DeepSeekVisionNode(Node):
             raise RuntimeError('DeepSeek 请求超时') from exc
         if not isinstance(payload, dict):
             raise RuntimeError('DeepSeek 返回格式无效')
+        choices = payload.get('choices') or []
+        finish = choices[0].get('finish_reason') if choices else None
+        if finish == 'length':
+            raise RuntimeError('DeepSeek 输出达到长度上限，结果不完整，请增加 max_tokens')
+        if finish not in (None, 'stop'):
+            raise RuntimeError(f'DeepSeek 未完成识别（{finish}）')
         text = self._extract_text(payload)
         if not text:
             raise RuntimeError('DeepSeek 未返回识别文本')

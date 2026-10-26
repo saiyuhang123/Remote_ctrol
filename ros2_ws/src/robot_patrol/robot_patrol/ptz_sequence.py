@@ -1,4 +1,4 @@
-"""Worker-side, feedback-confirmed low-zoom photography. No direct serial I/O."""
+"""Feedback-confirmed low-zoom photography and per-view online recognition."""
 import json
 import math
 from pathlib import Path
@@ -28,7 +28,7 @@ def path_part(value):
 
 
 class PtzShotSequence:
-    def __init__(self, client, callback_group=None, pose_provider=None):
+    def __init__(self, client, callback_group=None, pose_provider=None, motion_pose_provider=None):
         from hk_camera.srv import ControlPTZ, GetPTZPose, SetPTZPose
         self.client, self.node = client, client.node
         self.Control, self.Get, self.Set = ControlPTZ, GetPTZPose, SetPTZPose
@@ -36,6 +36,7 @@ class PtzShotSequence:
         self.set = self.node.create_client(SetPTZPose, '/hk_camera/set_ptz_pose', callback_group=callback_group)
         self.stop = self.node.create_client(ControlPTZ, '/hk_camera/control_ptz', callback_group=callback_group)
         self.pose_provider = pose_provider
+        self.motion_pose_provider = motion_pose_provider
         self.settings = {}
         for name, default in DEFAULTS.items():
             if not self.node.has_parameter(name):
@@ -125,19 +126,41 @@ class PtzShotSequence:
             if not self._stop_motion():
                 raise PatrolError('INSPECTION_STOP_UNCONFIRMED', '上次云台停止尚未确认')
 
-    def _pose(self, baseline=None):
-        if self.pose_provider is None:
-            raise PatrolError('INSPECTION_POSE_UNAVAILABLE', '没有可用的 map→base_link 位姿来源')
-        value = self.pose_provider()  # Production provider checks the TF stamp.
+    @staticmethod
+    def _read_pose(provider, label):
+        if provider is None:
+            raise PatrolError('INSPECTION_POSE_UNAVAILABLE', f'没有可用的 {label} 位姿来源')
+        value = provider()  # Production providers check the TF stamp.
         if value is None or len(value) < 3 or not all(math.isfinite(v) for v in value[:3]):
-            raise PatrolError('INSPECTION_POSE_UNAVAILABLE', '定位位姿无效，不回退到车体角度')
-        pose = dict(x=float(value[0]), y=float(value[1]), yaw=float(value[2]))
-        if baseline is not None:
-            distance = math.hypot(pose['x']-baseline['x'], pose['y']-baseline['y'])
-            angle = abs(math.degrees(math.remainder(pose['yaw']-baseline['yaw'], 2*math.pi)))
-            if distance > self.settings['base_motion_m'] or angle > self.settings['base_motion_deg']:
-                raise PatrolError('INSPECTION_BASE_MOVED', '拍摄期间车体位姿变化，已中止本次巡检')
-        return pose
+            raise PatrolError('INSPECTION_POSE_UNAVAILABLE', f'{label} 位姿无效，已中止本次巡检')
+        return dict(x=float(value[0]), y=float(value[1]), yaw=float(value[2]))
+
+    def _pose(self):
+        return self._read_pose(self.pose_provider, 'map→base_link')
+
+    @staticmethod
+    def _pose_change(pose, baseline):
+        distance = math.hypot(pose['x']-baseline['x'], pose['y']-baseline['y'])
+        angle = abs(math.degrees(math.remainder(pose['yaw']-baseline['yaw'], 2*math.pi)))
+        return distance, angle
+
+    def _guard_pose(self, baseline, motion_baseline, diagnostic):
+        # Map corrections change map->base_link even while the chassis stands
+        # still. Keep that pose fresh for diagnostics, but check physical motion
+        # against continuous odom->base_link instead.
+        pose = self._pose()
+        motion_pose = self._read_pose(self.motion_pose_provider, 'odom→base_link')
+        distance, angle = self._pose_change(motion_pose, motion_baseline)
+        map_distance, map_angle = self._pose_change(pose, baseline)
+        diagnostic.update(checked_at_ns=now_ns(), last_map_pose=pose, last_odom_pose=motion_pose,
+                          displacement_m=distance, rotation_deg=angle,
+                          map_displacement_m=map_distance, map_rotation_deg=map_angle)
+        if distance > self.settings['base_motion_m'] or angle > self.settings['base_motion_deg']:
+            message = (f'拍摄期间车体位姿变化：里程计位移 {distance:.3f} m / 转角 {angle:.2f}°'
+                       f'（限值 {self.settings["base_motion_m"]:.3f} m / '
+                       f'{self.settings["base_motion_deg"]:.2f}°），已中止本次巡检')
+            self.node.get_logger().warning(message)
+            raise PatrolError('INSPECTION_BASE_MOVED', message)
 
     def _get(self, flags, timeout=None):
         response = self.client._call(self.get, self.Get.Request(), timeout or self.client.service_timeout,
@@ -158,12 +181,11 @@ class PtzShotSequence:
                 abs(actual['tilt']-target['tilt']) <= tolerance and
                 abs(actual['zoom']-target['zoom']) <= self.settings['zoom_tolerance'])
 
-    def _wait_arrival(self, target, baseline, deadline, flags):
+    def _wait_arrival(self, target, deadline, flags):
         stable_since, previous = None, None
         last_error = '尚未到位'
         while time.monotonic() < deadline:
             self.client._check_control(flags)
-            self._pose(baseline)
             try:
                 actual = self._get(flags, min(self.client.service_timeout, max(.05, deadline-time.monotonic())))
             except PatrolError as error:
@@ -192,8 +214,9 @@ class PtzShotSequence:
     def run(self, step, run_id, map_id, loop_index, step_index, status_cb=None, flags=None):
         from .inspection_client import InspectionOutcome
         shots = parse_shots(step.shots)
+        prompt = self.client._prompt_for(step)
         directory = self.client.image_dir / path_part(run_id) / f'loop{loop_index:02d}' / f'step{step_index:03d}_{path_part(step.point_id)}'
-        images = []
+        images, texts, models = [], [], []
         def progress(message):
             if status_cb:
                 status_cb(message=message)
@@ -204,6 +227,7 @@ class PtzShotSequence:
             metadata = dict(schema_version=1, shot=shot.as_dict(), run_id=run_id, map_id=map_id,
                             point_id=step.point_id, loop_index=loop_index, step_index=step_index)
             image_path, motion_sent = '', False
+            text, model = '', ''
             error_code, message = '', ''
             try:
                 self.client._check_control(flags)
@@ -219,11 +243,20 @@ class PtzShotSequence:
                         '多视角拍照需要云台停转占用接口，请先启动 ptz_patrol.py（默认不旋转）')
                 self.client.ptz_lease.acquire(flags)
                 baseline = self._pose()
-                self.client.sequence_pose_guard = lambda: self._pose(baseline)
+                metadata['robot_pose'] = baseline
+                motion_baseline = self._read_pose(self.motion_pose_provider, 'odom→base_link')
+                diagnostic = dict(pose_source='odom→base_link', baseline=motion_baseline,
+                                  translation_limit_m=self.settings['base_motion_m'],
+                                  rotation_limit_deg=self.settings['base_motion_deg'])
+                metadata['pose_guard'] = diagnostic
+                def guard():
+                    self._guard_pose(baseline, motion_baseline, diagnostic)
+                self.client.sequence_pose_guard = guard
+                guard()
                 if math.hypot(baseline['x']-shot.x_cal, baseline['y']-shot.y_cal) > self.settings['position_tolerance_m']:
                     raise PatrolError('INSPECTION_OFF_CALIBRATION', '距标定位置超过允许范围，请重新停靠')
                 target = dict(pan=shot.target_pan(baseline['yaw']), tilt=float(shot.tilt), zoom=float(shot.zoom))
-                metadata.update(robot_pose=baseline, target=target)
+                metadata['target'] = target
                 progress(f'视角 {index}/{len(shots)} {shot.name}：定位至 {target["pan"]:.2f}° / {shot.tilt:.2f}° / {shot.zoom:.1f}×')
                 actual = self._get(flags)
                 deadline = time.monotonic() + self.settings['arrival_timeout_sec']
@@ -232,11 +265,11 @@ class PtzShotSequence:
                 pan_target = dict(pan=target['pan'], tilt=actual['tilt'], zoom=actual['zoom'])
                 motion_sent = True
                 self._set(pan_target, flags)
-                self._wait_arrival(pan_target, baseline, deadline, flags)
+                self._wait_arrival(pan_target, deadline, flags)
                 self._set(target, flags)
-                actual = self._wait_arrival(target, baseline, deadline, flags)
+                actual = self._wait_arrival(target, deadline, flags)
                 self.client._wait(shot.settle_seconds, flags)
-                self._pose(baseline)
+                guard()
                 actual = self._get(flags)
                 if not self._matches(actual, target):
                     raise PatrolError('INSPECTION_PTZ_NOT_ARRIVED', '抓拍前实际位置偏离目标')
@@ -245,7 +278,7 @@ class PtzShotSequence:
                 attempt = new_id('attempt')
                 for capture_index in range(1, 4):
                     self.client._check_control(flags)
-                    self._pose(baseline)
+                    guard()
                     image_path = str(directory / f'{index:02d}_{shot.shot_id}_{attempt}_try{capture_index}.jpg')
                     response = self.client._call(self.client.capture,
                         self.client._CapturePicture.Request(quality=0, save_path=image_path),
@@ -255,16 +288,45 @@ class PtzShotSequence:
                     if capture_index == 3:
                         raise PatrolError('INSPECTION_CAPTURE_FAILED', response.message or '抓拍文件未保存')
                     self.client._wait(.2, flags)
-                self._pose(baseline)
+                guard()
                 self.client._check_control(flags)
                 if not self._matches(self._get(flags), target):
                     raise PatrolError('INSPECTION_PTZ_NOT_ARRIVED', '抓拍期间云台实际位置偏离目标')
                 metadata['image_path'] = image_path
-                message = f'视角 {shot.name}：拍摄完成（仅存图）'
+                if not response.image.width or not response.image.height or not response.image.data:
+                    raise PatrolError('INSPECTION_CAPTURE_FAILED', '抓拍未返回可识别图像，已保留照片')
+                metadata['capture_validated_at_ns'] = now_ns()
+                # Recognition uses the captured frame. Later localization drift
+                # cannot change that frame; keep cancellation and the PTZ lease
+                # active while retiring the exposure-time chassis guard.
+                self.client.sequence_pose_guard = None
+                progress(f'视角 {index}/{len(shots)} {shot.name}：照片已保存，正在使用 DeepSeek 读取数字仪表')
+                recognition = dict(started_at_ns=now_ns(), success=False)
+                metadata['recognition'] = recognition
+                vision = self.client._call(self.client.recognize,
+                    self.client._RecognizeImage.Request(image=response.image, prompt=prompt),
+                    self.client.recognition_timeout, 'DeepSeek 数字仪表识别', flags)
+                model = vision.model
+                text = vision.text.strip() if vision.success else ''
+                elapsed = float(vision.processing_time_ms)
+                recognition.update(model=model, text=text, finished_at_ns=now_ns(),
+                    processing_time_ms=elapsed if math.isfinite(elapsed) and elapsed >= 0 else None)
+                if not vision.success:
+                    raise PatrolError('INSPECTION_RECOGNITION_FAILED', vision.message or 'DeepSeek 识别失败')
+                if not text:
+                    raise PatrolError('INSPECTION_RECOGNITION_FAILED', '识别结果为空')
+                recognition['success'] = True
+                message = f'视角 {shot.name}：识别完成：{text[:300]}'
                 images.append(image_path)
+                texts.append(f'{shot.name}：\n{text}')
+                if model and model not in models:
+                    models.append(model)
             except Exception as error:
                 error_code = error.code if isinstance(error, PatrolError) else 'INSPECTION_FAILED'
                 message = error.message if isinstance(error, PatrolError) else str(error)
+                if 'recognition' in metadata:
+                    metadata['recognition'].update(success=False, error_code=error_code,
+                                                   message=message, finished_at_ns=now_ns())
                 if motion_sent:
                     metadata['stop_confirmed'] = self._stop_motion()
                     if not metadata['stop_confirmed']:
@@ -274,7 +336,7 @@ class PtzShotSequence:
                 message = f'视角 {shot.name}：{message}'
             self.client.sequence_pose_guard = None
             metadata.update(success=not bool(error_code), error_code=error_code, message=message,
-                            image_path=image_path,
+                            image_path=image_path, prompt=prompt, text=text, model=model,
                             last_actual=self.last_actual,
                             feedback_received_at_ns=self.last_feedback_received_at_ns,
                             started_at_ns=started, finished_at_ns=now_ns())
@@ -285,10 +347,12 @@ class PtzShotSequence:
                 result_id=new_id('inspection'), run_id=run_id, map_id=map_id,
                 point_id=step.point_id, point_name=step.point_name, loop_index=loop_index,
                 step_index=step_index, started_at_ns=started, finished_at_ns=metadata['finished_at_ns'],
-                ptz_preset=0, prompt='', image_path=image_path, text='', model='', success=not bool(error_code),
+                ptz_preset=0, prompt=prompt, image_path=image_path, text=text, model=model,
+                success=not bool(error_code),
                 error_code=error_code, message=message, shot_id=shot.shot_id, shot_name=shot.name, metadata=metadata))
             if error_code:
-                return InspectionOutcome(False, message, image_path=image_path, error_code=error_code)
+                return InspectionOutcome(False, message, image_path=image_path, text=text,
+                                         model=model, error_code=error_code)
             progress(message)
-        return InspectionOutcome(True, f'已完成 {len(images)} 个低倍视角拍摄',
-                                 text=f'已保存 {len(images)} 张照片', image_path=images[-1])
+        return InspectionOutcome(True, f'已完成 {len(images)} 个视角拍摄与数字仪表识别',
+                                 text='\n\n'.join(texts), image_path=images[-1], model=', '.join(models))

@@ -60,6 +60,7 @@ from .nav2_client import Nav2Driver, quaternion_to_yaw
 from .store import PatrolStore
 from .recorded_routes.component import RoadComponent
 from .inspection_client import InspectionClient
+from .inspection_prompts import DIGITAL_METER_PROMPT
 from .point_task import point_route
 
 
@@ -150,10 +151,7 @@ class PatrolNode(Node):
         self.declare_parameter('inspection_capture_service', '/hk_camera/capture')
         self.declare_parameter('inspection_recognition_service', '/vision/recognize_image')
         self.declare_parameter(
-            'inspection_default_prompt',
-            '只按以下5行输出，每行都必须保留，没有识别到的内容写“无”；'
-            '不要Markdown、不要编号、不要额外解释、不要描述背景、纸箱、货物或场景，不要推测：\n'
-            '设备状态：\n仪表读数：\n指示灯：\n告警文字：\n明显异常：')
+            'inspection_default_prompt', DIGITAL_METER_PROMPT)
 
         self._callback_group = ReentrantCallbackGroup()
         self._instance_id = "patrol_" + uuid.uuid4().hex
@@ -297,7 +295,8 @@ class PatrolNode(Node):
         self._publish_executor_heartbeat()
         self.roads = RoadComponent(self)
         self._inspection_client = InspectionClient(
-            self, self._store, callback_group=self._callback_group, pose_provider=self._current_pose)
+            self, self._store, callback_group=self._callback_group, pose_provider=self._current_pose,
+            motion_pose_provider=self._current_odom_pose)
 
     def destroy_node(self):
         inspection = getattr(self, '_inspection_client', None)

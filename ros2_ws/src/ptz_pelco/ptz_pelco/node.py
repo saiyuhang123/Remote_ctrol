@@ -482,6 +482,21 @@ class PtzPelcoNode(Node):
         was_valid = self.pos_valid
         # A write acknowledges transmission only; it is never actual feedback.
         self.pos_valid = False
+        # On this IPZoom + RS485 head, even an unchanged SDK zoom target stops
+        # an in-flight absolute head move. Skip unchanged zoom and send any
+        # required lens command BEFORE the head coordinates.
+        if not was_valid or not self._same(zoom, self.zoom):
+            if self.zoom_backend == 'sdk':
+                result = await self._sdk_request(
+                    self.sdk_set, SetPTZPose.Request(pan=0., tilt=0., zoom=zoom))
+                ok = result is not None and result.success
+            else:
+                ok = self.link.set_axis(CMD_ZOOM, zoom)
+            if not ok:
+                response.message = '镜头变倍设置失败：' + (self.last_error or '485 发送失败')
+                self.last_move = time.monotonic()
+                return response
+            sent.append(f'zoom {zoom:.2f}')
         for name, cmd, value, current in (('pan', CMD_PAN, pan, self.pan),
                                           ('tilt', CMD_TILT, tilt, self.tilt)):
             if was_valid and self._same(value, current):
@@ -491,19 +506,12 @@ class PtzPelcoNode(Node):
                 self.last_move = time.monotonic()
                 return response
             sent.append(f'{name} {value:.2f}')
-        if self.zoom_backend == 'sdk':
-            result = await self._sdk_request(self.sdk_set, SetPTZPose.Request(pan=0., tilt=0., zoom=zoom))
-            ok = result is not None and result.success
-        else:
-            ok = self.link.set_axis(CMD_ZOOM, zoom)
-        if not ok:
-            response.message = '镜头变倍设置失败：' + (self.last_error or '485 发送失败')
-            self.last_move = time.monotonic()
-            return response
-        sent.append(f'zoom {zoom:.2f}')
         self.last_move = time.monotonic()
         response.success = True
-        response.message = '目标已下发，需读回确认到位：' + ', '.join(sent)
+        response.message = ('目标已下发，需读回确认到位：' + ', '.join(sent) if sent else
+                            '目标与上次有效读数一致，无需重复下发')
+        if sent:
+            self.get_logger().info('绝对定位下发顺序：' + ', '.join(sent))
         return response
 
     @staticmethod
@@ -903,15 +911,26 @@ def main():
         executor.spin()
     except KeyboardInterrupt:
         pass
+    except Exception:
+        # SIGTERM can invalidate the context while Humble creates a wait set.
+        # Preserve ordinary runtime failures; context teardown is expected.
+        if rclpy.ok():
+            raise
     finally:
-        executor.shutdown()
-        # The camera has its own zoom lease even if ROS is already shut down.
-        # Always stop the external head before releasing its serial port.
-        if node.link.ser is not None:
-            node.link.stop_move()
-        node.link.close()
-        node.destroy_node()
-        rclpy.try_shutdown()
+        try:
+            # SDK futures need executor callbacks, which no longer run after
+            # shutdown starts. An unbounded wait here leaves the driver alive,
+            # advertising dead services and retaining the exclusive 485 port.
+            executor.shutdown(timeout_sec=1.)
+        finally:
+            try:
+                # The camera has its own zoom lease even if ROS is shut down.
+                if node.link.ser is not None:
+                    node.link.stop_move()
+            finally:
+                node.link.close()
+                node.destroy_node()
+                rclpy.try_shutdown()
 
 
 if __name__ == '__main__':
