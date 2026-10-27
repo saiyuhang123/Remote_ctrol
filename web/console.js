@@ -2,6 +2,7 @@
   'use strict';
   const frame = document.getElementById('view');
   const pages = {monitor:'monitor.html', tasks:'tasks.html', records:'records.html'};
+  const viewRevision='records-tabs-20261026-2';
   let socket, session = null, telemetry = null, control = {}, task = {};
   let viewId = '', currentPage = '', reconnectTimer;
   let socketUrl='';
@@ -42,18 +43,27 @@
     if (!task.running && control.mode === 'manual') command({type:'cmd_vel',linear:0,angular:0});
     command({type:'ptz_stop'});
   }
-  function showPage() {
+  function showPage(force=false) {
     const page = location.hash.slice(1) in pages ? location.hash.slice(1) : 'monitor';
-    if (page === currentPage) return;
-    stopInteraction(); viewId = ''; currentPage = page;
-    frame.src = pages[page];
+    if (page === currentPage && !force) return;
+    if (page !== currentPage) stopInteraction();
+    viewId = ''; currentPage = page;
+    frame.src = `${pages[page]}?v=${viewRevision}${force ? '&reload='+Date.now() : ''}`;
     document.querySelectorAll('nav a').forEach(link => {
       link.classList.toggle('active', link.dataset.page === page);
       if (link.dataset.page === page) link.setAttribute('aria-current', 'page');
       else link.removeAttribute('aria-current');
     });
   }
-  addEventListener('hashchange', showPage); showPage();
+  addEventListener('hashchange', () => showPage()); showPage();
+  document.querySelector('nav a[data-page="records"]').addEventListener('click', event => {
+    if (currentPage==='records') {
+      event.preventDefault();
+      // Reload only this read-only view; the outer control socket and its
+      // task heartbeat remain alive.
+      showPage(true);
+    }
+  });
   addEventListener('message', event => {
     if (event.origin !== location.origin || event.source !== frame.contentWindow || !event.data.robotView) return;
     const message = event.data;
