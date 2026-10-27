@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
 
+import array
+import math
+
 import numpy as np
 import open3d as o3d
 
@@ -14,10 +17,16 @@ class MapPublisherNode(Node):
         super().__init__('map_publisher')
         self.declare_parameter('map_file_path', '')
         self.declare_parameter('interval', 5)
+        self.declare_parameter('publish_once', True)
         self.declare_parameter('map_voxel_size', 0.1)
         path = self.get_parameter('map_file_path').value
         interval = self.get_parameter('interval').value
         voxel = self.get_parameter('map_voxel_size').value
+        publish_once = self.get_parameter('publish_once').value
+        if not math.isfinite(voxel) or voxel <= 0:
+            raise ValueError('map_voxel_size must be finite and positive')
+        if not publish_once and (not math.isfinite(interval) or interval <= 0):
+            raise ValueError('interval must be positive when publish_once=false')
 
         self.map_points = None
         if path:
@@ -41,17 +50,27 @@ class MapPublisherNode(Node):
         qos.reliability = ReliabilityPolicy.RELIABLE
         qos.history = HistoryPolicy.KEEP_LAST
         self.pub_map = self.create_publisher(PointCloud2, '/global_map', qos)
-        self.create_timer(interval, self.publish_map)
-        self.get_logger().info(f'Interval for publishing map: {interval} seconds')
+        # Build and serialize the static map once. TRANSIENT_LOCAL retains
+        # this sample for RViz and localization nodes that join or restart later.
+        # Keep this publisher alive; no periodic application-level publish is
+        # required while the map is unchanged.
+        self._map_message = self.build_map_message()
+        self.publish_map()
+        self._publish_timer = None
+        if not publish_once:
+            self._publish_timer = self.create_timer(interval, self.publish_map)
+            self.get_logger().info(f'Cached map republish interval: {interval} seconds')
+        else:
+            self.get_logger().info('Static map published once; retained for late subscribers')
         self.get_logger().info('Map Publisher Node Initialized')
 
-    def publish_map(self):
+    def build_map_message(self):
         if self.map_points is None or len(self.map_points) == 0:
-            self.get_logger().warn('Global map is not loaded; skipping publish')
-            return
-        # 直接用 numpy 连续内存打包，避免 tolist() 逐个 Python 对象转换
+            return None
         cloud = PointCloud2()
-        cloud.header = Header(frame_id='map', stamp=self.get_clock().now().to_msg())
+        # A static map has no acquisition time. Zero requests the latest TF
+        # when an RViz display is enabled long after the map was loaded.
+        cloud.header = Header(frame_id='map')
         cloud.height = 1
         cloud.width = int(self.map_points.shape[0])
         cloud.fields = [
@@ -63,18 +82,28 @@ class MapPublisherNode(Node):
         cloud.point_step = 12
         cloud.row_step = 12 * cloud.width
         cloud.is_dense = True
-        cloud.data = self.map_points.tobytes()
-        self.pub_map.publish(cloud)
+        # array('B') uses the generated ROS message's buffer fast path,
+        # avoiding per-byte Python validation of a large bytes object.
+        cloud.data = array.array('B', self.map_points.tobytes())
+        return cloud
+
+    def publish_map(self):
+        if self._map_message is not None:
+            self.pub_map.publish(self._map_message)
 
 
 def main(args=None):
     rclpy.init(args=args)
-    node = MapPublisherNode()
+    node = None
     try:
+        node = MapPublisherNode()
         rclpy.spin(node)
+    except (KeyboardInterrupt, rclpy.executors.ExternalShutdownException):
+        pass
     finally:
-        node.destroy_node()
-        rclpy.shutdown()
+        if node is not None:
+            node.destroy_node()
+        rclpy.try_shutdown()
 
 
 if __name__ == '__main__':

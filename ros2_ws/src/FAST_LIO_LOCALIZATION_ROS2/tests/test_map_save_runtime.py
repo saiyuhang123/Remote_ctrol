@@ -17,6 +17,7 @@ os.environ["ROS_LOCALHOST_ONLY"] = "1"
 
 import numpy as np
 import rclpy
+from rclpy.qos import QoSProfile, DurabilityPolicy, ReliabilityPolicy
 from sensor_msgs.msg import Imu, PointCloud2, PointField
 from std_srvs.srv import Trigger
 
@@ -39,7 +40,11 @@ class SaveRuntimeTest(unittest.TestCase):
     def test_save_export_stop_and_reload(self):
         with tempfile.TemporaryDirectory(prefix="fastlio-save-runtime-") as directory:
             root = Path(directory)
-            prefix = root / "map"
+            mapping_prefix = root / "map"
+            # The current bringup reserves /map_save for loop-closure output.
+            # This stationary sensor fixture exercises FAST-LIO's raw snapshot;
+            # it cannot generate the moving keyframes required by loop closure.
+            prefix = root / "map_fastlio_raw"
             log = (root / "runtime.log").open("w+")
             processes = []
             rclpy.init(args=[])
@@ -86,7 +91,7 @@ class SaveRuntimeTest(unittest.TestCase):
                 mapping = subprocess.Popen([
                     "ros2", "launch", "chassis_nav2", "mapping.launch.py",
                     "start_sensors:=false", "start_chassis:=false", "enable_control:=false",
-                    "rviz:=false", "pcd_map:=" + str(prefix) + ".pcd"],
+                    "rviz:=false", "pcd_map:=" + str(mapping_prefix) + ".pcd"],
                     stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
                 processes.append(mapping)
 
@@ -101,7 +106,7 @@ class SaveRuntimeTest(unittest.TestCase):
 
                 received = []
                 node.create_subscription(PointCloud2, "/cloud_registered", received.append, 10)
-                service = node.create_client(Trigger, "/map_save")
+                service = node.create_client(Trigger, "/fastlio/raw_map_save")
                 wait_for(lambda: len(received) >= 15 and service.service_is_ready())
                 result = service.call_async(Trigger.Request())
                 wait_for(result.done)
@@ -126,7 +131,9 @@ class SaveRuntimeTest(unittest.TestCase):
                 self.assertEqual(snapshot, [hashlib.sha256(path.read_bytes()).hexdigest() for path in paths])
 
                 maps = []
-                node.create_subscription(PointCloud2, "/global_map", maps.append, 10)
+                map_qos = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL,
+                                     reliability=ReliabilityPolicy.RELIABLE)
+                node.create_subscription(PointCloud2, "/global_map", maps.append, map_qos)
                 publisher = subprocess.Popen([
                     "ros2", "run", "fast_lio_localization", "global_map_publisher.py", "--ros-args",
                     "-p", "map_file_path:=" + str(prefix) + ".pcd", "-p", "interval:=1"],

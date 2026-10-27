@@ -8,6 +8,7 @@ import open3d as o3d
 
 import rclpy
 from rclpy.node import Node
+from rclpy.qos import QoSProfile, DurabilityPolicy, ReliabilityPolicy, HistoryPolicy
 import tf_transformations
 
 from sensor_msgs.msg import PointCloud2, PointField
@@ -78,7 +79,12 @@ class GlobalLocalizationNode(Node):
         # ─── Subscriptions ───────────────────────────────────────
         self.create_subscription(PointCloud2,                  '/cloud_registered', self.cb_save_cur_scan, 1)
         self.create_subscription(Odometry,                    '/Odometry',         self.cb_save_cur_odom,  1)
-        self._map_sub  = self.create_subscription(PointCloud2, '/global_map',               self.cb_init_map,      1)
+        # The static map is published once. Request the retained sample
+        # so startup order and restarting this node do not lose the map.
+        map_qos = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL,
+                             reliability=ReliabilityPolicy.RELIABLE,
+                             history=HistoryPolicy.KEEP_LAST)
+        self._map_sub = self.create_subscription(PointCloud2, '/global_map', self.cb_init_map, map_qos)
         self._init_sub = self.create_subscription(
             PoseWithCovarianceStamped,
             '/initialpose',
