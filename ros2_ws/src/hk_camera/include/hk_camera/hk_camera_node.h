@@ -55,6 +55,7 @@ namespace hk_camera
  *   - auto_stream (bool) : 自动登录后取流, 默认 true
  *   - enable_face_capture (bool): 登录后布防接收人脸抓拍, 默认 true
  *   - face_capture_dir (string): 抓拍图片及坐标保存目录
+ *   - raw_publish_fps (double): 原图发布上限 0～30，默认 8；0 表示不限帧，重启生效
  *   - preview_max_width (int): 预览最大宽度 160～4096，默认 640
  *   - preview_publish_fps (double): 预览帧率 0.5～30，默认 5
  */
@@ -147,6 +148,7 @@ private:
     // ---- 发布器 ----
     rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr     image_pub_;
     rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr     preview_pub_;
+    double raw_publish_fps_ = 8.;
     int preview_max_width_ = 640;
     double preview_publish_fps_ = 5.;
     ImageRateGate raw_gate_, preview_gate_, status_gate_;

@@ -75,10 +75,10 @@ void HKDecoder::captureLoop()
                 break;
             }
 
-            cv::Mat rgb;
-            cv::cvtColor(frame, rgb, cv::COLOR_BGR2RGB);
-            QImage image(rgb.data, rgb.cols, rgb.rows,
-                         static_cast<int>(rgb.step), QImage::Format_RGB888);
+            // Keep OpenCV's native BGR layout through the ROS detection path.
+            // The owned copy is required by consumers using queued Qt signals.
+            QImage image(frame.data, frame.cols, frame.rows,
+                         static_cast<int>(frame.step), QImage::Format_BGR888);
             emit frameDecoded(image.copy());
 
             ++frame_count;

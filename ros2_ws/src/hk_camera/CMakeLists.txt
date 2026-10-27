@@ -113,6 +113,7 @@ set(HK_CAMERA_SRCS
   src/hk_sdk_loader.cpp
   src/face_capture.cpp
   src/image_preview.cpp
+  src/image_message.cpp
 )
 
 set(HK_DECODER_SRCS
@@ -246,5 +247,9 @@ if(BUILD_TESTING)
   ament_add_gtest(test_image_preview test/test_image_preview.cpp src/image_preview.cpp)
   target_include_directories(test_image_preview PRIVATE include)
   target_link_libraries(test_image_preview Qt5::Gui)
+  ament_add_gtest(test_image_message test/test_image_message.cpp src/image_message.cpp src/image_preview.cpp)
+  target_include_directories(test_image_message PRIVATE include)
+  target_link_libraries(test_image_message Qt5::Gui)
+  ament_target_dependencies(test_image_message sensor_msgs std_msgs cv_bridge OpenCV)
 endif()
 ament_package()

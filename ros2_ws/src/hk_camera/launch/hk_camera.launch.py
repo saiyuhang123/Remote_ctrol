@@ -55,6 +55,10 @@ def generate_launch_description():
         'face_capture_dir', default_value=str(Path.home() / 'Remote_ctrol/captures/hk_faces'),
         description='人脸小图、背景图、带框图和坐标 JSON 的保存目录'
     )
+    raw_publish_fps_arg = DeclareLaunchArgument(
+        'raw_publish_fps', default_value='8.0',
+        description='原图发布上限 0..30 fps；0 表示不限帧'
+    )
     enable_gui_arg = DeclareLaunchArgument(
         'enable_gui', default_value='false',
         description='是否启动 Qt GUI (需编译时启用 BUILD_HK_GUI)'
@@ -76,6 +80,7 @@ def generate_launch_description():
             'auto_stream': ParameterValue(LaunchConfiguration('auto_stream'), value_type=bool),
             'enable_face_capture': ParameterValue(LaunchConfiguration('enable_face_capture'), value_type=bool),
             'face_capture_dir': LaunchConfiguration('face_capture_dir'),
+            'raw_publish_fps': ParameterValue(LaunchConfiguration('raw_publish_fps'), value_type=float),
         }],
     )
 
@@ -89,6 +94,7 @@ def generate_launch_description():
         auto_stream_arg,
         enable_face_capture_arg,
         face_capture_dir_arg,
+        raw_publish_fps_arg,
         enable_gui_arg,
         LogInfo(msg=['Starting HKCamera node...']),
         hk_node,

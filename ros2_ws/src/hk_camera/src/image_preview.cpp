@@ -20,6 +20,11 @@ bool ImageRateGate::due(bool has_subscribers, double fps,
     return true;
 }
 
+bool validRawPublishFps(double fps)
+{
+    return std::isfinite(fps) && fps >= 0. && fps <= 30.;
+}
+
 bool validPreviewSettings(int max_width, double fps)
 {
     return max_width >= 160 && max_width <= 4096 &&

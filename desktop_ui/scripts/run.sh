@@ -12,4 +12,5 @@ source /opt/ros/humble/setup.bash
 if [[ -f "$PROJECT_ROOT/ros2_ws/install/setup.bash" ]]; then source "$PROJECT_ROOT/ros2_ws/install/setup.bash"; fi
 set -u
 export ROBOT_PROJECT_ROOT="$PROJECT_ROOT"
+source "$PROJECT_ROOT/config/ros_domain.sh"
 exec "$BUILD_DIR/robot_desktop" --resource-dir "$DESKTOP_ROOT" --project-root "$PROJECT_ROOT" "$@"

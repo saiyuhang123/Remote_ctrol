@@ -1,4 +1,6 @@
 #include "hk_camera/ptz_codec.h"
+#include "hk_camera/image_message.h"
+#include <rcl_interfaces/msg/parameter_descriptor.hpp>
 #include <QTemporaryDir>
 #include <filesystem>
 #include "hk_camera/hk_camera_node.h"
@@ -18,14 +20,10 @@ void publishImage(const rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr& p
                   const QImage& image, const rclcpp::Time& stamp)
 {
     if (image.isNull()) return;
-    QImage rgb = image.convertToFormat(QImage::Format_RGB888);
-    cv::Mat mat(rgb.height(), rgb.width(), CV_8UC3,
-                const_cast<uint8_t*>(rgb.bits()),
-                static_cast<size_t>(rgb.bytesPerLine()));
     auto header = std_msgs::msg::Header();
     header.stamp = stamp;
     header.frame_id = "hk_camera";
-    publisher->publish(*cv_bridge::CvImage(header, "rgb8", mat).toImageMsg());
+    publisher->publish(makeImageMessage(image, header));
 }
 }
 
@@ -104,9 +102,16 @@ void HKCameraNode::loadParameters()
     // 云台控制是否由本节点（SDK）提供。改走 485 时置 false，
     // 由 ptz_pelco 节点提供同名同类型服务。
     declare_parameter("enable_ptz_services", true);
+    rcl_interfaces::msg::ParameterDescriptor raw_rate_descriptor;
+    raw_rate_descriptor.read_only = true;
+    raw_rate_descriptor.description = "Raw image publish limit, 0..30 fps; 0 is unlimited. Restart to change.";
+    declare_parameter("raw_publish_fps", 8., raw_rate_descriptor);
     declare_parameter("preview_max_width", 640);
     declare_parameter("preview_publish_fps", 5.);
 
+    raw_publish_fps_ = get_parameter("raw_publish_fps").as_double();
+    if (!validRawPublishFps(raw_publish_fps_))
+        throw std::invalid_argument("raw_publish_fps must be 0..30 (0 is unlimited)");
     preview_max_width_ = static_cast<int>(get_parameter("preview_max_width").as_int());
     preview_publish_fps_ = get_parameter("preview_publish_fps").as_double();
     if (!validPreviewSettings(preview_max_width_, preview_publish_fps_))
@@ -284,7 +289,7 @@ void HKCameraNode::onDecodedImage(const QImage& image)
     const auto current = std::chrono::steady_clock::now();
     const auto stamp = now();
 
-    if (raw_gate_.due(image_pub_->get_subscription_count() > 0, 0., current))
+    if (raw_gate_.due(image_pub_->get_subscription_count() > 0, raw_publish_fps_, current))
         publishImage(image_pub_, image, stamp);
     if (preview_gate_.due(preview_pub_->get_subscription_count() > 0,
                           preview_publish_fps_, current))

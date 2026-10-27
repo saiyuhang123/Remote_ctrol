@@ -67,3 +67,6 @@ bags/
 
 # 离线建图/回环输出（体积大，不入库）
 offline_outputs/
+
+# Local deployment backups (include binaries and duplicate source snapshots).
+/deployment_logs/

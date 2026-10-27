@@ -26,6 +26,32 @@ TEST(ImageRateGate, PreviewUsesLatestRateAndResetsWithoutSubscribers)
     EXPECT_TRUE(gate.due(true, 5., start + std::chrono::milliseconds(202)));
 }
 
+TEST(ImageRateGate, RawRateIsIndependentOfPreviewAndCanBeUnlimited)
+{
+    ImageRateGate raw, preview;
+    const auto start = Clock::now();
+    EXPECT_TRUE(raw.due(true, 8., start));
+    EXPECT_TRUE(preview.due(true, 5., start));
+    EXPECT_FALSE(raw.due(true, 8., start + std::chrono::milliseconds(124)));
+    EXPECT_TRUE(raw.due(true, 8., start + std::chrono::milliseconds(125)));
+    EXPECT_FALSE(preview.due(true, 5., start + std::chrono::milliseconds(125)));
+    EXPECT_TRUE(preview.due(true, 5., start + std::chrono::milliseconds(200)));
+    EXPECT_TRUE(raw.due(true, 0., start + std::chrono::milliseconds(126)));
+    EXPECT_FALSE(raw.due(false, 8., start + std::chrono::milliseconds(127)));
+    EXPECT_TRUE(raw.due(true, 8., start + std::chrono::milliseconds(128)));
+}
+
+TEST(ImageRateGate, RejectsInvalidRawFrameRates)
+{
+    EXPECT_TRUE(hk_camera::validRawPublishFps(0.));
+    EXPECT_TRUE(hk_camera::validRawPublishFps(8.));
+    EXPECT_TRUE(hk_camera::validRawPublishFps(30.));
+    EXPECT_FALSE(hk_camera::validRawPublishFps(-1.));
+    EXPECT_FALSE(hk_camera::validRawPublishFps(31.));
+    EXPECT_FALSE(hk_camera::validRawPublishFps(std::numeric_limits<double>::infinity()));
+    EXPECT_FALSE(hk_camera::validRawPublishFps(std::numeric_limits<double>::quiet_NaN()));
+}
+
 TEST(ImagePreview, ScalesDownWithoutChangingAspectRatio)
 {
     const QImage source(1280, 720, QImage::Format_RGB888);

@@ -1,5 +1,6 @@
 """Standalone CPU face/person/plate detection with local event records."""
 import json
+import math
 import os
 from pathlib import Path
 import threading
@@ -25,7 +26,7 @@ class DetectorNode(Node):
                         video_source='rtsp://127.0.0.1:8554/cam', enable_person=True,
                         enable_plate=True, enable_face=True, max_inference_hz=4., cpu_threads=2,
                         staging_dir=str(project/'data/vision/staging'), conf_threshold=.45,
-                        track_ttl_sec=2., plate_confirmations=2,
+                        track_ttl_sec=2., plate_confirmations=2, plate_ocr_interval_sec=2.,
                         face_conf_threshold=.8, face_input_width=960, face_capture_interval_sec=2.,
                         plate_conf_threshold=.8, plate_input_width=640)
         for key, value in defaults.items():
@@ -38,6 +39,9 @@ class DetectorNode(Node):
             raise ValueError('cpu_threads must be 1..16')
         if not 1 <= self.get_parameter('plate_confirmations').value <= 10 or self.get_parameter('track_ttl_sec').value <= 0:
             raise ValueError('plate_confirmations must be 1..10 and track_ttl_sec must be positive')
+        plate_ocr_interval = self.get_parameter('plate_ocr_interval_sec').value
+        if not math.isfinite(plate_ocr_interval) or not 0. <= plate_ocr_interval <= 60.:
+            raise ValueError('plate_ocr_interval_sec must be 0..60')
         if not .1 <= self.get_parameter('face_conf_threshold').value <= 1.:
             raise ValueError('face_conf_threshold must be 0.1..1')
         if not 320 <= self.get_parameter('face_input_width').value <= 1920:
@@ -65,7 +69,8 @@ class DetectorNode(Node):
         self.state = dict(component='detector', ready=False, frames=0, events=0,
                           last_error='', input_ready=False, face=False, person=False, plate=False,
                           face_backend='opencv_yunet', person_backend='yolo26n_openvino',
-                          plate_backend='lpd_yunet+hyperlpr3_rec', recognition_mode='host')
+                          plate_backend='lpd_yunet+hyperlpr3_rec', recognition_mode='host',
+                          plate_ocr_calls=0, plate_ocr_skipped=0)
         self.outgoing = []
         self.pub = self.create_publisher(String, '/vision/raw_detections', 100)
         self.status_pub = self.create_publisher(String, '/vision/detector_status', 5)
@@ -116,6 +121,7 @@ class DetectorNode(Node):
         if self.pipeline is None:
             self.pipeline = Pipeline(track_ttl=self.get_parameter('track_ttl_sec').value,
                                      plate_confirmations=self.get_parameter('plate_confirmations').value,
+                                     plate_ocr_interval=self.get_parameter('plate_ocr_interval_sec').value,
                                      face_capture_interval=self.get_parameter('face_capture_interval_sec').value)
         if need_person and self.pipeline.detector is None:
             try:
@@ -240,7 +246,9 @@ class DetectorNode(Node):
                                           face=face and pipeline.face is not None,
                                           person=person and pipeline.detector is not None,
                                           plate=plate and pipeline.plate is not None and pipeline.plate_detector is not None,
-                                          inference_ms=(time.monotonic()-start)*1000)
+                                          inference_ms=(time.monotonic()-start)*1000,
+                                          plate_ocr_calls=pipeline.plate_ocr_calls,
+                                          plate_ocr_skipped=pipeline.plate_ocr_skipped)
                         self.state['last_error'] = '; '.join(self.model_errors)
                         self.state['frames'] += 1
                 except Exception as error:

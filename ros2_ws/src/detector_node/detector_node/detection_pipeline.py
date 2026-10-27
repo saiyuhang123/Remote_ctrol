@@ -1,5 +1,6 @@
 """Independent CPU YuNet / YOLO26n / LPD-YuNet + plate text recognition."""
 import time
+import math
 from itertools import product
 
 import cv2
@@ -215,7 +216,13 @@ class PlateTextCpu:
 class Pipeline:
     """Independent models with anonymous IoU tracks and per-track records."""
     def __init__(self, detector=None, plate=None, track_ttl=2., plate_confirmations=2,
-                 face=None, face_capture_interval=2., plate_detector=None):
+                 face=None, face_capture_interval=2., plate_detector=None,
+                 plate_ocr_interval=2.):
+        if not math.isfinite(plate_ocr_interval) or not 0. <= plate_ocr_interval <= 60.:
+            raise ValueError('plate_ocr_interval must be 0..60 seconds')
+        self.plate_ocr_interval = plate_ocr_interval
+        self.frame_sequence = 0
+        self.plate_ocr_calls = self.plate_ocr_skipped = 0
         self.detector, self.plate, self.plate_detector = detector, plate, plate_detector
         self.face, self.face_capture_interval = face, face_capture_interval
         self.track_ttl, self.plate_confirmations = track_ttl, plate_confirmations
@@ -226,6 +233,7 @@ class Pipeline:
 
     def process(self, frame, person=True, plate=True, now=None, face=False):
         now = time.monotonic() if now is None else now
+        self.frame_sequence += 1
         enabled_classes = ({0} if person else set()) | ({-1} if face else set()) | ({-2} if plate else set())
         self.tracks = {key: tr for key, tr in self.tracks.items()
                        if now-tr['last'] <= self.track_ttl and tr['cls'] in enabled_classes}
@@ -246,7 +254,11 @@ class Pipeline:
                 self.next_id += 1; key = self.next_id
                 self.tracks[key] = dict(cls=cls, person_reported=False, plates=set(), candidate='', confirmations=0)
             available.discard(key)
-            tr = self.tracks[key]; tr.update(box=box, last=now)
+            tr = self.tracks[key]
+            previous_plate_frame = tr.get('plate_frame')
+            tr.update(box=box, last=now)
+            if cls == -2:
+                tr['plate_frame'] = self.frame_sequence
             x1, y1, x2, y2 = map(int, box)
             crop = frame[max(0, y1):max(0, y2), max(0, x1):max(0, x2)]
             if not crop.size:
@@ -264,16 +276,27 @@ class Pipeline:
                     events.append(dict(event_type='person', label='行人', track_id=key,
                                        confidence=score, bbox=box, image=crop.copy()))
             elif self.plate is not None:
+                # Throttle only confirmed, continuously tracked, stable plates.
+                # A missed detection, a box jump, or an uncertain/new reading
+                # restores per-frame OCR until the candidate is confirmed.
+                if (tr.get('plate_confirmed', False) and overlap >= .6 and
+                        previous_plate_frame == self.frame_sequence - 1 and
+                        now - tr['plate_ocr_last'] < self.plate_ocr_interval):
+                    self.plate_ocr_skipped += 1
+                    continue
                 rectified = rectify_plate(frame, corners)
                 if rectified is None:
                     continue
+                self.plate_ocr_calls += 1
                 text, confidence = self.plate(rectified)
+                tr['plate_ocr_last'] = now
                 if len(text) not in (7, 8) or confidence < .7:
-                    tr.update(candidate='', confirmations=0)
+                    tr.update(candidate='', confirmations=0, plate_confirmed=False)
                     continue
                 tr['confirmations'] = tr['confirmations']+1 if tr['candidate'] == text else 1
                 tr['candidate'] = text
-                if text in tr['plates'] or tr['confirmations'] < self.plate_confirmations:
+                tr['plate_confirmed'] = tr['confirmations'] >= self.plate_confirmations
+                if text in tr['plates'] or not tr['plate_confirmed']:
                     continue
                 tr['plates'].add(text)
                 events.append(dict(event_type='vehicle_plate', label=text, plate_text=text,

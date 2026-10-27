@@ -17,6 +17,7 @@ private:
     std::chrono::steady_clock::time_point last_{};
 };
 
+bool validRawPublishFps(double fps);
 bool validPreviewSettings(int max_width, double fps);
 QImage makePreview(const QImage& image, int max_width);
 
