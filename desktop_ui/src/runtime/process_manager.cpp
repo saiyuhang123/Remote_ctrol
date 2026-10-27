@@ -5,6 +5,13 @@
 #include <csignal>
 #include <unistd.h>
 
+namespace {
+QString supervisorPath(const DesktopConfig &config) {
+  const QString installed = config.resourceDir + "/scripts/managed_process.py";
+  return QFileInfo::exists(installed) ? installed : config.projectRoot + "/desktop_ui/scripts/managed_process.py";
+}
+}
+
 void SessionProcess::setupChildProcess() { ::setsid(); }
 ProcessManager::ProcessManager(const DesktopConfig &config, QObject *parent) : QObject(parent), config_(config) {
   process_.setProcessChannelMode(QProcess::MergedChannels);
@@ -30,11 +37,12 @@ ProcessManager::~ProcessManager() {
 bool ProcessManager::running() const { return process_.state() != QProcess::NotRunning; }
 QStringList ProcessManager::environmentArguments(const DesktopConfig &config, const QStringList &arguments) {
   // All user paths/arguments are positional parameters, never shell source text.
-  return QStringList{"-c", "set -e\nsource /opt/ros/humble/setup.bash\nsource \"$1/ros2_ws/install/setup.bash\"\nexport ROBOT_PROJECT_ROOT=\"$1\"\nshift\nexec \"$@\"", "robot-desktop-session", config.projectRoot} + arguments;
+  return QStringList{"-c", "set -e\nsource /opt/ros/humble/setup.bash\nsource \"$1/ros2_ws/install/setup.bash\"\nexport ROBOT_PROJECT_ROOT=\"$1\"\nexport ROBOT_DESKTOP_SESSION_NODES=\"$2\"\nMANAGED_PROCESS=\"$3\"\nshift 3\nexec python3 \"$MANAGED_PROCESS\" -- \"$@\"", "robot-desktop-session", config.projectRoot, config.sessionNodeNames.join(','), supervisorPath(config)} + arguments;
 }
 bool ProcessManager::start(const QStringList &arguments) {
   if (running() || arguments.isEmpty()) return false;
   if (!QFileInfo::exists(config_.projectRoot + "/ros2_ws/install/setup.bash")) { emit output("缺少 ROS2 overlay，请先按原项目方式构建工作空间"); return false; }
+  if (!QFileInfo::exists(supervisorPath(config_))) { emit output("缺少进程监督器 scripts/managed_process.py"); return false; }
   ++generation_;
   stopping_ = false;
   stopRequestedDuringStart_ = false;
@@ -47,8 +55,7 @@ void ProcessManager::stop() {
   if (group_ <= 0) { stopRequestedDuringStart_ = true; return; }
   stopping_ = true;
   const auto group = group_; const auto generation = generation_;
-  // ros2 launch forwards SIGINT to its children. Signalling the entire group
-  // here would interrupt each node twice, including its shutdown map write.
+  // The supervisor forwards one interrupt and reaps the whole process tree.
   ::kill(group, SIGINT);
   QTimer::singleShot(5000, this, [this, group, generation] {
     if (group_ != group || generation_ != generation) return;

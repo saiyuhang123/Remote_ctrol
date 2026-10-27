@@ -12,6 +12,23 @@
 namespace hk_camera
 {
 
+namespace
+{
+void publishImage(const rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr& publisher,
+                  const QImage& image, const rclcpp::Time& stamp)
+{
+    if (image.isNull()) return;
+    QImage rgb = image.convertToFormat(QImage::Format_RGB888);
+    cv::Mat mat(rgb.height(), rgb.width(), CV_8UC3,
+                const_cast<uint8_t*>(rgb.bits()),
+                static_cast<size_t>(rgb.bytesPerLine()));
+    auto header = std_msgs::msg::Header();
+    header.stamp = stamp;
+    header.frame_id = "hk_camera";
+    publisher->publish(*cv_bridge::CvImage(header, "rgb8", mat).toImageMsg());
+}
+}
+
 HKCameraNode::HKCameraNode(const std::string& name)
     : Node(name)
 {
@@ -87,6 +104,13 @@ void HKCameraNode::loadParameters()
     // 云台控制是否由本节点（SDK）提供。改走 485 时置 false，
     // 由 ptz_pelco 节点提供同名同类型服务。
     declare_parameter("enable_ptz_services", true);
+    declare_parameter("preview_max_width", 640);
+    declare_parameter("preview_publish_fps", 5.);
+
+    preview_max_width_ = static_cast<int>(get_parameter("preview_max_width").as_int());
+    preview_publish_fps_ = get_parameter("preview_publish_fps").as_double();
+    if (!validPreviewSettings(preview_max_width_, preview_publish_fps_))
+        throw std::invalid_argument("preview_max_width must be 160..4096; preview_publish_fps must be 0.5..30");
 
     login_info_.ip       = get_parameter("ip").as_string();
     login_info_.port     = static_cast<uint16_t>(get_parameter("port").as_int());
@@ -134,7 +158,9 @@ rcl_interfaces::msg::SetParametersResult HKCameraNode::onParamChange(
 void HKCameraNode::setupPublishers()
 {
     image_pub_  = create_publisher<sensor_msgs::msg::Image>(
-        "/hk_camera/image_raw", 10);
+        "/hk_camera/image_raw", rclcpp::QoS(1).reliable());
+    preview_pub_ = create_publisher<sensor_msgs::msg::Image>(
+        "/hk_camera/image_preview", rclcpp::SensorDataQoS().keep_last(1));
     alarm_pub_  = create_publisher<msg::CameraAlarm>(
         "/hk_camera/alarm", 10);
     status_pub_ = create_publisher<std_msgs::msg::String>(
@@ -255,23 +281,21 @@ void HKCameraNode::connectCameraSignals()
 void HKCameraNode::onDecodedImage(const QImage& image)
 {
     if (image.isNull()) return;
+    const auto current = std::chrono::steady_clock::now();
+    const auto stamp = now();
 
-    // QImage → cv::Mat → sensor_msgs/Image
-    QImage rgb = image.convertToFormat(QImage::Format_RGB888);
-    cv::Mat mat(rgb.height(), rgb.width(), CV_8UC3,
-                const_cast<uint8_t*>(rgb.bits()),
-                static_cast<size_t>(rgb.bytesPerLine()));
+    if (raw_gate_.due(image_pub_->get_subscription_count() > 0, 0., current))
+        publishImage(image_pub_, image, stamp);
+    if (preview_gate_.due(preview_pub_->get_subscription_count() > 0,
+                          preview_publish_fps_, current))
+        publishImage(preview_pub_, makePreview(image, preview_max_width_), stamp);
 
-    auto header = std_msgs::msg::Header();
-    header.stamp = now();
-    header.frame_id = "hk_camera";
-
-    auto img_msg = cv_bridge::CvImage(header, "rgb8", mat).toImageMsg();
-    image_pub_->publish(*img_msg);
-
-    auto status = std_msgs::msg::String();
-    status.data = "streaming_active";
-    status_pub_->publish(status);
+    if (status_gate_.due(true, 1., current))
+    {
+        auto status = std_msgs::msg::String();
+        status.data = "streaming_active";
+        status_pub_->publish(status);
+    }
 }
 
 // ---- 报警回调 → 发布 CameraAlarm ----

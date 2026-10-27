@@ -79,6 +79,7 @@ struct RosAdapter::Impl {
   std::unique_ptr<tf2_ros::Buffer> tf;
   std::unique_ptr<tf2_ros::TransformListener> listener;
   std::vector<rclcpp::SubscriptionBase::SharedPtr> subscriptions;
+  rclcpp::Subscription<sensor_msgs::msg::Image>::SharedPtr imageSubscription;
   rclcpp::Publisher<geometry_msgs::msg::PoseWithCovarianceStamped>::SharedPtr initialPose;
   rclcpp::Publisher<geometry_msgs::msg::PoseStamped>::SharedPtr goalPreview;
   rclcpp::Publisher<geometry_msgs::msg::Twist>::SharedPtr velocity;
@@ -195,12 +196,6 @@ struct RosAdapter::Impl {
       "/capture_done", 10, [this](std_msgs::msg::String::ConstSharedPtr m) { emit owner->message("业务抓拍：" + QString::fromStdString(m->data)); }));
     subscriptions.push_back(node->create_subscription<std_msgs::msg::String>(
       "/tts_status", 10, [this](std_msgs::msg::String::ConstSharedPtr m) { emit owner->message("语音：" + QString::fromStdString(m->data)); }));
-    subscriptions.push_back(node->create_subscription<sensor_msgs::msg::Image>(
-      config.imageTopic.toStdString(), rclcpp::SensorDataQoS().keep_last(1), [this](sensor_msgs::msg::Image::ConstSharedPtr m) {
-        if (nowMs() - imageTime < 100) return;
-        imageTime = nowMs(); auto image = toImage(*m);
-        if (!image.isNull()) { std::lock_guard<std::mutex> lock(imageMutex); latestImage.swap(image); }
-      }));
 #ifdef DESKTOP_HAS_YUNLE_MSGS
     subscriptions.push_back(node->create_subscription<yunle_msgs::msg::Battery>(
       config.batteryTopic.toStdString(), rclcpp::SensorDataQoS(), [this](yunle_msgs::msg::Battery::ConstSharedPtr m) {
@@ -227,6 +222,22 @@ struct RosAdapter::Impl {
     for (auto &entry : cancelPending) entry.second();
     executor.cancel(); if (thread.joinable()) thread.join();
     executor.remove_node(node);
+  }
+  void setCameraPreviewActive(bool active) {
+    if (active) {
+      if (imageSubscription) return;
+      imageSubscription = node->create_subscription<sensor_msgs::msg::Image>(
+        config.previewTopic.toStdString(), rclcpp::SensorDataQoS().keep_last(1),
+        [this](sensor_msgs::msg::Image::ConstSharedPtr m) {
+          if (nowMs() - imageTime < 100) return;
+          imageTime = nowMs(); auto image = toImage(*m);
+          if (!image.isNull()) { std::lock_guard<std::mutex> lock(imageMutex); latestImage.swap(image); }
+        });
+    } else {
+      imageSubscription.reset();
+      std::lock_guard<std::mutex> lock(imageMutex);
+      latestImage = {};
+    }
   }
   void tick() {
     { std::lock_guard<std::mutex> lock(frameMutex); state.frame = frame; }
@@ -427,7 +438,7 @@ QStringList RosAdapter::capabilities() const {
   return list;
 }
 QStringList RosAdapter::conflictingNodes() const {
-  const QStringList names{"controller_server", "planner_server", "bt_navigator", "amcl", "slam_toolbox", "cartographer_node", "fast_lio_mapping", "laser_mapping", "map_server", "twist_mux", "chassis_driver", "jd03_odometry", "ekf_filter_node", "robot_state_publisher", "rslidar_sdk_node", "imuDriverNode", "lio_odometry", "global_localization", "transform_fusion", "pointcloud_to_scan", "cloud_crop_box", "robot_patrol", "patrol_guard"};
+  const auto &names = impl_->config.sessionNodeNames;
   QStringList found;
   for (const auto &name : impl_->node->get_node_names()) {
     const auto qname = QString::fromStdString(name);
@@ -449,6 +460,9 @@ void RosAdapter::captureCamera() {
 #else
   emit requestFinished("camera", false, "构建时未发现 hk_camera 消息包");
 #endif
+}
+void RosAdapter::setCameraPreviewActive(bool active) {
+  impl_->setCameraPreviewActive(active);
 }
 void RosAdapter::setPtz(double pan, double tilt, double zoom) {
 #ifdef DESKTOP_HAS_HK_CAMERA
@@ -509,9 +523,13 @@ bool RosAdapter::ptzNodePresent() const {
 }
 bool RosAdapter::cameraNodePresent() const {
   if (cameraAvailable() || impl_->node->count_publishers(impl_->config.imageTopic.toStdString()) > 0) return true;
+  return cameraNodeCount() > 0;
+}
+int RosAdapter::cameraNodeCount() const {
+  int count = 0;
   for (const auto &name : impl_->node->get_node_names())
-    if (QString::fromStdString(name).section('/', -1) == "hk_camera_node") return true;
-  return false;
+    if (QString::fromStdString(name).section('/', -1) == "hk_camera_node") ++count;
+  return std::max(count, static_cast<int>(impl_->node->count_publishers("/hk_camera/status")));
 }
 void RosAdapter::cameraCommand(const QString &command) {
   if (command != "login" && command != "start_stream" && command != "stop_stream") return;

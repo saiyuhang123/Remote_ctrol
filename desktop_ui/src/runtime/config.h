@@ -1,11 +1,13 @@
 #pragma once
 #include <QJsonObject>
 #include <QString>
+#include <QStringList>
 #include <QVector>
 
 struct DesktopConfig {
   QString resourceDir, projectRoot;
-  QString backendUrl, defaultProfile, baseFrame, odomTopic, imageTopic, batteryTopic;
+  QString backendUrl, defaultProfile, baseFrame, odomTopic, imageTopic, previewTopic, batteryTopic;
+  QStringList sessionNodeNames;
   QString cameraParamsFile;
   QString ptzParamsFile;   // 云台 485 节点参数（ptz_pelco）
   double maxLinear = .3, maxAngular = .5;

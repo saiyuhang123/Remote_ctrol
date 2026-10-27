@@ -62,18 +62,57 @@ def redact(message):
     return re.sub(r'(rtsps?://)[^\s/]*@', r'\1[redacted]@', message)
 
 
-def transcode_command(timeout_option):
-    # The camera may provide H.265. Browser output is always H.264 without
-    # B-frames; FFmpeg reads a local relay so credentials never enter its argv.
+def video_settings(environment):
+    try:
+        max_width = int(environment.get('ROBOT_VIDEO_MAX_WIDTH', '1280'))
+        fps = int(environment.get('ROBOT_VIDEO_FPS', '15'))
+    except (TypeError, ValueError):
+        raise ValueError('ROBOT_VIDEO_MAX_WIDTH 和 ROBOT_VIDEO_FPS 必须是整数') from None
+    if not 320 <= max_width <= 3840 or max_width % 2 or not 1 <= fps <= 30:
+        raise ValueError('视频最大宽度须为 320～3840 的偶数，帧率须为 1～30')
+    return max_width, fps
+
+
+def remux_command(timeout_option):
+    return ['ffmpeg', '-hide_banner', '-loglevel', 'warning', '-nostdin',
+            '-rtsp_transport', 'tcp', timeout_option, '5000000',
+            '-allowed_media_types', 'video', '-i', 'rtsp://127.0.0.1:8554/camera_source', '-map', '0:v:0',
+            '-c:v', 'copy', '-an', '-f', 'rtsp', '-rtsp_transport', 'tcp',
+            'rtsp://127.0.0.1:8554/cam']
+
+
+def transcode_command(timeout_option, max_width=1280, fps=15):
+    # H.265 and other browser-incompatible sources are always output as H.264
+    # without B-frames; the local relay keeps credentials out of FFmpeg argv.
     return ['ffmpeg', '-hide_banner', '-loglevel', 'warning', '-nostdin',
             '-rtsp_transport', 'tcp', timeout_option, '5000000', '-threads', '2',
             '-allowed_media_types', 'video', '-i', 'rtsp://127.0.0.1:8554/camera_source', '-map', '0:v:0',
-            '-filter_threads', '1', '-vf', "scale='min(1280,iw)':-2,fps=15",
+            '-filter_threads', '1', '-vf', f"scale='min({max_width},iw)':-2,fps={fps}",
             '-c:v', 'libx264', '-threads', '2', '-preset', 'ultrafast',
             '-tune', 'zerolatency', '-profile:v', 'baseline', '-pix_fmt', 'yuv420p',
-            '-bf', '0', '-g', '30', '-keyint_min', '30', '-sc_threshold', '0',
+            '-bf', '0', '-g', str(fps*2), '-keyint_min', str(fps*2), '-sc_threshold', '0',
             '-b:v', '1500k', '-maxrate', '1500k', '-bufsize', '1500k', '-an',
             '-f', 'rtsp', '-rtsp_transport', 'tcp', 'rtsp://127.0.0.1:8554/cam']
+
+
+def probe_video_codec(timeout_option):
+    command = ['ffprobe', '-v', 'error', '-rtsp_transport', 'tcp', timeout_option, '5000000',
+               '-allowed_media_types', 'video', '-select_streams', 'v:0',
+               '-show_entries', 'stream=codec_name', '-of', 'default=noprint_wrappers=1:nokey=1',
+               'rtsp://127.0.0.1:8554/camera_source']
+    result = subprocess.run(command, capture_output=True, text=True, timeout=20)
+    if result.returncode:
+        raise ValueError(redact(result.stderr.strip())[:500] or 'ffprobe 无法读取视频')
+    codec = result.stdout.strip().lower()
+    if not re.fullmatch(r'[a-z0-9_]+', codec):
+        raise ValueError('ffprobe 未返回有效视频编码')
+    return codec
+
+
+def command_for_codec(timeout_option, codec, max_width=1280, fps=15):
+    if codec == 'h264':
+        return remux_command(timeout_option)
+    return transcode_command(timeout_option, max_width, fps)
 
 
 def listening(port):
@@ -117,10 +156,10 @@ def main():
                 if media.poll() is not None or time.monotonic()>=until:
                     raise ValueError('网页视频服务启动失败，请查看视频日志')
             if source:
+                max_width, fps = video_settings(os.environ)
                 help_result = subprocess.run(['ffmpeg', '-hide_banner', '-h', 'demuxer=rtsp'],
                                              capture_output=True, text=True, timeout=5)
                 timeout_option = '-stimeout' if '-stimeout ' in help_result.stdout else '-timeout'
-                command = transcode_command(timeout_option)
             else:
                 command = ['bash', str(project_dir/'scripts/push_camera.sh')]
             encoder = None
@@ -131,7 +170,18 @@ def main():
                         print('相机视频中断，正在重新连接', flush=True)
                         if stopped.wait(2):
                             break
-                    encoder = launch(command, '视频转码')
+                    label = '视频转码'
+                    if source:
+                        try:
+                            codec = probe_video_codec(timeout_option)
+                            command = command_for_codec(timeout_option, codec, max_width, fps)
+                            if codec == 'h264':
+                                label = '视频转发'
+                            print(f'网页视频源编码：{codec}；'+('无损转发' if codec == 'h264' else '兼容转码'), flush=True)
+                        except (OSError, ValueError, subprocess.TimeoutExpired) as error:
+                            command = transcode_command(timeout_option, max_width, fps)
+                            print('视频编码探测失败，改用软件转码：'+redact(str(error)), flush=True)
+                    encoder = launch(command, label)
                 stopped.wait(1)
             return 0 if stopped.is_set() else 1
     except yaml.YAMLError:

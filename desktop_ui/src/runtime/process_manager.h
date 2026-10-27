@@ -9,7 +9,7 @@ protected:
   void setupChildProcess() override;
 };
 
-// Starts only explicit local sessions. Owns only its own process group.
+// Supervises each session tree and replaces only matching local instances.
 class ProcessManager : public QObject {
   Q_OBJECT
 public:

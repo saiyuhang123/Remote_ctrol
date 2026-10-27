@@ -66,7 +66,7 @@ struct CameraFixture {
         else { ++jogs; direction = q->command; }
         r->success = true;
       }));
-    image = node->create_publisher<sensor_msgs::msg::Image>("/hk_camera/image_raw", rclcpp::SensorDataQoS());
+    image = node->create_publisher<sensor_msgs::msg::Image>("/hk_camera/image_preview", rclcpp::SensorDataQoS());
     timer = node->create_wall_timer(std::chrono::milliseconds(50), [this] {
       if (!streaming) return;
       sensor_msgs::msg::Image m; m.width = 160; m.height = 90; m.step = 480; m.encoding = "bgr8";
@@ -206,6 +206,24 @@ private slots:
     QTest::mousePress(left, Qt::LeftButton); QTRY_COMPARE(fixture.direction.load(), 23);
     workspace.hide(); QTRY_COMPARE(fixture.direction.load(), 0);
     QTest::mouseRelease(left, Qt::LeftButton);
+  }
+  void previewPausesWhenHiddenWithoutStoppingCamera() {
+    CameraFixture fixture; RosAdapter ros(config()); QTabWidget workspace;
+    CameraPanel panel(config(), &ros, false);
+    workspace.addTab(&panel, "相机"); workspace.addTab(new QWidget, "其他");
+    workspace.resize(430, 750); workspace.show();
+    QTRY_COMPARE(fixture.node->count_subscribers("/hk_camera/image_preview"), 1UL);
+    auto *connect = panel.findChild<QPushButton *>("cameraConnect");
+    QTRY_VERIFY(connect->isEnabled()); QTest::mouseClick(connect, Qt::LeftButton);
+    auto *preview = panel.findChild<QLabel *>("cameraPreview");
+    QTRY_VERIFY(!preview->pixmap(Qt::ReturnByValue).isNull());
+    workspace.setCurrentIndex(1);
+    QTRY_COMPARE(fixture.node->count_subscribers("/hk_camera/image_preview"), 0UL);
+    QVERIFY(fixture.streaming.load()); QCOMPARE(fixture.stop.load(), 0);
+    workspace.setCurrentIndex(0);
+    QTRY_COMPARE(fixture.node->count_subscribers("/hk_camera/image_preview"), 1UL);
+    QTRY_VERIFY(!preview->pixmap(Qt::ReturnByValue).isNull());
+    QVERIFY(fixture.streaming.load()); QCOMPARE(fixture.stop.load(), 0);
   }
   void liveCameraPreview() {
     if (!qEnvironmentVariableIsSet("DESKTOP_CAMERA_LIVE_TEST")) QSKIP("Explicit opt-in required for physical camera read-only preview");

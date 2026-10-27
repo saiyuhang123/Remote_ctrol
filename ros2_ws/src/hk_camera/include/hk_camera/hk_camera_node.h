@@ -12,6 +12,7 @@
 
 #include "hk_camera/hk_camera.h"
 #include "hk_camera/hk_decoder.h"
+#include "hk_camera/image_preview.h"
 #include "hk_camera/msg/camera_alarm.hpp"
 #include "hk_camera/msg/face_capture.hpp"
 #include "hk_camera/srv/capture_picture.hpp"
@@ -27,7 +28,8 @@ namespace hk_camera
  * @brief ROS2 节点 —— 海康相机驱动
  *
  * Pub:
- *   - /hk_camera/image_raw    (sensor_msgs/Image)  视频帧
+ *   - /hk_camera/image_raw    (sensor_msgs/Image)  原始视频帧，有订阅者时发布
+ *   - /hk_camera/image_preview (sensor_msgs/Image)  限分辨率、限帧率预览
  *   - /hk_camera/alarm         (hk_camera/CameraAlarm) 报警事件
  *   - /hk_camera/face_capture  (hk_camera/FaceCapture) 人脸坐标和图片路径
  *   - /hk_camera/face_image    (sensor_msgs/Image) 带框场景图
@@ -53,6 +55,8 @@ namespace hk_camera
  *   - auto_stream (bool) : 自动登录后取流, 默认 true
  *   - enable_face_capture (bool): 登录后布防接收人脸抓拍, 默认 true
  *   - face_capture_dir (string): 抓拍图片及坐标保存目录
+ *   - preview_max_width (int): 预览最大宽度 160～4096，默认 640
+ *   - preview_publish_fps (double): 预览帧率 0.5～30，默认 5
  */
 class HKCameraNode : public rclcpp::Node
 {
@@ -142,6 +146,10 @@ private:
 
     // ---- 发布器 ----
     rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr     image_pub_;
+    rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr     preview_pub_;
+    int preview_max_width_ = 640;
+    double preview_publish_fps_ = 5.;
+    ImageRateGate raw_gate_, preview_gate_, status_gate_;
     rclcpp::Publisher<msg::CameraAlarm>::SharedPtr            alarm_pub_;
     rclcpp::Publisher<msg::FaceCapture>::SharedPtr            face_pub_;
     rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr      face_image_pub_;

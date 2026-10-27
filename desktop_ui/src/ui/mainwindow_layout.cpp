@@ -524,7 +524,7 @@ void MainWindow::refreshStatusSummary() {
   if (!modeBadge_) return;
   modeBadge_->setText(offline_ ? "离线预览" : allowed() ? "操作已启用" : "观察模式");
   connection_->setText(offline_ ? "隔离环境 · 不连接实车" : process_->running() ? "本地 ROS2 · 本界面管理会话" : "本地 ROS2 · 连接已有系统");
-  sessionHint_->setText(process_->running() ? "本界面会话运行中；停止只影响本次流程。" : "本地 ROS2 直连，无需网关。外部会话的算法来源需自行确认。");
+  sessionHint_->setText(process_->running() ? "本界面会话运行中；停止只结束本次导航进程树。" : "本地 ROS2 直连。启动新流程会替换本机旧标准会话；仍有冲突时拒绝启动。");
   const bool speedValid = state_.speedValid && std::isfinite(state_.speed) && std::isfinite(state_.yawRate);
   speedValue_->setText(speedValid ? QString::number(state_.speed, 'f', 2) + " m/s" : "— m/s");
   velocity_->setText(speedValid ? QString("ω %1 rad/s").arg(state_.yawRate, 0, 'f', 2) : "ω — rad/s");

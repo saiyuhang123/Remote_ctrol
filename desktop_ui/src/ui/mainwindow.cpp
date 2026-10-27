@@ -335,7 +335,12 @@ void MainWindow::startSession() {
     if (!pcd.isFile() || pcd.size() == 0) { log("无法启动 FAST-LIO 定位导航：PCD 地图不存在或为空：" + pcd.filePath() + "；请先完成建图保存，或选择配套的有效地图"); return; }
   }
   const auto conflicts = ros_->conflictingNodes();
-  if (!conflicts.isEmpty()) { log("已有机器人管线，请使用连接模式；如需重启，先从原启动入口停止：" + conflicts.join(", ")); return; }
+  if (!conflicts.isEmpty()) {
+    controller_->stopManual();
+    cancelPatrolRun(QStringLiteral("启动新流程并替换旧会话"));
+    controller_->emergencyStop();
+    log("检测到已有机器人管线，已请求取消任务并保持急停，随后结束旧本地会话：" + conflicts.join(", "));
+  }
   const bool enablePatrol = patrolInterlock_ && patrolInterlock_->isChecked();
   const QStringList args = ProcessManager::launchArguments(config_, profile(), prefix, sensors_->isChecked(), chassis_->isChecked(), bridge_->isChecked(), odom_->currentText(), navigationYaml, enablePatrol);
   log("启动本机会话：" + args.join(' '));

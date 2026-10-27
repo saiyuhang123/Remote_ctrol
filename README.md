@@ -154,13 +154,13 @@ cd ~/Remote_ctrol
 bash scripts/start_robot_monitor.sh
 ```
 
-默认开启音频播放器；安装了 `bin/mediamtx` 时自动开启网页视频和独立抓拍，缺少二进制时保留其他网页功能。视频默认复用海康相机 YAML 中的地址、通道和登录信息，统一转为无音轨的 H.264；相机断流时自动重连。已有独立播放器时可设 `ENABLE_AUDIO=0`，已有视频服务时可设 `ENABLE_VIDEO=0`。使用 UVC 摄像头并启用检测时：
+默认开启音频播放器；安装了 `bin/mediamtx` 时自动开启网页视频和独立抓拍，缺少二进制时保留其他网页功能。视频默认复用海康相机 YAML 中的地址、通道和登录信息；H.264 源直接无损转发，H.265 等浏览器不兼容的源转为无音轨 H.264。相机断流后自动重连并重新确认编码。已有独立播放器时可设 `ENABLE_AUDIO=0`，已有视频服务时可设 `ENABLE_VIDEO=0`。使用 UVC 摄像头并启用检测时：
 
 ```bash
 ROBOT_VIDEO_INPUT=uvc ENABLE_DETECTOR=1 bash scripts/start_robot_monitor.sh
 ```
 
-相机配置可通过 `ROBOT_CAMERA_CONFIG` 指定其他 YAML；`CAMERA_RTSP` 可覆盖实际视频源，`ROBOT_VIDEO_STREAM` 可选择海康码流（1 主码流、2 子码流）。相机 H.265 会转码为 H.264，无需修改相机设备编码。如果视频流由其他进程提供，可设 `ENABLE_VIDEO=0`，通过 `VIDEO_SOURCE`、`ENABLE_CAPTURE=1`、`ENABLE_DETECTOR=1` 使用该视频流。网页开启前检查 `/api/video/status`，服务未启动或没有相机画面时显示明确提示。
+相机配置可通过 `ROBOT_CAMERA_CONFIG` 指定其他 YAML；`CAMERA_RTSP` 可覆盖实际视频源，`ROBOT_VIDEO_STREAM` 可选择海康码流（1 主码流、2 子码流）。兼容转码默认最大宽度 1280、15 帧/秒，可用 `ROBOT_VIDEO_MAX_WIDTH`（320～3840 的偶数）和 `ROBOT_VIDEO_FPS`（1～30）调整；H.264 无损转发保持源分辨率和帧率。如果视频流由其他进程提供，可设 `ENABLE_VIDEO=0`，通过 `VIDEO_SOURCE`、`ENABLE_CAPTURE=1`、`ENABLE_DETECTOR=1` 使用该视频流。网页开启前检查 `/api/video/status`，服务未启动或没有相机画面时显示明确提示。
 
 `scripts/start_m1.sh` 保留为真实 UVC 摄像头 + 静态遥控页入口，没有业务 API。摄像头失败会报错；两个启动入口均已去掉测试视频回退。
 

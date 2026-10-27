@@ -23,6 +23,6 @@ backend:
 
 video:
   stream_name: cam     # MediaMTX 流名，推流与拉流共用
-  # 编码器按平台选择：jetson -> nvv4l2h264enc，x64 -> h264_vaapi，兜底 libx264
-  # 推流脚本目前使用 libx264 软编码；硬件编码器需按实际平台接入
+  # UVC 推流脚本使用 libx264；硬件编码器需按实际平台接入
+  # 海康网页链路由 start_web_video.py 按源编码选择无损转发或软件转码
   encoder: libx264

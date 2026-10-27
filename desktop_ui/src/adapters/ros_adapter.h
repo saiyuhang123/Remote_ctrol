@@ -39,6 +39,7 @@ public:
   void captureBusiness();
   void speak(const QString &text);
   void captureCamera();
+  void setCameraPreviewActive(bool active);
   void setPtz(double pan, double tilt, double zoom);
   void setPtzPreset(int action, int presetNo);
   bool cameraAvailable() const;
@@ -46,6 +47,7 @@ public:
   bool ptzNodePresent() const;
   bool ptzPresetAvailable() const;
   bool cameraNodePresent() const;
+  int cameraNodeCount() const;
   void cameraCommand(const QString &command);
   void readCameraPose();
   void jogCamera(int command, int speed, bool stop);

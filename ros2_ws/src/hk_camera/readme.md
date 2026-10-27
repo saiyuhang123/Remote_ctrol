@@ -37,13 +37,14 @@ source /home/jkbot/Remote_ctrol/ros2_ws/install/setup.bash
 ros2 launch hk_camera hk_camera.launch.py
 ```
 
-Launch 默认自动登录并取流。图像发布到 `/hk_camera/image_raw`，类型为
-`sensor_msgs/msg/Image`，编码为 `rgb8`，坐标系名称为 `hk_camera`。
+Launch 默认自动登录并取流。原始图像发布到 `/hk_camera/image_raw`，类型为
+`sensor_msgs/msg/Image`，编码为 `rgb8`，坐标系名称为 `hk_camera`；只有存在订阅者时才转换和发布原图。`/hk_camera/image_preview` 提供独立的轻量预览，默认最大宽度 640、5 帧/秒，可通过 `preview_max_width`、`preview_publish_fps` 节点参数调整。两个话题都使用最新帧队列，预览不会改变原始图像、SDK 抓拍或 DeepSeek 巡检输入。
 
-在另一个终端加载同一环境后查看：
+在另一个终端加载同一环境后查看原始图像或预览：
 
 ```bash
 ros2 run rqt_image_view rqt_image_view /hk_camera/image_raw
+ros2 run rqt_image_view rqt_image_view /hk_camera/image_preview
 ```
 
 GUI 可单独启动：`ros2 run hk_camera hk_camera_gui`。

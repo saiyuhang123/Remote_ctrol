@@ -4,8 +4,16 @@
   "base_frame": "base_link",
   "odom_topic": "/odom",
   "image_topic": "/hk_camera/image_raw",
+  "preview_topic": "/hk_camera/image_preview",
   "camera_params_file": "ros2_ws/install/hk_camera/share/hk_camera/config/hk_camera_params.yaml",
   "battery_topic": "/battery_status",
+  "session_node_names": [
+    "controller_server", "planner_server", "bt_navigator", "amcl", "slam_toolbox", "cartographer_node",
+    "fast_lio_mapping", "fastlio_mapping", "laser_mapping", "map_server", "twist_mux", "chassis_driver",
+    "jd03_odometry", "ekf_filter_node", "robot_state_publisher", "rslidar_sdk_node", "imuDriverNode",
+    "lio_odometry", "global_localization", "global_map_publisher", "transform_fusion", "pointcloud_to_scan",
+    "cloud_crop_box", "robot_patrol", "patrol_guard"
+  ],
   "max_linear": 0.3,
   "max_angular": 0.5,
   "feedback_timeout_ms": 1500,

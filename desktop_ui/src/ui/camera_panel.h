@@ -27,10 +27,12 @@ signals:
   void patrolStopRequested();
 protected:
   void resizeEvent(QResizeEvent *event) override;
+  void showEvent(QShowEvent *event) override;
   void hideEvent(QHideEvent *event) override;
   bool eventFilter(QObject *object, QEvent *event) override;
 private:
   void refresh();
+  void syncPreviewSubscription();
   void renderFrame();
   void startCamera();
   void connectPreview();
@@ -43,6 +45,7 @@ private:
   ProcessManager *process_;
   ProcessManager *ptzProcess_;   // 云台 485 节点（ptz_pelco），随相机一起起停
   bool offline_, controlEnabled_ = false, waitingForNode_ = false, poseRead_ = false;
+  bool previewActive_ = false;
   QString pending_, detail_;
   QElapsedTimer lastFrame_, startup_, rateWindow_, poseSettle_;
   int rateFrames_ = 0;

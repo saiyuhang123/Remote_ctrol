@@ -118,6 +118,15 @@ private slots:
     QVERIFY2(found, qPrintable(conflicts.join(',')));
   }
 
+  void duplicateCameraNodesAreCounted() {
+    auto first = std::make_shared<rclcpp::Node>("hk_camera_node");
+    auto second = std::make_shared<rclcpp::Node>("hk_camera_node");
+    RosAdapter adapter(config());
+    QTRY_COMPARE_WITH_TIMEOUT(adapter.cameraNodeCount(), 2, 3000);
+    QVERIFY(config().sessionNodeNames.contains("fastlio_mapping"));
+    QVERIFY(config().sessionNodeNames.contains("global_map_publisher"));
+  }
+
   void externalPatrolInterlockIsDetectedFromBackendTopics() {
     FixtureExecutor fixture;
     auto lock = fixture.node->create_publisher<std_msgs::msg::Bool>("/patrol/stop_lock", 10);

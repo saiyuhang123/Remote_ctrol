@@ -137,7 +137,7 @@ CameraPanel::CameraPanel(const DesktopConfig &config, RosAdapter *ros, bool offl
     emit message(detail_); refresh();
   });
   connect(ros_, &RosAdapter::image, this, [this](const QImage &image) {
-    if (image.isNull()) return;
+    if (!previewActive_ || image.isNull()) return;
     frame_ = image; lastFrame_.restart();
     if (!rateWindow_.isValid()) rateWindow_.start();
     ++rateFrames_;
@@ -215,6 +215,7 @@ CameraPanel::CameraPanel(const DesktopConfig &config, RosAdapter *ros, bool offl
   });
   auto *timer = new QTimer(this); timer->setInterval(500);
   connect(timer, &QTimer::timeout, this, [this] {
+    syncPreviewSubscription();
     if (waitingForNode_) {
       if (ros_->cameraAvailable()) { waitingForNode_ = false; detail_ = "相机节点就绪，等待视频帧"; }
       else if (startup_.elapsed() > 25000) {
@@ -224,11 +225,12 @@ CameraPanel::CameraPanel(const DesktopConfig &config, RosAdapter *ros, bool offl
     if (!ros_->cameraNodePresent() || !ros_->ptzAvailable()) { poseRead_ = false; stopJog(); }
     if (lastFrame_.isValid() && lastFrame_.elapsed() > 3000) { stopJog(); preview_->clear(); preview_->setText("视频数据已过期\n可点击连接 / 恢复预览"); }
     refresh();
-  }); timer->start(); qApp->installEventFilter(this); refresh();
+  }); timer->start(); qApp->installEventFilter(this); refresh(); syncPreviewSubscription();
 }
 
 CameraPanel::~CameraPanel() {
   qApp->removeEventFilter(this); stopJog();
+  previewActive_ = false; ros_->setCameraPreviewActive(false);
   QObject::disconnect(process_, nullptr, this, nullptr);
   delete process_;
   QObject::disconnect(ptzProcess_, nullptr, this, nullptr);
@@ -238,7 +240,7 @@ void CameraPanel::setControlEnabled(bool enabled) { controlEnabled_ = enabled; i
 void CameraPanel::setPatrolBlocked(bool blocked) { patrolBlocked_ = blocked; if (blocked) stopJog(); refresh(); }
 void CameraPanel::ensureCamera() {
   if (offline_) return;
-  if (!ros_->cameraNodePresent()) startCamera();
+  if (!ros_->cameraNodePresent() || ros_->cameraNodeCount() > 1) startCamera();
   else {
     ensurePtz();
     if (pending_.isEmpty() && (!lastFrame_.isValid() || lastFrame_.elapsed() >= 3000)) connectPreview();
@@ -257,7 +259,22 @@ bool CameraPanel::prepareRemote(QString *detail) {
   *detail = "本地已受理相机与云台启动请求，复用已有节点；等待 RS485 云台和网口镜头服务就绪";
   return true;
 }
-void CameraPanel::hideEvent(QHideEvent *event) { stopJog(); QWidget::hideEvent(event); }
+void CameraPanel::showEvent(QShowEvent *event) {
+  QWidget::showEvent(event); syncPreviewSubscription();
+}
+void CameraPanel::hideEvent(QHideEvent *event) {
+  stopJog(); QWidget::hideEvent(event); syncPreviewSubscription();
+}
+void CameraPanel::syncPreviewSubscription() {
+  const bool active = !offline_ && isVisible();
+  if (active == previewActive_) return;
+  previewActive_ = active;
+  ros_->setCameraPreviewActive(active);
+  frame_ = {}; lastFrame_.invalidate(); rateWindow_.invalidate();
+  rateFrames_ = 0; fps_ = 0;
+  preview_->clear(); preview_->setText(active ? "等待实时画面…" : "预览已暂停");
+  refresh();
+}
 bool CameraPanel::eventFilter(QObject *object, QEvent *event) {
   if (event->type() == QEvent::WindowDeactivate || event->type() == QEvent::ApplicationDeactivate) stopJog();
   return QWidget::eventFilter(object, event);
@@ -271,10 +288,12 @@ void CameraPanel::stopJog() {
 void CameraPanel::schedulePoseRead() { if (!offline_) poseReadTimer_->start(1000); }
 void CameraPanel::refresh() {
   const bool available = ros_->cameraAvailable(), present = ros_->cameraNodePresent();
+  const int instances = ros_->cameraNodeCount();
   const bool ptzAvailable = ros_->ptzAvailable();
   const bool busy = !pending_.isEmpty() || waitingForNode_ || jogCommand_;
   const bool fresh = lastFrame_.isValid() && lastFrame_.elapsed() < 3000;
-  start_->setEnabled(!offline_ && !process_->running() && !present && !busy);
+  start_->setEnabled(!offline_ && !process_->running() && (!present || instances > 1) && !busy);
+  start_->setText(instances > 1 ? "重启为单实例" : "启动相机");
   connect_->setEnabled(!offline_ && available && !busy);
   stopStream_->setEnabled(!offline_ && available && !busy);
   stopNode_->setEnabled(!offline_ && process_->running());
@@ -285,7 +304,7 @@ void CameraPanel::refresh() {
     const bool stop = b->objectName() == "cameraDirection0";
     b->setEnabled(!offline_ && ptzAvailable && (stop || (!patrolBlocked_ && controlEnabled_ && fresh && (!busy || jogCommand_))));
   }
-  const auto provider = process_->running() ? "本界面管理" : present ? "外部节点" : "未启动";
+  const auto provider = process_->running() ? "本界面管理" : instances > 1 ? QString("外部节点×%1").arg(instances) : present ? "外部节点" : "未启动";
   QString text = QString("相机：%1 · %2").arg(provider, available ? "服务就绪" : "服务未就绪");
   if (fresh) text += QString("\n%1×%2 · 预览 %3 fps").arg(frame_.width()).arg(frame_.height()).arg(fps_, 0, 'f', 1);
   else text += "\n尚无实时画面";
@@ -298,7 +317,9 @@ void CameraPanel::refresh() {
 }
 void CameraPanel::startCamera() {
   if (offline_ || process_->running() || !pending_.isEmpty()) return;
-  if (ros_->cameraNodePresent()) { emit message("已发现相机节点，直接连接预览即可"); refresh(); return; }
+  const int instances = ros_->cameraNodeCount();
+  if (ros_->cameraNodePresent() && instances <= 1) { emit message("已发现单个相机节点，直接复用并连接预览"); refresh(); return; }
+  if (instances > 1) emit message(QString("检测到 %1 个海康节点，将结束旧实例并重启为单实例").arg(instances));
   if (!QFileInfo::exists(config_.cameraParamsFile)) { emit message("相机参数文件不存在：" + config_.cameraParamsFile); return; }
   // Reuse the driver's private parameter file; credentials never enter desktop
   // JSON, command line, or a gateway. Monitoring does not enable face capture.
@@ -323,6 +344,7 @@ void CameraPanel::connectPreview() {
   pending_ = "camera_login"; ros_->cameraCommand("login"); refresh();
 }
 void CameraPanel::renderFrame() {
+  if (!previewActive_ || !isVisible()) return;
   if (!frame_.isNull() && lastFrame_.isValid() && lastFrame_.elapsed() < 3000)
     preview_->setPixmap(QPixmap::fromImage(frame_).scaled(preview_->size(), Qt::KeepAspectRatio, Qt::SmoothTransformation));
 }

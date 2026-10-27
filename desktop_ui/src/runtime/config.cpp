@@ -20,11 +20,19 @@ DesktopConfig DesktopConfig::load(const QString &path, const QString &resources,
   c.baseFrame = o.value("base_frame").toString("base_link");
   c.odomTopic = o.value("odom_topic").toString("/odom");
   c.imageTopic = o.value("image_topic").toString("/hk_camera/image_raw");
+  c.previewTopic = o.value("preview_topic").toString("/hk_camera/image_preview");
   c.cameraParamsFile = QDir(c.projectRoot).absoluteFilePath(o.value("camera_params_file").toString(
       "ros2_ws/install/hk_camera/share/hk_camera/config/hk_camera_params.yaml"));
   c.ptzParamsFile = QDir(c.projectRoot).absoluteFilePath(o.value("ptz_params_file").toString(
       "ros2_ws/install/ptz_pelco/share/ptz_pelco/config/ptz_pelco.yaml"));
   c.batteryTopic = o.value("battery_topic").toString("/battery_status");
+  c.sessionNodeNames = o.value("session_node_names").toVariant().toStringList();
+  if (c.sessionNodeNames.isEmpty()) c.sessionNodeNames = QStringList{
+      "controller_server", "planner_server", "bt_navigator", "amcl", "slam_toolbox", "cartographer_node",
+      "fast_lio_mapping", "fastlio_mapping", "laser_mapping", "map_server", "twist_mux", "chassis_driver",
+      "jd03_odometry", "ekf_filter_node", "robot_state_publisher", "rslidar_sdk_node", "imuDriverNode",
+      "lio_odometry", "global_localization", "global_map_publisher", "transform_fusion", "pointcloud_to_scan",
+      "cloud_crop_box", "robot_patrol", "patrol_guard"};
   c.maxLinear = o.value("max_linear").toDouble(.3); c.maxAngular = o.value("max_angular").toDouble(.5);
   c.feedbackTimeoutMs = o.value("feedback_timeout_ms").toInt(1500);
   c.serviceTimeoutMs = o.value("service_timeout_ms").toInt(15000);

@@ -1,5 +1,6 @@
 #include "vision/vision_client.h"
 #include "runtime/process_manager.h"
+#include <algorithm>
 #include <QElapsedTimer>
 #include <QJsonDocument>
 #include <QMap>
@@ -71,10 +72,11 @@ struct VisionClient::Impl {
 #endif
     return false;
   }
-  bool detectorPresent() const {
+  int detectorCount() const {
+    int count = 0;
     for (const auto &name : node->get_node_names())
-      if (QString::fromStdString(name).section('/', -1) == "detector_node") return true;
-    return false;
+      if (QString::fromStdString(name).section('/', -1) == "detector_node") ++count;
+    return std::max(count, static_cast<int>(node->count_publishers("/vision/detector_status")));
   }
   void queueFeatures(const QMap<QString, bool> &features) {
     bool enabling = false;
@@ -117,6 +119,12 @@ struct VisionClient::Impl {
       emit owner->message("上位机检测设置超时，请核对检测节点状态后重试");
     });
   }
+  void launchDetector() {
+    auto flag = [this](const char *name) { return QString(name) + ":=" + (wantedFeatures.value(name, false) ? "true" : "false"); };
+    detector->start({"ros2", "run", "detector_node", "detector", "--ros-args", "-p", "input_mode:=ros",
+      "-p", "image_topic:=" + config.imageTopic, "-p", flag("enable_face"),
+      "-p", flag("enable_person"), "-p", flag("enable_plate"), "-p", "staging_dir:=" + config.projectRoot + "/data/vision/staging"});
+  }
   void tick() {
     executor.spin_some(std::chrono::milliseconds(3));
     if (!waitingDetector || parametersBusy) return;
@@ -132,12 +140,18 @@ struct VisionClient::Impl {
       if (!ensureRecorder()) return;
     }
     if (parameters->service_is_ready()) { requestFeatures(); return; }
-    if (detector->running() || detectorPresent()) return;
+    const int instances = detectorCount();
+    if (instances > 1 && enabling) {
+      if (detector->running()) detector->stop();
+      else {
+        emit owner->message(QString("检测到 %1 个视觉检测节点，将替换为单实例").arg(instances));
+        launchDetector();
+      }
+      return;
+    }
+    if (detector->running() || instances) return;
     if (!enabling) { waitingDetector = false; pendingFeatures.clear(); return; }
-    auto flag = [this](const char *name) { return QString(name) + ":=" + (wantedFeatures.value(name, false) ? "true" : "false"); };
-    detector->start({"ros2", "run", "detector_node", "detector", "--ros-args", "-p", "input_mode:=ros",
-      "-p", "image_topic:=" + config.imageTopic, "-p", flag("enable_face"),
-      "-p", flag("enable_person"), "-p", flag("enable_plate"), "-p", "staging_dir:=" + config.projectRoot + "/data/vision/staging"});
+    launchDetector();
   }
   ~Impl() {
     timer->stop();
