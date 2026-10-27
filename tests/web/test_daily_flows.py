@@ -373,7 +373,7 @@ def test_view_navigation_keeps_one_socket_and_close_still_cancels(web):
     monitor.locator('#gasValue').get_by_text('12.3', exact=True).wait_for()
     assert monitor.locator('#controlTag').inner_text() == '本网页已取得'
     page.locator('header nav a[data-page=records]').click()
-    page.frame_locator('#view').locator('#sessions').get_by_text('0', exact=True).wait_for()
+    page.frame_locator('#view').locator('#reportRows button').wait_for()
     page.wait_for_timeout(1400)  # longer than the gateway control lease
     assert robot.accepted == 1 and robot.closed == 0 and robot.canceled == 0
     assert robot.task['running']
@@ -436,34 +436,6 @@ def test_audio_upload_and_owned_robot_play_stop(web):
     assert len(robot.audio_uploads)==1 and b'RIFF-web-upload-fixture' in robot.audio_uploads[0]
     monitor.locator('#audioStop').click()
     wait_for(lambda:any(item['type']=='audio_stop' for item in robot.messages))
-
-
-def test_web_point_and_route_create_edit_reorder_delete(web):
-    robot,page,_=web;view=open_view(robot,page)
-    view.locator('#btnClaim').click()
-    view.locator('#editPointName').fill('网页设备点')
-    view.locator('#editPointX').fill('-.6');view.locator('#editPointY').fill('-1.9')
-    view.locator('#savePoint').click()
-    wait_for(lambda:any(item['name']=='网页设备点' for item in robot.points))
-    view.locator('#editPoint').select_option(label='网页设备点')
-    view.locator('#editPointName').fill('网页设备点修改');view.locator('#savePoint').click()
-    wait_for(lambda:any(item['name']=='网页设备点修改' for item in robot.points))
-    view.locator('summary').get_by_text('巡检路线',exact=True).click()
-    view.locator('#editRouteName').fill('网页路线')
-    view.locator('#addStepPoint').select_option('p1');view.locator('#addStep').click()
-    view.locator('#addStepPoint').select_option(label='网页设备点修改');view.locator('#addStep').click()
-    view.locator('.route-step').nth(1).get_by_text('上移',exact=True).click()
-    view.locator('.route-step').nth(0).locator('input').fill('2.5')
-    view.locator('#saveRoute').click()
-    wait_for(lambda:any(item['name']=='网页路线' for item in robot.routes))
-    route=next(item for item in robot.routes if item['name']=='网页路线')
-    assert route['steps'][0]['point_id']!='p1' and route['steps'][0]['dwell_seconds']==2.5
-    view.locator('#editRoute').select_option(label='网页路线')
-    view.locator('#editRouteName').fill('网页路线修改');view.locator('#saveRoute').click()
-    wait_for(lambda:any(item['name']=='网页路线修改' for item in robot.routes))
-    page.on('dialog',lambda dialog:dialog.accept())
-    view.locator('#editRoute').select_option(label='网页路线修改');view.locator('#deleteRoute').click()
-    wait_for(lambda:not any(item['name']=='网页路线修改' for item in robot.routes))
 
 
 def test_fixed_route_preview_is_required_and_digest_reaches_start(web):

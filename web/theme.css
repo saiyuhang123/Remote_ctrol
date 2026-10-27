@@ -16,16 +16,10 @@
   font-size: 14px;
 }
 * { box-sizing: border-box; }
-.business-editor label, #intercomDialog label { display:block;margin:10px 0;color:var(--muted); }
-.business-editor input:not([type=checkbox]), .business-editor select, .business-editor textarea, #intercomDialog select { width:100%;min-width:0;padding:8px;border:1px solid var(--line);border-radius:7px;background:var(--bg);color:var(--text); }
-.business-editor details { padding:12px 0;border-top:1px solid var(--line); }
-.business-editor summary { cursor:pointer;color:var(--text);font-weight:600; }
-.business-editor .coordinate-fields { display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px; }
-.business-editor .toggleRow, #intercomDialog .toggleRow { display:flex;align-items:center;justify-content:space-between;gap:12px; }
-.route-step { display:flex;align-items:center;gap:6px;flex-wrap:wrap;padding:8px 0;border-bottom:1px solid var(--line); }
-.route-step span { flex:1;min-width:100px;overflow-wrap:anywhere; }
-.route-step input { max-width:80px; }
-#businessMap { width:100%;height:auto;max-height:400px;margin-top:12px;touch-action:none;background:var(--bg);border-radius:8px; }
+#intercomDialog label { display:block;margin:10px 0;color:var(--muted); }
+#intercomDialog select { width:100%;min-width:0;padding:8px;border:1px solid var(--line);border-radius:7px;background:var(--bg);color:var(--text); }
+#intercomDialog .toggleRow { display:flex;align-items:center;justify-content:space-between;gap:12px; }
+#businessMap { width:100%;height:auto;max-height:400px;margin-top:12px;background:var(--bg);border-radius:8px; }
 #capturePreview img { width:100%;max-height:200px;object-fit:contain;border-radius:8px; }
 .manual-captures { max-width:1360px;margin:20px auto; }
 .intercom-grid { display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px; }
