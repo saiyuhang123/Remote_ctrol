@@ -271,6 +271,16 @@ def test_sdk_timeout_returns_failure_without_deadlocking_public_services(rig):
     assert rig.call('control', ControlPTZ.Request(command=23, speed=40)).success
 
 
+def test_successful_read_clears_a_previous_sdk_timeout(rig):
+    rig.hang_get = True
+    assert not rig.call('get', GetPTZPose.Request()).success
+    assert '超时' in rig.ptz.last_error
+    rig.hang_get = False
+    rig.pending_get.set_result(None)
+    assert rig.call('get', GetPTZPose.Request()).success
+    assert rig.ptz.pos_valid and rig.ptz.last_error == ''
+
+
 def test_direct_pelco_lens_remains_opt_in(rig):
     rig.ptz.zoom_backend = 'pelco'
     r = rig.call('get', GetPTZPose.Request())

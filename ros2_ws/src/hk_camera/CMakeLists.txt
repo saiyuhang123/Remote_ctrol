@@ -251,5 +251,15 @@ if(BUILD_TESTING)
   target_include_directories(test_image_message PRIVATE include)
   target_link_libraries(test_image_message Qt5::Gui)
   ament_target_dependencies(test_image_message sensor_msgs std_msgs cv_bridge OpenCV)
+  ament_add_gtest(test_capture_scheduling test/test_capture_scheduling.cpp
+    ${HK_CAMERA_SRCS} ${HK_DECODER_SRCS} ${HK_NODE_SRCS}
+    include/hk_camera/hk_camera.h include/hk_camera/hk_camera_node.h include/hk_camera/hk_decoder.h)
+  configure_hk_sdk_target(test_capture_scheduling)
+  target_include_directories(test_capture_scheduling PRIVATE ${COMMON_INCLUDE_DIRS}
+    ${CMAKE_CURRENT_BINARY_DIR}/rosidl_generator_cpp)
+  target_link_libraries(test_capture_scheduling ${CMAKE_DL_LIBS} Qt5::Core Qt5::Gui ${cpp_typesupport_target})
+  ament_target_dependencies(test_capture_scheduling rclcpp sensor_msgs std_msgs std_srvs geometry_msgs cv_bridge OpenCV)
+  set_tests_properties(test_capture_scheduling PROPERTIES TIMEOUT 15
+    ENVIRONMENT "ROS_DOMAIN_ID=224;ROS_LOCALHOST_ONLY=1;OPENBLAS_NUM_THREADS=1")
 endif()
 ament_package()

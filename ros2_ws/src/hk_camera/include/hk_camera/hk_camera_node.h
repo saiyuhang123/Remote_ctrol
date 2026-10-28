@@ -143,6 +143,11 @@ private:
     std::chrono::steady_clock::time_point ptz_deadline_;
     std::vector<QMetaObject::Connection> camera_connections_;
 
+    // Keep SDK calls and login/logout serialized, but release this before
+    // converting a capture or returning its large ROS image response.
+    std::recursive_mutex sdk_session_mutex_;
+    rclcpp::CallbackGroup::SharedPtr capture_group_;
+
     OnSetParametersCallbackHandle::SharedPtr param_cb_handle_;
 
     // ---- 发布器 ----

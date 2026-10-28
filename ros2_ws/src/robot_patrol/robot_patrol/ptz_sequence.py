@@ -163,10 +163,27 @@ class PtzShotSequence:
             raise PatrolError('INSPECTION_BASE_MOVED', message)
 
     def _get(self, flags, timeout=None):
-        response = self.client._call(self.get, self.Get.Request(), timeout or self.client.service_timeout,
-                                     '云台实际位置读取', flags)
-        if not response.success:
-            raise PatrolError('INSPECTION_PTZ_READ_FAILED', response.message or '实际位置读取失败')
+        # Retry only the short, local SDK-service timeout. Keep all attempts
+        # inside the caller's original budget and continue checking cancel,
+        # inspection lease and chassis motion. Never retry motion commands or
+        # substitute a previous pose for a fresh readback.
+        deadline = time.monotonic() + (timeout if timeout is not None else self.client.service_timeout)
+        for attempt in range(3):
+            self.client._check_control(flags)
+            remaining = deadline-time.monotonic()
+            if remaining <= 0:
+                raise PatrolError('INSPECTION_PTZ_READ_FAILED', '实际位置读回重试超时')
+            response = self.client._call(self.get, self.Get.Request(), remaining,
+                                         '云台实际位置读取', flags)
+            if response.success:
+                break
+            message = response.message or '实际位置读取失败'
+            if (message != '相机镜头 SDK 服务响应超时' or attempt == 2 or
+                    time.monotonic() >= deadline):
+                raise PatrolError('INSPECTION_PTZ_READ_FAILED', message)
+            self.node.get_logger().warning(
+                f'云台 SDK 读回暂时超时，等待后重试 {attempt+2}/3')
+            self.client._wait(min(self.settings['poll_sec'], max(0., deadline-time.monotonic())), flags)
         values = dict(pan=float(response.pan), tilt=float(response.tilt), zoom=float(response.zoom))
         if (not all(math.isfinite(v) for v in values.values()) or not 0 <= values['pan'] <= 360 or
                 not -90 <= values['tilt'] <= 25 or not 1 <= values['zoom'] <= 999.9):

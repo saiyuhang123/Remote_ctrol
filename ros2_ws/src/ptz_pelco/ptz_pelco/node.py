@@ -437,6 +437,7 @@ class PtzPelcoNode(Node):
         self.zoom_target = self.zoom
         self.pos_valid = True
         self.last_sync = time.monotonic()
+        self.last_error = ''
         sig = (round(xyz[0], 1), round(xyz[1], 1), round(xyz[2], 1))
         if sig != self._last_state:
             self._last_state = sig

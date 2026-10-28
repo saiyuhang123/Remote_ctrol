@@ -188,6 +188,7 @@ void HKCameraNode::setupSubscribers()
 
 void HKCameraNode::setupServices()
 {
+    capture_group_ = create_callback_group(rclcpp::CallbackGroupType::MutuallyExclusive);
     face_capture_srv_ = create_service<std_srvs::srv::SetBool>("/hk_camera/set_face_capture",
         [this](std_srvs::srv::SetBool::Request::SharedPtr req,
                std_srvs::srv::SetBool::Response::SharedPtr res) { setFaceCapture(req->data, *res); });
@@ -196,7 +197,7 @@ void HKCameraNode::setupServices()
         [this](const srv::CapturePicture::Request::SharedPtr  req,
                srv::CapturePicture::Response::SharedPtr       res) {
             onCapturePicture(req, res);
-        });
+        }, rmw_qos_profile_services_default, capture_group_);
 
     login_srv_ = create_service<std_srvs::srv::Trigger>(
         "/hk_camera/login",
@@ -389,7 +390,10 @@ void HKCameraNode::processFaceCaptures()
     try
     {
         if (event.background_jpeg.empty() && !event.face_jpeg.empty())
+        {
+            std::lock_guard<std::recursive_mutex> lock(sdk_session_mutex_);
             event.background_jpeg = camera_->findFaceBackground(user_id_.load(), event.face_id);
+        }
         const auto stem = std::to_string(event.received_ns) + "_face" +
                           std::to_string(event.face_id) + "_" + std::to_string(++face_sequence_);
         const auto files = saveFaceCapture(event, face_capture_dir_, stem);
@@ -435,6 +439,7 @@ void HKCameraNode::processFaceCaptures()
 
 void HKCameraNode::setFaceCapture(bool enabled, std_srvs::srv::SetBool::Response& response)
 {
+    std::lock_guard<std::recursive_mutex> lock(sdk_session_mutex_);
     if (enabled) {
         if (user_id_ < 0) { response.message = "Camera not logged in; connect camera first"; return; }
         const bool before = enable_face_capture_;
@@ -477,6 +482,7 @@ void HKCameraNode::onLogin(
     const std_srvs::srv::Trigger::Request::SharedPtr,
     std_srvs::srv::Trigger::Response::SharedPtr res)
 {
+    std::lock_guard<std::recursive_mutex> lock(sdk_session_mutex_);
     if (user_id_ >= 0)
     {
         res->success = startAlarmReception();
@@ -505,6 +511,7 @@ void HKCameraNode::onLogout(
     const std_srvs::srv::Trigger::Request::SharedPtr,
     std_srvs::srv::Trigger::Response::SharedPtr res)
 {
+    std::lock_guard<std::recursive_mutex> lock(sdk_session_mutex_);
     if (user_id_ >= 0)
     {
         stopPTZ();
@@ -532,6 +539,7 @@ void HKCameraNode::onStartStream(
     const std_srvs::srv::Trigger::Request::SharedPtr,
     std_srvs::srv::Trigger::Response::SharedPtr res)
 {
+    std::lock_guard<std::recursive_mutex> lock(sdk_session_mutex_);
     if (user_id_ < 0)
     {
         res->success = false;
@@ -562,6 +570,7 @@ void HKCameraNode::onStopStream(
     const std_srvs::srv::Trigger::Request::SharedPtr,
     std_srvs::srv::Trigger::Response::SharedPtr res)
 {
+    std::lock_guard<std::recursive_mutex> lock(sdk_session_mutex_);
     stopPTZ();
     if (decoder_->isRunning())
     {
@@ -580,13 +589,6 @@ void HKCameraNode::onCapturePicture(
     const srv::CapturePicture::Request::SharedPtr req,
     srv::CapturePicture::Response::SharedPtr res)
 {
-    if (user_id_ < 0)
-    {
-        res->success = false;
-        res->message = "Not logged in";
-        return;
-    }
-
     if (req->quality > 2) {
         res->success = false;
         res->message = "Invalid JPEG quality (expected 0..2)";
@@ -612,8 +614,19 @@ void HKCameraNode::onCapturePicture(
         }
     }
 
-    bool ok = camera_->captureJPEG(user_id_, channel_,
-                                    req->quality, path);
+    const auto started = std::chrono::steady_clock::now();
+    bool ok;
+    int sdk_error = 0;
+    {
+        std::lock_guard<std::recursive_mutex> lock(sdk_session_mutex_);
+        if (user_id_ < 0) {
+            res->message = "Not logged in";
+            return;
+        }
+        ok = camera_->captureJPEG(user_id_, channel_, req->quality, path);
+        if (!ok) sdk_error = camera_->getLastError();
+    }
+    const auto captured = std::chrono::steady_clock::now();
 
     res->success = ok;
     if (ok)
@@ -636,8 +649,14 @@ void HKCameraNode::onCapturePicture(
     else
     {
         res->message = "Capture failed, error=" +
-                       std::to_string(camera_->getLastError());
+                       std::to_string(sdk_error);
     }
+    const auto finished = std::chrono::steady_clock::now();
+    RCLCPP_INFO(get_logger(), "Capture complete: success=%d SDK=%.1f ms image=%.1f ms bytes=%zu",
+        res->success,
+        std::chrono::duration<double, std::milli>(captured-started).count(),
+        std::chrono::duration<double, std::milli>(finished-captured).count(),
+        res->image.data.size());
 }
 
 // ============================================================
@@ -648,6 +667,7 @@ void HKCameraNode::onSetPTZPose(
     const srv::SetPTZPose::Request::SharedPtr req,
     srv::SetPTZPose::Response::SharedPtr res)
 {
+    std::lock_guard<std::recursive_mutex> lock(sdk_session_mutex_);
     if (user_id_ < 0)
     {
         res->success = false;
@@ -696,6 +716,7 @@ void HKCameraNode::onGetPTZPose(
     const srv::GetPTZPose::Request::SharedPtr,
     srv::GetPTZPose::Response::SharedPtr res)
 {
+    std::lock_guard<std::recursive_mutex> lock(sdk_session_mutex_);
     if (user_id_ < 0) { res->message = "Not logged in"; return; }
     NET_DVR_PTZPOS pose{};
     DWORD length = 0;
@@ -729,6 +750,7 @@ void HKCameraNode::onPTZPreset(
     const srv::PTZPreset::Request::SharedPtr req,
     srv::PTZPreset::Response::SharedPtr res)
 {
+    std::lock_guard<std::recursive_mutex> lock(sdk_session_mutex_);
     if (user_id_ < 0) {
         res->success = false;
         res->message = "Not logged in";
@@ -769,6 +791,7 @@ void HKCameraNode::onPTZPreset(
 
 bool HKCameraNode::stopPTZ()
 {
+    std::lock_guard<std::recursive_mutex> lock(sdk_session_mutex_);
     if (!active_ptz_command_) return true;
     if (user_id_ >= 0 && !camera_->ptzControlWithSpeed(user_id_, channel_,
             active_ptz_command_, active_ptz_speed_, 1)) return false;
@@ -779,6 +802,7 @@ bool HKCameraNode::stopPTZ()
 void HKCameraNode::onControlPTZ(const srv::ControlPTZ::Request::SharedPtr req,
                                srv::ControlPTZ::Response::SharedPtr res)
 {
+    std::lock_guard<std::recursive_mutex> lock(sdk_session_mutex_);
     if (req->stop) {
         res->success = stopPTZ();
         res->message = res->success ? "PTZ stopped" : "PTZ stop failed; watchdog will retry";

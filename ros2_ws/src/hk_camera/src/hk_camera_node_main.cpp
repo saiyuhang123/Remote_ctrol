@@ -11,6 +11,7 @@
  */
 
 #include <rclcpp/rclcpp.hpp>
+#include <rclcpp/executors/multi_threaded_executor.hpp>
 #include <QCoreApplication>
 #include "hk_camera/hk_camera_node.h"
 #include "hk_camera/hk_camera.h"
@@ -35,7 +36,12 @@ int main(int argc, char* argv[])
 
     RCLCPP_INFO(node->get_logger(), "HKCamera headless node starting...");
 
-    rclcpp::spin(node);
+    // A capture can spend time preparing/sending a full-resolution response.
+    // Its separate callback group must not hold up lens queries or watchdogs.
+    rclcpp::executors::MultiThreadedExecutor executor(rclcpp::ExecutorOptions(), 2);
+    executor.add_node(node);
+    executor.spin();
+    executor.remove_node(node);
 
     // 清理
     node.reset();

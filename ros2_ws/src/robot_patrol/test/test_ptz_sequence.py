@@ -22,7 +22,7 @@ from patrol_interfaces.srv import PointShots, PtzInspectionControl
 from robot_patrol.engine import ControlFlags, PatrolEngine
 from robot_patrol.inspection_client import InspectionClient
 from robot_patrol.inspection_prompts import DIGITAL_METER_PROMPT
-from robot_patrol.models import RouteSnapshot
+from robot_patrol.models import PatrolError, RouteSnapshot
 from robot_patrol.ptz_sequence import DEFAULTS
 from robot_patrol.ptz_shots import shots_json
 from test_engine import FakeDriver, make_store
@@ -49,6 +49,8 @@ def rig(tmp_path):
         apply_set=True, apply_zoom=True, capture_failures=0, delay_set=False, set_gate=threading.Event(),
         setting=threading.Event(), owner='', renewals=0, moving=False, stop_ok=True,
         capture_count=0, empty_capture_image=False, vision_ok=True, vision_text=None,
+        read_failures_after_capture=0, failed_post_capture_reads=0,
+        read_error='相机镜头 SDK 服务响应超时',
         delay_recognition=False, recognizing=threading.Event(), recognition_gate=threading.Event(),
         recognition_finished=threading.Event(),
         block_late_stop=False, stop_gate=threading.Event(), late_stopping=threading.Event(), extra_nodes=[])
@@ -58,6 +60,13 @@ def rig(tmp_path):
     server, node = Node('fake_shot_devices'), Node('shot_client_fixture')
     group = ReentrantCallbackGroup()
     def get(request, response):
+        if h.capture_count and h.read_failures_after_capture:
+            h.read_failures_after_capture -= 1
+            h.failed_post_capture_reads += 1
+            response.message = h.read_error
+            if getattr(h, 'on_failed_read', None):
+                h.on_failed_read()
+            return response
         response.success = True
         for name, value in h.actual.items():
             setattr(response, name, value)
@@ -171,6 +180,63 @@ def rig(tmp_path):
             member.destroy_node()
         rclpy.try_shutdown()
         h.store.close()
+
+
+def test_temporary_post_capture_sdk_timeout_recovers_before_recognition(rig):
+    rig.read_failures_after_capture = 2
+    result = rig.run()
+    assert result.success
+    assert rig.failed_post_capture_reads == 2
+    assert rig.capture_count == 2
+    assert len([value for kind, value in rig.events if kind == 'recognize']) == 2
+    assert all(result.success for result in rig.store.list_inspection_results(rig.mapping.map_id, 'run1'))
+
+
+def test_persistent_post_capture_sdk_timeout_keeps_photo_and_skips_recognition(rig):
+    rig.read_failures_after_capture = 100
+    result = rig.run()
+    assert not result.success and result.error_code == 'INSPECTION_PTZ_READ_FAILED'
+    assert rig.failed_post_capture_reads == 3
+    assert rig.capture_count == 1
+    assert Path(result.image_path).is_file()
+    assert not any(kind == 'recognize' for kind, _ in rig.events)
+
+
+def test_non_timeout_position_errors_are_not_retried(rig):
+    rig.read_failures_after_capture = 100
+    rig.read_error = '设备返回无效 zoom=0'
+    result = rig.run()
+    assert not result.success and rig.failed_post_capture_reads == 1
+    assert not any(kind == 'recognize' for kind, _ in rig.events)
+
+
+def test_recovered_read_must_match_the_target_instead_of_reusing_the_old_pose(rig):
+    rig.read_failures_after_capture = 1
+    rig.on_failed_read = lambda: rig.actual.update(zoom=4.)
+    result = rig.run()
+    assert not result.success and result.error_code == 'INSPECTION_PTZ_NOT_ARRIVED'
+    assert not any(kind == 'recognize' for kind, _ in rig.events)
+
+
+def test_cancel_during_sdk_read_retry_stops_without_recognition(rig):
+    flags = ControlFlags()
+    rig.read_failures_after_capture = 100
+    rig.on_failed_read = lambda: flags.request_cancel()
+    result = rig.run(flags)
+    assert not result.success and result.error_code == 'CANCELED'
+    assert rig.failed_post_capture_reads == 1
+    assert not any(kind == 'recognize' for kind, _ in rig.events)
+
+
+def test_sdk_retry_obeys_the_original_read_deadline(rig):
+    rig.capture_count = 1
+    rig.read_failures_after_capture = 100
+    rig.inspection.sequence.settings['poll_sec'] = .3
+    begin = time.monotonic()
+    with pytest.raises(PatrolError, match='读回重试超时'):
+        rig.inspection.sequence._get(ControlFlags(), timeout=.12)
+    assert time.monotonic()-begin < .35
+    assert rig.failed_post_capture_reads == 1
 
 
 def test_two_views_run_through_engine_with_recognition_for_each_captured_image(rig):
