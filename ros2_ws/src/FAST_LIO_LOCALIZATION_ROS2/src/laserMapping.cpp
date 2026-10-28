@@ -74,10 +74,14 @@
 // Device tilt prior. Mapping profiles opt in; localization keeps the default disabled.
 bool gravity_aid_enabled = false;
 double gravity_aid_sigma_deg = 0.10;
+// A frame whose IMU tilt disagrees with the filter prediction by more than this is
+// not fused: one disturbed WIT sample (bump / hard acceleration) must not yank the
+// whole attitude. 0 disables the gate.
+double gravity_aid_gate_deg = 0.30;
 bool gravity_aid_valid = false, gravity_reference_set = false;
 Eigen::Vector3d gravity_reference_up = Eigen::Vector3d::UnitZ();
 Eigen::Vector3d gravity_measured_up = Eigen::Vector3d::UnitZ();
-size_t gravity_aid_frames = 0, gravity_aid_rejected = 0;
+size_t gravity_aid_frames = 0, gravity_aid_rejected = 0, gravity_aid_gated = 0;
 #define MAXN                (720000)
 #define PUBFRAME_PERIOD     (20)
 
@@ -755,7 +759,20 @@ void h_share_model(state_ikfom &s, esekfom::dyn_share_datastruct<double> &ekfom_
     double solve_start_  = omp_get_wtime();
 
     /*** Computation of Measuremnt Jacobian matrix H and measurents vector ***/
-    const int gravity_rows = gravity_aid_valid ? 3 : 0;
+    bool gravity_use = false;
+    Eigen::Matrix3d gravity_rot = Eigen::Matrix3d::Identity();
+    Eigen::Vector3d gravity_predicted = Eigen::Vector3d::UnitZ();
+    if (gravity_aid_valid)
+    {
+        gravity_rot = s.rot.toRotationMatrix();
+        gravity_predicted = gravity_rot.transpose() * gravity_reference_up;
+        const double innovation = std::acos(std::max(-1.0, std::min(1.0,
+            gravity_measured_up.dot(gravity_predicted))));
+        gravity_use = gravity_aid_gate_deg <= 0. ||
+            innovation <= gravity_aid_gate_deg * M_PI / 180.0;
+        if (!gravity_use) ++gravity_aid_gated;
+    }
+    const int gravity_rows = gravity_use ? 3 : 0;
     ekfom_data.h_x = MatrixXd::Zero(effct_feat_num + gravity_rows, 12);
     ekfom_data.h.resize(effct_feat_num + gravity_rows);
 
@@ -789,15 +806,14 @@ void h_share_model(state_ikfom &s, esekfom::dyn_share_datastruct<double> &ekfom_
         /*** Measuremnt: distance to the closest surface/corner ***/
         ekfom_data.h(i) = -norm_p.intensity;
     }
-    if (gravity_aid_valid) {
-        const Eigen::Matrix3d R = s.rot.toRotationMatrix();
-        const Eigen::Vector3d predicted = R.transpose() * gravity_reference_up;
+    if (gravity_use) {
+        const Eigen::Matrix3d &R = gravity_rot;
         const double sigma = gravity_aid_sigma_deg * M_PI / 180.0;
         const double scale = std::sqrt(LASER_POINT_COV) / sigma;
         ekfom_data.h_x.block<3,3>(effct_feat_num, 3) =
             scale * fast_lio_gravity::upJacobian(R, gravity_reference_up);
         ekfom_data.h.segment<3>(effct_feat_num) =
-            scale * (gravity_measured_up - predicted);
+            scale * (gravity_measured_up - gravity_predicted);
     }
     solve_time += omp_get_wtime() - solve_start_;
 }
@@ -819,6 +835,9 @@ public:
         gravity_aid_sigma_deg = this->declare_parameter<double>("gravity_aid.sigma_deg", 0.10);
         if (gravity_aid_sigma_deg <= 0 || !std::isfinite(gravity_aid_sigma_deg))
             throw std::runtime_error("gravity_aid.sigma_deg must be positive");
+        gravity_aid_gate_deg = this->declare_parameter<double>("gravity_aid.innovation_gate_deg", 0.30);
+        if (!std::isfinite(gravity_aid_gate_deg))
+            throw std::runtime_error("gravity_aid.innovation_gate_deg must be finite");
         lio_odom_frame = this->declare_parameter<string>("lio_odom_frame", "lio_odom");
         lio_body_frame = this->declare_parameter<string>("lio_body_frame", "imu_link");
         root_dir = this->declare_parameter<string>("runtime_log_dir", "/tmp/remote_ctrol_fast_lio");
@@ -1036,7 +1055,9 @@ private:
                     ++gravity_aid_frames;
                 } else ++gravity_aid_rejected;
                 if ((gravity_aid_frames+gravity_aid_rejected)%500 == 0)
-                    RCLCPP_INFO(this->get_logger(), "Gravity observations accepted=%zu rejected=%zu", gravity_aid_frames, gravity_aid_rejected);
+                    RCLCPP_INFO(this->get_logger(),
+                        "Gravity observations accepted=%zu rejected=%zu gated=%zu",
+                        gravity_aid_frames, gravity_aid_rejected, gravity_aid_gated);
             }
 
             flg_EKF_inited = (Measures.lidar_beg_time - first_lidar_time) < INIT_TIME ? \

@@ -157,7 +157,15 @@ def registration_checks_pass(match):
                 and match.get('initialization_agreements', 0) >= 2)
 
 
-def overlap_is_usable(match):
+def overlap_is_usable(match, z_bias=0.0):
+    """Judge one loop match.
+
+    ``z_bias`` is a common vertical offset shared by the loop's matches. A
+    frontend height drift shifts every match by the same dz; the gate must then
+    look at the residual ``dz - z_bias``, otherwise a perfectly good loop is
+    rejected as a whole. The absolute dz is still capped so a bogus match cannot
+    ride an accepted bias arbitrarily far.
+    """
     if match is None:
         return False
     shift = np.asarray(match['position_correction_m'])
@@ -166,13 +174,36 @@ def overlap_is_usable(match):
     if not (np.isfinite(measured).all() and np.isfinite(shift).all() and np.isfinite(angles).all()
             and np.linalg.norm(angles[:2]) < 1.5 and abs(angles[2]) < 1.):
         return False
+    if abs(shift[2]) > 10.:
+        return False
+    vertical = abs(float(shift[2]) - float(z_bias))
     strong = match['fitness'] >= .85 and match['rmse_m'] <= .20
-    small = np.linalg.norm(shift[:2]) < 2. and abs(shift[2]) < .4
+    small = np.linalg.norm(shift[:2]) < 2. and vertical < .4
     if strong and small:
         return True
     return bool(match['fitness'] >= .65 and match['rmse_m'] <= .22
-                and np.linalg.norm(shift[:2]) < 3. and abs(shift[2]) < 2.
+                and np.linalg.norm(shift[:2]) < 3. and vertical < 2.
                 and registration_checks_pass(match))
+
+
+def common_vertical_bias(matches, window=8, spread=.30, min_matches=3, max_abs=10.):
+    """Return the dz shared by a run of matches, or None if they do not agree.
+
+    A false loop closure produces a random dz; a real frontend height drift
+    produces the same dz on every match. Requiring the recent matches to agree
+    within ``spread`` is what makes accepting a large |dz| safe.
+    """
+    if matches is None or len(matches) < min_matches:
+        return None
+    recent = list(matches)[-window:]
+    if len(recent) < min_matches:
+        return None
+    dz = np.array([float(np.asarray(m.get('position_correction_m', [0., 0., 0.]))[2])
+                   for m in recent])
+    if not np.isfinite(dz).all() or float(np.ptp(dz)) > spread:
+        return None
+    bias = float(np.median(dz))
+    return None if abs(bias) > max_abs else bias
 
 
 def refine(poses, matches):
@@ -188,7 +219,13 @@ def refine(poses, matches):
         raise ValueError(f'部分重叠仅覆盖 {source_span:.1f} 米，至少需要 6 米的不同位置观测')
     extended = any(np.linalg.norm(m.get('position_correction_m', [0., 0., 0.])) >= 2.
                    for m in matches)
-    shift_limit = 3.5 if extended and all(registration_checks_pass(m) for m in matches) else 2.
+    # A common vertical offset is a real frontend height drift, not a bad match:
+    # the correction is allowed to scale with it (the held-out checks below still
+    # reject a correction that does not actually close the loop).
+    common_z_bias = float(np.median([float(np.asarray(m.get('position_correction_m', [0., 0., 0.]))[2])
+                                     for m in matches]))
+    base_limit = 3.5 if extended and all(registration_checks_pass(m) for m in matches) else 2.
+    shift_limit = max(base_limit, 1.2*abs(common_z_bias))
     training = matches[::3]
     heldout = [m for k, m in enumerate(matches) if k % 3]
     angles = Rotation.from_matrix(poses[:, :3, :3]).as_euler('xyz')
@@ -265,6 +302,7 @@ def refine(poses, matches):
         'solver_message': fit.message, 'training_loops': training, 'heldout_validation': validation,
         'max_pose_translation_change_m': max_shift, 'max_pose_rotation_change_deg': max_angle,
         'pose_translation_limit_m': shift_limit, 'overlap_source_span_m': source_span,
+        'common_z_bias_m': common_z_bias,
         'max_heldout_translation_error_m': max_error, 'max_heldout_yaw_error_deg': max_yaw,
         'keyframe_height_range_m': [float(p[:, 2].min()), float(p[:, 2].max())],
         'endpoint_xyz_m': p[-1].tolist(), 'endpoint_is_not_constrained_to_origin': True,

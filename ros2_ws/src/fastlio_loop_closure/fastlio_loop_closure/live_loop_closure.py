@@ -29,8 +29,9 @@ from sensor_msgs_py import point_cloud2
 from std_msgs.msg import Header, String
 from std_srvs.srv import Trigger
 
-from .geometry import (Keyframe, atomic_json, build_map, level_rotation,
-                       overlap_is_usable, refine, register_overlap, voxel_indices, write_pcd)
+from .geometry import (Keyframe, atomic_json, build_map, common_vertical_bias,
+                       level_rotation, overlap_is_usable, refine, register_overlap,
+                       voxel_indices, write_pcd)
 
 
 def stamp_ns(stamp):
@@ -90,6 +91,13 @@ class LiveLoopClosure(Node):
         self.keyframes = []
         self.matches = []
         self.rejected_matches = []
+        # Common vertical offset of the loop: a frontend height drift shifts every
+        # match by the same dz. Matches that fail only on |dz| wait here until
+        # enough of them agree, then the shared offset is unlocked.
+        self.z_bias = 0.0
+        self.pending_vertical = []
+        self.z_bias_min_matches = 3
+        self.z_bias_spread = 0.30
         self.map_rotation = None
         self.reference_up = None
         self.tilt_errors = []
@@ -243,14 +251,54 @@ class LiveLoopClosure(Node):
         proposals = [register_overlap(kfs, i, target, eligible_end, self.submap_half)
                      for target in candidates]
         proposals = [m for m in proposals if m is not None]
-        qualified = [m for m in proposals if overlap_is_usable(m)]
+        qualified = [m for m in proposals if overlap_is_usable(m, self.z_bias)]
         pool = qualified or proposals
         match = max(pool, key=lambda m: m['fitness']-.1*m['rmse_m']) if pool else None
-        if overlap_is_usable(match):
-            self.matches.append(match)
-            self.get_logger().info(f'overlap {i}->{match["target"]}: fitness={match["fitness"]:.3f}, rmse={match["rmse_m"]:.3f} m')
-        elif match is not None:
+        if match is None:
+            return
+        if overlap_is_usable(match, self.z_bias):
+            self._accept_match(match)
+        elif (abs(match['position_correction_m'][2]) <= 10.
+              and overlap_is_usable(match, match['position_correction_m'][2])):
+            # Everything (xy, rotation, fitness, rmse) is fine; only the absolute
+            # vertical offset fails. A single such match proves nothing, so it
+            # waits until several of them agree on the same offset.
+            self.pending_vertical.append(match)
+            self._promote_vertical_bias()
+        else:
             self.rejected_matches.append(match)
+
+    def _accept_match(self, match):
+        self.matches.append(match)
+        self.get_logger().info(
+            f'overlap {match["source"]}->{match["target"]}: fitness={match["fitness"]:.3f}, '
+            f'rmse={match["rmse_m"]:.3f} m, dz={match["position_correction_m"][2]:+.2f} m')
+
+    def _promote_vertical_bias(self):
+        """Unlock a consistent run of matches that only differ by a common dz.
+
+        The spread requirement is what keeps this safe: a false loop closure
+        produces a random dz, not three matches within 0.3 m of each other.
+        """
+        if len(self.pending_vertical) < self.z_bias_min_matches:
+            return
+        if len(self.pending_vertical) > 30:
+            del self.pending_vertical[:len(self.pending_vertical)-30]
+        bias = common_vertical_bias(self.pending_vertical, window=8,
+                                    spread=self.z_bias_spread,
+                                    min_matches=self.z_bias_min_matches)
+        if bias is None:
+            return
+        self.z_bias = bias
+        pending, self.pending_vertical = self.pending_vertical, []
+        for m in pending:
+            if overlap_is_usable(m, self.z_bias):
+                self._accept_match(m)
+            else:
+                self.rejected_matches.append(m)
+        self.get_logger().warn(
+            f'common vertical offset {self.z_bias:+.2f} m over {len(pending)} loop matches; '
+            'the loop will be corrected, not rejected')
 
     def process_through(self, kfs):
         while self.processed < len(kfs):
@@ -282,7 +330,9 @@ class LiveLoopClosure(Node):
         with self.lock:
             status = {'workflow': 'gravity_preserving_measured_overlaps', 'keyframes': len(self.keyframes),
                 'qualified_overlaps': len(self.matches), 'processed_keyframes': self.processed,
-                'attempted_overlaps': len(self.matches)+len(self.rejected_matches),
+                'attempted_overlaps': len(self.matches)+len(self.rejected_matches)+len(self.pending_vertical),
+                'common_vertical_offset_m': round(self.z_bias, 3),
+                'pending_vertical_overlaps': len(self.pending_vertical),
                 'gravity_reference_ready': self.map_rotation is not None,
                 'unmatched_clouds': self.unmatched_clouds, 'error': self.fatal_error,
                 'session': str(self.session)}
@@ -323,6 +373,8 @@ class LiveLoopClosure(Node):
                 error = self.fatal_error
                 tilt = list(self.tilt_errors)
                 unmatched, total = self.unmatched_clouds, self.total_clouds
+                z_bias = self.z_bias
+                pending_vertical = len(self.pending_vertical)
             if len(kfs) < 2:
                 raise ValueError('尚无足够关键帧，请等初始化完成后平稳行驶一小段再保存')
             issues = [error] if error else []
@@ -348,8 +400,11 @@ class LiveLoopClosure(Node):
         action = ('检查传感器连接、IMU姿态和时间戳；处理后重新建图。本次数据已归档，暂不用于导航。'
                   if issues else '单程图已保存，可先查看地图、载入并核对定位；若需要回环修正，请继续经过有固定建筑的旧路段后再次保存。')
         report = {'keyframes': len(kfs), 'qualified_overlaps': len(matches),
-            'attempted_overlaps': len(matches)+len(rejected), 'overlap_measurements': matches,
+            'attempted_overlaps': len(matches)+len(rejected)+pending_vertical,
+            'overlap_measurements': matches,
             'rejected_overlap_measurements': rejected, 'session': str(self.session),
+            'common_vertical_offset_m': z_bias,
+            'pending_vertical_overlaps': pending_vertical,
             'last_keyframe_stamp_ns': kfs[-1].stamp_ns, 'geometry_checks_passed': False,
             'gravity_aligned': rotation is not None,
             'map_from_lio_rotation': None if rotation is None else rotation.tolist(),
@@ -432,6 +487,7 @@ class LiveLoopClosure(Node):
         poses[:, :3, 3] = poses[:, :3, 3] @ rotation.T
         report = {'status': 'REJECTED', 'keyframes': len(kfs), 'qualified_overlaps': len(matches),
             'overlap_measurements': matches, 'rejected_overlap_measurements': rejected,
+            'common_vertical_offset_m': self.z_bias,
             'map_from_lio_rotation': rotation.tolist(), 'last_keyframe_stamp_ns': kfs[-1].stamp_ns,
             'tilt_error_p95_deg': float(np.percentile(tilt_errors, 95)),
             'session': str(self.session), 'voxel_m': self.map_voxel}

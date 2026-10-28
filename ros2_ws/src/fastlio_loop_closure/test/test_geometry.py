@@ -6,8 +6,8 @@ import numpy as np
 from scipy.spatial.transform import Rotation
 import pytest
 
-from fastlio_loop_closure.geometry import (Keyframe, inverse, level_rotation, overlap_is_usable,
-                                         refine, register_overlap, write_pcd)
+from fastlio_loop_closure.geometry import (Keyframe, common_vertical_bias, inverse, level_rotation,
+                                         overlap_is_usable, refine, register_overlap, write_pcd)
 
 
 def graph_fixture():
@@ -64,6 +64,45 @@ def test_ground_or_large_correction_cannot_pass_overlap_gate():
     assert not overlap_is_usable(match)
     match.update(fitness=.95, position_correction_m=[0., 0., 10.])
     assert not overlap_is_usable(match)
+
+
+def test_common_vertical_offset_unlocks_a_consistent_loop():
+    # Every match carries the same frontend height drift; judged by |dz| alone the
+    # whole loop is rejected, but the shared offset is a real correction to make.
+    matches = [{'position_correction_m': [.1, -.2, 4.6 + .01*i],
+                'rotation_correction_deg': [.1, -.1, .2],
+                'measurement_target_from_source': np.eye(4).tolist(),
+                'fitness': .94, 'rmse_m': .15} for i in range(4)]
+    assert not any(overlap_is_usable(m) for m in matches)
+    bias = common_vertical_bias(matches)
+    assert bias == pytest.approx(4.615, abs=.02)
+    assert all(overlap_is_usable(m, bias) for m in matches)
+
+
+def test_random_vertical_offsets_are_not_a_common_bias():
+    # A false loop closure produces scattered dz, not three matches in one cluster.
+    matches = [{'position_correction_m': [0., 0., dz]} for dz in (4.6, .3, -2.0, 4.7)]
+    assert common_vertical_bias(matches) is None
+    assert common_vertical_bias([{'position_correction_m': [0., 0., 12.]}] * 3) is None
+
+
+def test_common_vertical_bias_relaxes_the_refine_shift_limit():
+    # 40 poses on a straight line; the last six are 4.6 m too low. The loop
+    # matches say they are the same places, so the refine must be allowed to
+    # shift by ~4.6 m (the old fixed 2.0/3.5 m limit rejected this).
+    poses = np.tile(np.eye(4), (40, 1, 1))
+    poses[:, 0, 3] = np.arange(40)*.5
+    poses[30:, 2, 3] = -4.6
+    matches = []
+    for k in range(6):
+        source, target = 30+k, k
+        matches.append({'source': source, 'target': target, 'fitness': .94, 'rmse_m': .15,
+                        'position_correction_m': [0., 0., 4.6],
+                        'rotation_correction_deg': [0., 0., 0.],
+                        'measurement_target_from_source': np.eye(4).tolist()})
+    _, report = refine(poses, matches)
+    assert report['pose_translation_limit_m'] > 4.6
+    assert report['common_z_bias_m'] == pytest.approx(4.6)
 
 
 def test_gravity_alignment_does_not_remove_relative_grade():
