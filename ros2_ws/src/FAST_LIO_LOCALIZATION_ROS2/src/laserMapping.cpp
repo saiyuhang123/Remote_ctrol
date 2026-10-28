@@ -75,9 +75,10 @@
 bool gravity_aid_enabled = false;
 double gravity_aid_sigma_deg = 0.10;
 // A frame whose IMU tilt disagrees with the filter prediction by more than this is
-// not fused: one disturbed WIT sample (bump / hard acceleration) must not yank the
-// whole attitude. 0 disables the gate.
-double gravity_aid_gate_deg = 0.30;
+// not fused. 0 (default) disables the gate: a 0.3 deg gate was tested on the .63
+// bag and destabilised the frontend (height closure went from -4.5 m to +18 m),
+// so only enable it with a much larger threshold after re-validating the bag.
+double gravity_aid_gate_deg = 0.0;
 bool gravity_aid_valid = false, gravity_reference_set = false;
 Eigen::Vector3d gravity_reference_up = Eigen::Vector3d::UnitZ();
 Eigen::Vector3d gravity_measured_up = Eigen::Vector3d::UnitZ();
@@ -835,7 +836,7 @@ public:
         gravity_aid_sigma_deg = this->declare_parameter<double>("gravity_aid.sigma_deg", 0.10);
         if (gravity_aid_sigma_deg <= 0 || !std::isfinite(gravity_aid_sigma_deg))
             throw std::runtime_error("gravity_aid.sigma_deg must be positive");
-        gravity_aid_gate_deg = this->declare_parameter<double>("gravity_aid.innovation_gate_deg", 0.30);
+        gravity_aid_gate_deg = this->declare_parameter<double>("gravity_aid.innovation_gate_deg", 0.0);
         if (!std::isfinite(gravity_aid_gate_deg))
             throw std::runtime_error("gravity_aid.innovation_gate_deg must be finite");
         lio_odom_frame = this->declare_parameter<string>("lio_odom_frame", "lio_odom");
