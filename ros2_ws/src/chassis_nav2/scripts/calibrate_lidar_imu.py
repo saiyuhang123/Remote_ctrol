@@ -7,17 +7,20 @@ even 0.3 deg makes the lidar ground look tilted in the body frame; the gravity
 aid keeps the attitude on the IMU, so the map z drops by ``tan(pitch)`` per
 metre travelled - a fixed height bias per loop (0.35 deg over 758 m = 4.6 m).
 
-Method: park still, record; turn the car ~180 deg in place, park again, record.
-For each still segment fit the ground plane in the lidar frame and compare it
-with the IMU gravity direction (both mapped through the current extrinsic).
-The ground slope is identical in the world for both headings but flips in the
-body frame, so averaging the two discrepancies cancels the slope and leaves the
-mounting tilt. Yaw is not observable from gravity; it stays as configured.
+Method: stop several times with different headings on one flat patch (an
+Ackermann car cannot turn in place: drive a small loop or a U-turn, then stop
+facing A, B, ... within a few metres of each other). For each still segment fit
+the ground plane in the lidar frame and compare it with the IMU gravity
+direction (both mapped through the current extrinsic). The discrepancy is
+``mounting tilt + ground slope``; the slope rotates with the heading while the
+mounting tilt does not, so a least-squares fit over the segments separates them.
+Yaw is not observable from gravity and stays as configured.
 
 Usage:
-    # on the robot, with sensors running
-    ros2 bag record -o /tmp/calib -o /tmp/calib /velodyne_points /imu/data
-    #   ... park facing A for ~10 s, turn the car ~180 deg, face B for ~10 s, Ctrl-C
+    # on the robot, sensors running, on a flat open area:
+    ros2 bag record -o /tmp/calib /velodyne_points /imu/data
+    #   drive a small loop / U-turn and stop 2-4 times, different headings,
+    #   each stop ~10 s, all within a few metres on the same flat patch; Ctrl-C
     python3 calibrate_lidar_imu.py /tmp/calib --hardware ~/Remote_ctrol/ros2_ws/src/chassis_nav2/config/hardware.yaml
 
 The bag path is read-only; the script prints the suggested rpy, it does not
@@ -245,6 +248,34 @@ def analyse(runs, imu, clouds, R):
     return segments
 
 
+def circular_span(degrees):
+    vals = np.sort(np.mod(np.asarray(degrees), 360))
+    gaps = np.diff(np.r_[vals, vals[0] + 360])
+    return float(360 - gaps.max())
+
+
+def fit_tilt(segments):
+    """Separate the mounting tilt from the ground slope.
+
+    c_i (heading-independent + Rz(-dtheta_i) * slope) is linear, so a
+    least-squares fit over the stops yields the constant part ``a`` (the
+    mounting tilt) and the slope ``b``. Two headings >=60 deg apart already
+    determine both; 3-4 stops spread over 90-180 deg are more robust.
+    """
+    th0 = segments[0]['yaw']
+    rows, targets = [], []
+    for s in segments:
+        th = math.radians(s['yaw'] - th0)
+        rz = np.array([[math.cos(th), math.sin(th)], [-math.sin(th), math.cos(th)]])
+        rows.append(np.c_[np.eye(2), rz])
+        targets.append(np.asarray(s['correction'])[:2])
+    A = np.vstack(rows)
+    y = np.concatenate(targets)
+    x, *_ = np.linalg.lstsq(A, y, rcond=None)
+    residual = float(np.sqrt(np.mean((A @ x - y) ** 2)))
+    return x[:2], x[2:], math.degrees(residual)
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument('bag')
@@ -267,31 +298,33 @@ def main():
     for k, s in enumerate(segments):
         print(f'  seg{k}: t={s["t"]:.1f}s  {s["duration"]:.0f}s  scans={s["scans"]}  '
               f'yaw={s["yaw"]:+.1f}°  tilt={s["tilt_before_deg"]:.3f}°')
-    pair = None
-    best = 180.
-    for i in range(len(segments)):
-        for j in range(i + 1, len(segments)):
-            diff = abs((segments[i]['yaw'] - segments[j]['yaw'] + 180) % 360 - 180)
-            if abs(diff - 180) < best:
-                best = abs(diff - 180)
-                pair = (i, j)
-    if pair is not None and best <= 30:
-        i, j = pair
-        heading_diff = abs((segments[i]['yaw'] - segments[j]['yaw'] + 180) % 360 - 180)
-        c = (segments[i]['correction'] + segments[j]['correction']) / 2
-        print(f'用 seg{i}+seg{j}（朝向差 {heading_diff:.0f}°，偏离 180° 仅 {best:.0f}°，地面坡度对消）')
-    elif not args.allow_single:
-        print('\n没有找到朝向差 ~180° 的两段静止数据，先不给 rpy 建议。')
-        print('上面的 tilt 是“雷达地面 vs IMU 重力”的夹角，里面混着停车点的地面坡度；'
-              '单段直接当外参会把坡度一起标进去。')
-        print('请在同一个地点：车头朝 A 停 10 s → 原地掉头 180° → 朝 B 停 10 s，用这一个包再跑。')
-        print('（如果确定场地水平，可加 --allow-single 强制给出单段结果。）')
+    span = circular_span([s['yaw'] for s in segments])
+    if len(segments) >= 2 and span >= 60:
+        a, b, residual = fit_tilt(segments)
+        c = np.array([a[0], a[1], 0.])
+        print(f'\n用 {len(segments)} 个停点、朝向跨度 {span:.0f}° 联合拟合：'
+              f'安装角 {math.degrees(np.linalg.norm(a)):.3f}°，'
+              f'地面坡度 {math.degrees(np.linalg.norm(b)):.2f}°，残差 {residual:.3f}°')
+        if span < 120:
+            print('提示：朝向跨度不到 120°，外参和坡度会互相串；条件允许再多停 1~2 个朝向。')
+        if residual > .2:
+            print('警告：拟合残差偏大，可能是停点之间地面不平/不在同一块平地，建议重录。')
+    elif len(segments) >= 2 and not args.allow_single:
+        print(f'\n有 {len(segments)} 个停点，但朝向跨度只有 {span:.0f}°，分不开"安装角"和"地面坡度"。')
+        print('Ackermann 车不用原地掉头：在平坦空地开个小环/掉头，在不同朝向各停 10 s，'
+              '停点之间保持几米内，再跑一次。')
         return
-    else:
+    elif args.allow_single:
         longest = max(segments, key=lambda s: s['duration'])
         c = longest['correction']
-        print(f'警告：没有 180° 成对数据，按 --allow-single 用最长静止段（{longest["duration"]:.0f}s，'
+        print(f'警告：按 --allow-single 用最长静止段（{longest["duration"]:.0f}s，'
               f'yaw={longest["yaw"]:+.1f}°）。结果含地面坡度，只在已知水平场地可信。')
+    else:
+        print('\n只有一个静止段，先不给 rpy 建议：单段结果里混着地面坡度。')
+        print('Ackermann 车不用原地掉头：在平坦空地开个小环/掉头，在不同朝向各停 10 s，'
+              '停点之间保持几米内，再跑一次。')
+        print('（确定场地水平时可加 --allow-single 强制给出单段结果。）')
+        return
     R_new = Rotation.from_rotvec(c).as_matrix() @ R[:3, :3]
     base_imu_new = inverse(np.block([[R_new, np.zeros((3, 1))], [np.zeros((1, 3)), np.ones((1, 1))]])) @ base_lidar
     rpy_new = Rotation.from_matrix(base_imu_new[:3, :3]).as_euler('xyz', degrees=True)
