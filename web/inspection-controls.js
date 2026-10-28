@@ -39,6 +39,10 @@
     canvas.style.cursor = picking ? 'crosshair' : 'grab';
     if (picking) pointMessage('点击地图选择目标；按住并拖动设置到达朝向。');
   };
+  $('quickInspect').onclick = () => {
+    $('pointControls').scrollIntoView({behavior:'smooth',block:'nearest'});
+    if (!picking && app.mapReady) $('pickTarget').click();
+  };
   function world(event) {
     const box = canvas.getBoundingClientRect();
     return app.projection.canvasToWorld(event.clientX-box.left, event.clientY-box.top, app.view);
@@ -93,18 +97,27 @@
     else pointMessage('连接已断开，请等待重连。');
   };
   $('pointCancel').onclick = () => sendControl('route_cancel');
-  $('pointHome').onclick = () => sendControl('return_home', {map_id:app.mapMeta.map_id,map_revision:app.mapMeta.revision});
+  $('pointHome').onclick = () => {
+    if (!app.mapMeta || $('pointHome').disabled) return;
+    if (sendControl('return_home', {map_id:app.mapMeta.map_id,map_revision:app.mapMeta.revision}))
+      pointMessage('正在结束当前任务，确认停止后返回待命点。');
+  };
   const previousMessage = app.ws.onmessage;
   app.ws.onmessage = event => {
     previousMessage(event);
     let data; try { data=JSON.parse(event.data); } catch (_) { return; }
     if (data.type==='command_result' && data.command==='point_start' && data.request_id===pending) {
-      pointMessage(data.message || data.code); if (!data.ok) pending='';
+      pointMessage(data.message || data.code); if (!data.ok || data.code==='ACCEPTED') pending='';
     }
     if (data.type==='telemetry' && data.task && data.task.kind==='point' && data.task.running) pending='';
     if (data.type==='task_finished' && data.kind==='point') {
       pending=''; pointMessage((data.success?'巡检完成：':'任务结束：')+(data.message || data.code || ''));
     }
+    if (data.type==='command_result' && ['return_home','return_cancel'].includes(data.command))
+      pointMessage(data.message || data.code);
+    if (data.type==='task_finished' && data.kind==='return')
+      pointMessage((data.success?'返回完成：':'返回结束：')+(data.message || data.code || ''));
+    if (data.type==='session_state' && !data.session_id) pending='';
     if (data.type==='command_result' && ['audio_play','audio_stop'].includes(data.command))
       $('audioMessage').textContent=data.message || data.code;
     if (data.type==='command_result' && data.command==='capture' && data.request_id===capturePending) {
@@ -128,6 +141,7 @@
       const local = await localResponse.json();
       if (requested!==stamp()) return;
       homeStamp = localResponse.ok && local.map_sync_ok && local.home &&
+        local.home.map_id===app.mapMeta.map_id && local.home.map_revision===app.mapMeta.revision &&
         local.active_map?.map_id===app.mapMeta.map_id && local.active_map?.revision===app.mapMeta.revision ? requested : '';
       points=Array.isArray(data.items)?data.items:[]; pointsStamp=requested;
       const previous=$('targetPoint').value;
@@ -137,7 +151,7 @@
       if (selected && !points.some(point=>point.point_id===selected.point_id && point.revision===selected.revision)) {
         selected=null; targetStamp=''; pointMessage('巡检点已更新，请重新选择。');
       }
-    } catch(error) { homeStamp=''; pointMessage(error.message); }
+    } catch(error) { homeStamp=''; pointsStamp=''; pointMessage(error.message); }
   }
   async function loadAudio(preferred='') {
     const response=await fetch('/api/audio/files',{cache:'no-store'}), data=await response.json();
@@ -173,9 +187,10 @@
     const pointBusy=task.running && task.kind==='point';
     const ready=app.mapReady && targetStamp===stamp() && $('targetX').value!=='' && $('targetY').value!=='';
     $('pointStart').textContent=$('targetInspect').checked?'到达并巡检':'一键到达';
-    $('pointStart').disabled=!owner || !ready || Boolean(pending) || task.running || t.patrol?.active || control.estop_known!==true || control.estopped!==false;
+    const motionReady=control.estop_known===true && control.estopped===false && !t.desktop?.pending?.estop_release;
+    $('pointStart').disabled=!owner || !ready || Boolean(pending) || task.running || t.patrol?.active || !motionReady;
     $('pointCancel').disabled=!owner || !(pointBusy || pending);
-    $('pointHome').disabled=!owner || !app.mapReady || homeStamp!==stamp() || task.kind==='return' || Boolean(task.pending_return);
+    $('pointHome').disabled=!owner || !motionReady || !app.mapReady || homeStamp!==stamp() || task.kind==='return' || Boolean(task.pending_return);
     $('pointHome').title=homeStamp!==stamp()?'请先在本地设置当前地图的待命返航点':'';
     $('pickTarget').disabled=!app.mapReady;
     $('targetPreset').disabled=!$('targetInspect').checked;
@@ -190,7 +205,8 @@
     }
     const taskKey=JSON.stringify(t.patrol || {});
     if (pointBusy && taskKey!==lastTask) { lastTask=taskKey; pointMessage(t.patrol?.message || '正在前往巡检点'); }
-    if ((!pointsStamp || pointsStamp!==stamp() || Date.now()-lastPointsLoad>15000) && app.mapReady) {
+    if (app.mapReady && Date.now()-lastPointsLoad>5000 &&
+        (!pointsStamp || pointsStamp!==stamp() || Date.now()-lastPointsLoad>15000)) {
       lastPointsLoad=Date.now(); pointsStamp=stamp(); loadPoints();
     }
   }

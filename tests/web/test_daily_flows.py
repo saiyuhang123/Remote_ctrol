@@ -45,6 +45,8 @@ class RobotFixture:
         self.reject_route = False
         self.map_available = True
         self.revision = 1
+        self.home_available = True
+        self.home_revision = None
         self.gas_mode = 'fresh'
         self.battery_mode = 'fresh'
         self.ptz_held = False
@@ -75,7 +77,7 @@ class RobotFixture:
                 code = 200
                 if path == '/api/local/state':
                     payload = {'active_map': {'map_id': 'm', 'revision': robot.revision, 'name': '测试地图'},
-                               'map_sync_ok': True, 'home': {'x': 0, 'y': 0, 'yaw': 0},
+                               'map_sync_ok': True, 'home': ({'map_id':'m','map_revision':robot.home_revision or robot.revision,'x':0,'y':0,'yaw':0} if robot.home_available else None),
                                'routes': robot.routes}
                     raw = json.dumps(payload).encode()
                 elif path == '/api/video/status':
@@ -181,7 +183,7 @@ class RobotFixture:
                         age=10. if self.battery_mode=='stale' else .1,timeout=5.),
                     vision=self.vision, audio=self.audio, capture=dict(available=True), ptz=dict(patrol={'active': self.ptz_held, 'enabled': False, 'inspection_held':self.ptz_held,
                         'state': 'inspection_paused' if self.ptz_held else 'stopped'},
-                                        patrol_age=.1, service_ready=True, manual_locked=False))
+                                        patrol_age=.1, driver_ready=True, service_ready=True, manual_locked=False))
 
     def report(self):
         return dict(run_id='report1',route={'name':'仪表巡检'},map_name='测试地图',state_name='已完成',duration_seconds=10.,
@@ -261,7 +263,7 @@ class RobotFixture:
                     self.task = dict(kind='return', running=True, request_id=data['request_id'])
                     self.mode = 'return'
                     await self.send(ws, dict(result, code='ACCEPTED'))
-                elif command == 'route_cancel':
+                elif command in ('route_cancel','return_cancel'):
                     previous=self.task
                     self.task=dict(kind='',running=False);self.mode='manual';self.canceled+=1
                     await self.send(ws,result)
@@ -422,6 +424,49 @@ def test_map_pick_uses_rotated_origin_for_one_click_target(web):
     assert target['inspection_enabled'] is True and target['ptz_preset']==1
 
 
+@pytest.mark.parametrize('kind',['route','point'])
+def test_global_return_preempts_task_from_records_and_can_be_canceled(web,kind):
+    robot,page,_=web
+    if kind=='route':
+        start_route(robot,page)
+    else:
+        monitor=open_view(robot,page,'monitor')
+        monitor.locator('#btnClaim').click()
+        monitor.locator('#targetPoint').select_option('p1')
+        monitor.locator('#pointStart').click()
+        wait_for(lambda:robot.task['running'])
+    page.locator('header nav a[data-page=records]').click()
+    page.frame_locator('#view').locator('#reportRows button').wait_for()
+    page.locator('#returnHome').click()
+    wait_for(lambda:robot.task.get('kind')=='return')
+    returns=[item for item in robot.messages if item['type']=='return_home']
+    assert len(returns)==1
+    assert returns[0]['map_id']=='m' and returns[0]['map_revision']==1
+    assert returns[0]['session_id']==robot.token
+    assert page.locator('#returnHome').is_disabled()
+    page.locator('#cancelReturn').click()
+    wait_for(lambda:not robot.task['running'])
+    assert any(item['type']=='return_cancel' for item in robot.messages)
+    assert robot.accepted==1 and robot.canceled==1
+
+
+def test_global_return_requires_current_home_control_and_fresh_status(web):
+    robot,page,_=web
+    robot.home_available=False
+    monitor=open_view(robot,page,'monitor')
+    monitor.locator('#btnClaim').click()
+    page.wait_for_timeout(500)
+    assert page.locator('#returnHome').is_disabled()
+    robot.home_available=True;robot.home_revision=99
+    page.wait_for_timeout(5200)
+    assert page.locator('#returnHome').is_disabled()
+    robot.home_revision=1
+    page.wait_for_function("!document.querySelector('#returnHome').disabled",timeout=7000)
+    robot.telemetry_paused=True
+    page.wait_for_function("document.querySelector('#returnHome').disabled",timeout=5000)
+    assert not any(item['type']=='return_home' for item in robot.messages)
+
+
 def test_audio_upload_and_owned_robot_play_stop(web):
     robot,page,_=web
     monitor=open_view(robot,page,'monitor')
@@ -459,6 +504,7 @@ def test_manual_capture_works_without_a_patrol_task_and_is_listed(web):
     assert view.locator('#capturePreview img').get_attribute('src')=='/captures/2026-10-22/web.jpg'
     assert not robot.task['running']
     page.locator('nav a[data-page=records]').click();view=page.frame_locator('#view')
+    view.locator('#recordsTabCaptures').click()
     view.locator('#captureGallery img').wait_for()
 
 
@@ -510,6 +556,7 @@ def test_inspection_controls_mobile_layout(web):
     assert view.locator('#audioUpload').is_visible()
     frame=next(frame for frame in page.frames if '/monitor.html' in frame.url)
     assert frame.evaluate('document.documentElement.scrollWidth<=innerWidth+1')
+    assert page.evaluate('document.documentElement.scrollWidth<=innerWidth+1')
     page.screenshot(path='/tmp/remote_web_monitor_mobile_preview.png',full_page=True)
 
 

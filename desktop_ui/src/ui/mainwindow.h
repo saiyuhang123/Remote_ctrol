@@ -52,6 +52,7 @@ private:
   void startSession();
   void openMapEditor();
   void openPatrolPage();
+  void openInspectionTarget();
   void openDeviceWindow();
   bool mapEditorSourceMatchesCurrent() const;
   void refreshEditorNavigationFeedback();

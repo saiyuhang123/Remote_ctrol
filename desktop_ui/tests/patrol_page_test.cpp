@@ -196,7 +196,10 @@ private slots:
     QVERIFY(!page.findChild<QPushButton *>("patrolRecordPointShot")->isEnabled());
     QVERIFY(resultsTable);
     QCOMPARE(mapEdit->text(), yaml);
-    QCOMPARE(tabs->count(), 3); // 固定路线录制页暂时从操作界面移除
+    QCOMPARE(tabs->count(), 4); // 点位、路线、记录，以及新增的一键到达巡检
+    QVERIFY(page.findChild<QPushButton *>("patrolInspectPoint"));
+    page.showInspectionTarget();
+    QCOMPARE(tabs->currentWidget()->objectName(), QString("inspectionTargetPage"));
     QVERIFY(registerMap->isEnabled());
     QVERIFY(!saveCurrent->isEnabled()); // no active map yet
     QVERIFY(!start->isEnabled());

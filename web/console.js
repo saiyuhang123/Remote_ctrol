@@ -2,10 +2,15 @@
   'use strict';
   const frame = document.getElementById('view');
   const pages = {monitor:'monitor.html', tasks:'tasks.html', records:'records.html'};
-  const viewRevision='records-tabs-20261026-2';
+  const viewRevision='one-click-20261029';
   let socket, session = null, telemetry = null, control = {}, task = {};
   let viewId = '', currentPage = '', reconnectTimer;
   let socketUrl='';
+  let returnState = null, returnStateAt = 0, loadingReturnState = false, returnPending = '';
+  const notice = text => {
+    const node = document.getElementById('taskNotice');
+    node.textContent = text; node.hidden = !text;
+  };
   window.RobotConsole={get session(){return session;},get socketUrl(){return socketUrl;}};
   function post(kind, data) {
     if (viewId) frame.contentWindow.postMessage({robotConsole:true, id:viewId, kind, data}, location.origin);
@@ -37,6 +42,32 @@
     document.getElementById('owner').dataset.owned = Boolean(session);
     document.getElementById('task').textContent = task.running
       ? (task.kind === 'return' ? '正在返回待命点' : task.kind === 'point' ? '到点巡检进行中' : '巡航任务进行中') : '';
+    const fresh = Boolean(telemetry) && Date.now()-telemetry.received_at_ms < 3000;
+    const connected = socket && socket.readyState === WebSocket.OPEN;
+    const map = returnState?.active_map, home = returnState?.home;
+    const validHome = Date.now()-returnStateAt < 10000 && returnState?.map_sync_ok && map && home &&
+      home.map_id === map.map_id && home.map_revision === map.revision;
+    const owner = Boolean(session) && fresh && connected && !control.local_control;
+    const returning = Boolean(returnPending || task.pending_return || (task.running && task.kind === 'return'));
+    const motionReady = control.estop_known === true && control.estopped === false && !telemetry?.desktop?.pending?.estop_release;
+    const button = document.getElementById('returnHome');
+    button.disabled = !owner || !motionReady || !validHome || returning;
+    button.textContent = returning ? '正在返回…' : '一键返回';
+    button.title = !validHome ? '请先在本地“地图与返航设置”保存当前地图待命点' :
+      !owner ? '请先取得控制权并等待新鲜状态' : !motionReady ? '请先解除急停并等待确认' :
+      '结束当前路线或到点巡检，确认停止后返回待命点';
+    document.getElementById('cancelReturn').disabled = !owner || !returning;
+  }
+  async function loadReturnState() {
+    if (loadingReturnState) return;
+    loadingReturnState = true;
+    const abort = new AbortController(), timer = setTimeout(() => abort.abort(), 3000);
+    try {
+      const response = await fetch('/api/local/state', {cache:'no-store', signal:abort.signal});
+      if (!response.ok) throw new Error('地图状态不可用');
+      returnState = await response.json(); returnStateAt = Date.now();
+    } catch (_) { returnState = null; returnStateAt = 0; }
+    finally { clearTimeout(timer); loadingReturnState = false; refreshHeader(); }
   }
   function stopInteraction() {
     if (!session) return;
@@ -96,14 +127,25 @@
       if (data.type === 'telemetry') {
         data.received_at_ms = Date.now();
         telemetry = data; control = data.control || {}; task = data.task || {};
+        if (task.running && task.kind === 'return' && task.request_id === returnPending) returnPending = '';
       }
       if (data.type === 'control_state') { control = data.control || {}; task = data.task || task; }
       if ((data.type === 'telemetry' || data.type === 'control_state') && !control.owner_present) session = null;
+      if (data.type === 'command_result' && ['return_home','return_cancel'].includes(data.command)) {
+        notice(data.message || (data.ok ? '请求已受理' : '返回请求失败：'+(data.code || '未知错误')));
+        if (!data.ok && data.request_id === returnPending) returnPending = '';
+        if (data.ok && data.command === 'return_cancel') returnPending = '';
+      }
+      if (data.type === 'task_finished' && data.kind === 'return') {
+        if (data.request_id === returnPending) returnPending = '';
+        notice((data.success ? '返回完成：' : '返回结束：')+(data.message || data.code || ''));
+      }
+      if (before && !session) returnPending = '';
       if (before !== session) sessionState();
       post('data', data); refreshHeader();
     };
     socket.onclose = () => {
-      session = telemetry = null; control = {}; task = {};
+      session = telemetry = null; control = {}; task = {}; returnPending = '';
       document.getElementById('connection').textContent = '已断开，正在重连';
       document.getElementById('connection').dataset.state = 'disconnected';
       sessionState(); post('close'); refreshHeader();
@@ -117,6 +159,22 @@
   setInterval(() => { if (session) command({type:'control_heartbeat'}); }, 300);
   document.getElementById('release').onclick = () => command({type:'control_release'});
   document.getElementById('stop').onclick = () => send({type:'estop'});
+  document.getElementById('returnHome').onclick = () => {
+    refreshHeader();
+    if (document.getElementById('returnHome').disabled) return;
+    stopInteraction();
+    const id = 'home_'+Date.now()+'_'+Math.random().toString(16).slice(2);
+    const map = returnState.active_map;
+    if (command({type:'return_home',request_id:id,map_id:map.map_id,map_revision:map.revision})) {
+      returnPending = id;
+      notice('正在结束当前任务，确认停止后返回待命点。'); refreshHeader();
+    }
+  };
+  document.getElementById('cancelReturn').onclick = () => {
+    if (command({type:'return_cancel',request_id:'cancel_home_'+Date.now()})) notice('正在取消返回，请等待停车确认。');
+  };
+  setInterval(refreshHeader, 500);
+  setInterval(loadReturnState, 5000); loadReturnState();
   document.addEventListener('visibilitychange', () => { if (document.hidden) stopInteraction(); });
   addEventListener('pagehide', () => {
     stopInteraction();

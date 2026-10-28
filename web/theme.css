@@ -126,7 +126,7 @@ input[type=radio], input[type=checkbox] { accent-color: var(--accent); cursor: p
 #owner { color: var(--muted); white-space: nowrap; }
 #owner[data-owned=true] { color: #80e4bd; }
 #task { color: var(--blue); font-size: 11px; }
-.console-actions { display: flex; gap: 8px; }
+.console-actions { display: flex; flex-wrap: wrap; gap: 8px; }
 .console-actions .btn { min-height: 34px; font-size: 12px; }
 .console-actions #stop { background: #bc3e4b; color: white; border-color: #da5865; min-width: 82px; }
 .console-actions #stop:hover { background: #da4e5c; }
@@ -156,6 +156,7 @@ input[type=radio], input[type=checkbox] { accent-color: var(--accent); cursor: p
 .map-label { display: flex; align-items: center; gap: 9px; padding: 7px 10px; background: #111e2def; border: 1px solid #2b4053; border-radius: 8px; font-size: 12px; }
 .map-label .icon { width: 17px; height: 17px; color: var(--accent); }
 #fitMap { pointer-events: auto; background: #142335ed; }
+#quickInspect { pointer-events: auto; margin-left: auto; }
 #mapHint { position: absolute; left: 16px; bottom: 13px; font-size: 10px; color: #b0c2d4;
   background: #111e2def; padding: 5px 9px; border-radius: 6px; pointer-events: none; max-width: calc(100% - 32px); }
 #mapBadge { position: absolute; left: 16px; top: 68px; font-size: 11px; color: #f4cc8d; background: #3a3024ef;
@@ -349,6 +350,7 @@ input[type=radio], input[type=checkbox] { accent-color: var(--accent); cursor: p
 @media (prefers-reduced-motion: reduce) { *, *::before { transition: none !important; } }
 .inspection-controls label{display:flex;flex-direction:column;gap:6px;margin:10px 0;min-width:0}
 .inspection-controls .toggleRow{flex-direction:row}
+.console-notice{margin:0;padding:8px 20px;background:var(--panel);color:var(--text);border-bottom:1px solid var(--line);font-size:13px}
 .inspection-controls input,.inspection-controls select,.inspection-controls textarea{width:100%;min-width:0;padding:8px;background:var(--bg);color:var(--text);border:1px solid var(--line);border-radius:6px;font:inherit}
 .inspection-controls .coordinate-fields{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px}
 .inspection-controls textarea{resize:vertical}.inspection-controls details{margin:12px 0}.inspection-controls p{line-height:1.6}

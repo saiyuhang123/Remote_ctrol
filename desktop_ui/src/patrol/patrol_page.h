@@ -21,6 +21,7 @@ class QGraphicsView;
 class QCloseEvent;
 class RosAdapter;
 class InspectionPhotoView;
+class InspectionTargetPage;
 
 class PatrolPage : public QWidget {
   Q_OBJECT
@@ -35,6 +36,7 @@ public:
   QString activeMapId() const { return activeMapId_; }
   void setResumePermission(std::function<bool(QString *)> permission);
   void setReportProjectRoot(const QString &projectRoot);
+  void showInspectionTarget();
 protected:
   void closeEvent(QCloseEvent *event) override;
 
@@ -133,6 +135,7 @@ private:
   QLabel *routesCountLabel_ = nullptr;
   QLabel *routeDraftLabel_ = nullptr;
   QTabWidget *tabs_ = nullptr;
+  InspectionTargetPage *inspectionTarget_ = nullptr;
 
   QTableWidget *pointsTable_ = nullptr;
   QLineEdit *pointNameEdit_ = nullptr;

@@ -91,6 +91,9 @@ public:
 
   bool available() const;
   bool routeServerReady() const;
+  bool pointServerReady() const;
+  bool returnServerReady() const;
+  bool returnActiveOrPending() const;
   QString ownerSessionId() const;
 
   void refreshMaps();
@@ -132,6 +135,11 @@ public:
   void returnHome(const QString &mapId, quint64 mapRevision);
   void cancelReturnHome();
   void cancelActiveTask();
+  void inspectPoint(const QString &mapId, quint64 mapRevision,
+                    const QString &pointId, quint64 pointRevision,
+                    double x, double y, double yaw, bool inspectionEnabled,
+                    int ptzPreset, const QString &recognitionPrompt);
+  void cancelInspectPoint();
   void runRoute(const QString &routeId, const QString &mapId,
                 quint64 routeRevision, quint64 mapRevision, quint32 loopCount,
                 const QString &planDigest = QString());

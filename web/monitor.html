@@ -50,6 +50,7 @@
     <canvas id="mapCanvas" aria-label="滚轮缩放地图，拖拽平移"></canvas>
     <div class="map-top">
       <div class="map-label"><span class="icon" data-icon="compass"></span>实时地图</div>
+      <button class="btn" id="quickInspect">一键到达与巡检</button>
       <button class="btn gray" id="fitMap" title="显示完整地图"><span class="icon" data-icon="locate"></span>适应窗口</button>
     </div>
     <div id="mapBadge"></div>
@@ -81,7 +82,7 @@
       <p id="captureMessage" class="form-hint" role="status">等待抓拍节点就绪</p>
       <a id="capturePreview" target="_blank" rel="noopener" hidden><img alt="最新手动抓拍"></a>
     </section>
-    <section class="card inspection-controls">
+    <section class="card inspection-controls" id="pointControls">
       <h2>一键到达与巡检</h2>
       <label>已有巡检点<select id="targetPoint"><option value="">在地图上选点或输入坐标</option></select></label>
       <button class="btn gray" id="pickTarget">地图选点与朝向</button>

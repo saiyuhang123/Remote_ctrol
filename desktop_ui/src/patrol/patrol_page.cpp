@@ -1,4 +1,5 @@
 #include "patrol/patrol_page.h"
+#include "patrol/inspection_target_page.h"
 #include "patrol/report_viewer.h"
 #include "patrol/patrol_ui_style.h"
 #include "adapters/ros_adapter.h"
@@ -124,8 +125,11 @@ PatrolPage::PatrolPage(PatrolClient *client, const QString &initialMapYaml,
 
 void PatrolPage::setResumePermission(std::function<bool(QString *)> permission) {
   resumePermission_ = std::move(permission);
+  inspectionTarget_->setReturnPermission(resumePermission_);
   updateActionStates();
 }
+
+void PatrolPage::showInspectionTarget() { tabs_->setCurrentWidget(inspectionTarget_); }
 
 void PatrolPage::setReportProjectRoot(const QString &projectRoot) {
   reportProjectRoot_ = projectRoot;
@@ -165,7 +169,7 @@ void PatrolPage::buildUi() {
   headerLayout->setContentsMargins(16, 12, 16, 12);
   headerLayout->setSpacing(10);
   auto *titleRow = new QHBoxLayout;
-  auto *title = new QLabel("路线巡航", header);
+  auto *title = new QLabel("巡检任务", header);
   title->setObjectName("patrolTitle");
   titleRow->addWidget(title);
   auto *profileLabel = patrolui::hint(profileName_, header);
@@ -193,6 +197,9 @@ void PatrolPage::buildUi() {
   homePointLabel_ = patrolui::hint("待命返航点：未设置", header);
   homePointLabel_->setObjectName("patrolHomePoint");
   summary->addWidget(homePointLabel_, 1);
+  auto *targetButton = pageButton("一键到达", header, "patrolInspectPoint");
+  summary->addWidget(targetButton);
+  connect(targetButton, &QPushButton::clicked, this, &PatrolPage::showInspectionTarget);
   returnHomeButton_ = pageButton("一键返回", header, "patrolReturnHome");
   summary->addWidget(returnHomeButton_);
   headerLayout->addLayout(summary);
@@ -623,10 +630,12 @@ void PatrolPage::buildUi() {
     client_->roadCommand("EVENTS", {{"run_id", runsTable_->item(row, 0)->text()}});
   });
   tabs_->addTab(runsTab, "执行记录");
+  inspectionTarget_ = new InspectionTargetPage(client_, offline_, startPermission_, tabs_);
+  tabs_->addTab(inspectionTarget_, "一键到达与巡检");
   // Fixed-route authoring/recorded-road UI is disabled in this build.
   root->addWidget(tabs_, 1);
 
-  messageLabel_ = patrolui::hint("当前只启用自由导航：在“点位管理”保存点位，在“路线与执行”加入点位并保存，开始后由 Nav2 导航到点。", this);
+  messageLabel_ = patrolui::hint("临时任务使用“一键到达与巡检”；多点任务在“路线与执行”启动。一键返回会结束当前任务，返回当前地图待命点。", this);
   messageLabel_->setObjectName("patrolMessage");
   messageLabel_->setTextFormat(Qt::PlainText);
   messageLabel_->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
@@ -980,7 +989,7 @@ void PatrolPage::clearHomePoint() {
 void PatrolPage::returnHome() {
   if (activeMapId_.isEmpty()) { setMessage(QStringLiteral("请先设置活跃地图"), true); return; }
   const auto home = client_->homePoint();
-  if (!home.exists || home.mapId != activeMapId_) {
+  if (!home.exists || home.mapId != activeMapId_ || home.mapRevision != activeMap().revision) {
     setMessage(QStringLiteral("当前地图没有有效待命返航点"), true);
     return;
   }
@@ -1545,8 +1554,8 @@ void PatrolPage::resumeRun() {
 void PatrolPage::cancelRun() {
   if(startAfterPlan_) {startAfterPlan_=false;planDigest_.clear();updateActionStates();setMessage("已取消启动路径检查",false);return;}
   const auto status = client_->status();
+  client_->cancelActiveTask();
   if (status.runId.startsWith(QStringLiteral("return_"))) {
-    client_->cancelReturnHome();
     return;
   }
   if (status.runId.isEmpty()) { setMessage(QStringLiteral("当前没有可取消的巡航任务"), true); return; }
@@ -1762,18 +1771,19 @@ void PatrolPage::updateActionStates() {
   resumeButton_->setEnabled(!offline_ && available && routeRun && paused &&
                             resumePermitted);
   resumeButton_->setToolTip(resumePermissionTip);
-  cancelButton_->setEnabled(!offline_ && available && (activeRun||startAfterPlan_));
+  cancelButton_->setEnabled(!offline_ && available && (client_->hasActiveOrPendingRun()||startAfterPlan_));
   const auto home = client_->homePoint();
-  const bool validHome = hasMap && home.exists && home.mapId == activeMapId_;
-  const bool returnRunning = activeRun && status.runId.startsWith(QStringLiteral("return_"));
+  const bool validHome = hasMap && home.exists && home.mapId == activeMapId_ && home.mapRevision == activeMap().revision;
+  const bool returnRunning = client_->returnActiveOrPending();
   const auto &returnPermission = resumePermission_ ? resumePermission_ : startPermission_;
   QString returnReason;
   const bool returnPermitted = !returnPermission || returnPermission(&returnReason);
   saveHomeButton_->setEnabled(!offline_ && available && hasMap && !activeRun && startPermitted);
   saveHomeButton_->setToolTip(startPermissionTip);
   clearHomeButton_->setEnabled(!offline_ && available && validHome && !activeRun);
-  returnHomeButton_->setEnabled(!offline_ && available && validHome && !returnRunning && returnPermitted);
-  returnHomeButton_->setToolTip(returnPermitted ? QString() : returnReason);
+  returnHomeButton_->setEnabled(!offline_ && available && validHome && !returnRunning && returnPermitted && client_->returnServerReady());
+  returnHomeButton_->setToolTip(!validHome ? QStringLiteral("先在地图与返航设置中保存当前地图的待命点")
+      : returnPermitted ? QStringLiteral("结束当前路线或到点巡检，确认停止后返回待命点") : returnReason);
   pointCombo_->setEnabled(available && hasMap && pointCombo_->count() > 0);
   tabs_->setEnabled(available);
 }

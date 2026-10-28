@@ -21,6 +21,7 @@
 #include <patrol_interfaces/msg/map_binding.hpp>
 #include <patrol_interfaces/msg/operator_heartbeat.hpp>
 #include <patrol_interfaces/msg/patrol_point.hpp>
+#include <patrol_interfaces/action/inspect_point.hpp>
 #include <patrol_interfaces/msg/patrol_route.hpp>
 #include <patrol_interfaces/msg/patrol_status.hpp>
 #include <patrol_interfaces/msg/route_step.hpp>
@@ -193,16 +194,20 @@ struct PatrolClient::Impl {
   QJsonArray networksData;
   rclcpp_action::Client<patrol_interfaces::action::RunRoute>::SharedPtr runRoute;
   rclcpp_action::Client<patrol_interfaces::action::ReturnHome>::SharedPtr returnHome;
+  rclcpp_action::Client<patrol_interfaces::action::InspectPoint>::SharedPtr inspectPoint;
   rclcpp::Subscription<patrol_interfaces::msg::PatrolStatus>::SharedPtr statusSubscription;
   rclcpp::Publisher<patrol_interfaces::msg::OperatorHeartbeat>::SharedPtr operatorHeartbeat;
   rclcpp::TimerBase::SharedPtr operatorHeartbeatTimer;
   rclcpp_action::Client<patrol_interfaces::action::RunRoute>::GoalHandle::SharedPtr currentGoal;
   rclcpp_action::Client<patrol_interfaces::action::ReturnHome>::GoalHandle::SharedPtr currentReturnGoal;
+  rclcpp_action::Client<patrol_interfaces::action::InspectPoint>::GoalHandle::SharedPtr currentPointGoal;
   std::atomic_bool operatorAuthorized{false};
   bool goalPending = false;
   bool cancelRequestedWhilePending = false;
   bool returnPending = false;
   bool cancelReturnWhilePending = false;
+  bool pointPending = false;
+  bool cancelPointWhilePending = false;
   mutable std::mutex mutex;
   QVector<PatrolMapInfo> mapsData;
   QString activeMapId;
@@ -238,6 +243,7 @@ struct PatrolClient::Impl {
     resetInterlock = node->create_client<patrol_interfaces::srv::ResetInterlock>("/patrol/reset_interlock");
     runRoute = rclcpp_action::create_client<patrol_interfaces::action::RunRoute>(node, "/patrol/run_route");
     returnHome = rclcpp_action::create_client<patrol_interfaces::action::ReturnHome>(node, "/patrol/return_home");
+    inspectPoint = rclcpp_action::create_client<patrol_interfaces::action::InspectPoint>(node, "/patrol/inspect_point");
     auto qos = rclcpp::QoS(1).reliable().transient_local();
     statusSubscription = node->create_subscription<patrol_interfaces::msg::PatrolStatus>(
         "/patrol/status", qos, [this](patrol_interfaces::msg::PatrolStatus::ConstSharedPtr message) {
@@ -361,6 +367,32 @@ QString PatrolClient::activeMapId() const {
 bool PatrolClient::routeServerReady() const {
 #ifdef DESKTOP_HAS_PATROL_INTERFACES
   return impl_->runRoute->action_server_is_ready();
+#else
+  return false;
+#endif
+}
+
+bool PatrolClient::pointServerReady() const {
+#ifdef DESKTOP_HAS_PATROL_INTERFACES
+  return impl_->inspectPoint->action_server_is_ready();
+#else
+  return false;
+#endif
+}
+
+bool PatrolClient::returnServerReady() const {
+#ifdef DESKTOP_HAS_PATROL_INTERFACES
+  return impl_->returnHome->action_server_is_ready();
+#else
+  return false;
+#endif
+}
+
+bool PatrolClient::returnActiveOrPending() const {
+#ifdef DESKTOP_HAS_PATROL_INTERFACES
+  std::lock_guard<std::mutex> lock(impl_->mutex);
+  return impl_->returnPending || static_cast<bool>(impl_->currentReturnGoal) ||
+      (impl_->statusData.active && impl_->statusData.runId.startsWith("return_"));
 #else
   return false;
 #endif
@@ -641,12 +673,16 @@ void PatrolClient::sendPointShots(quint8 command, const QString &pointId, const 
     }
     if (write) impl_->shotWritePending.store(false);
     if (!response || !response->success) {
+      // A previous read/write reply may have arrived while this refresh
+      // was pending. A failed refresh must leave the cached view unverified.
+      { std::lock_guard<std::mutex> lock(impl_->mutex); impl_->pointShotsData[pointId].loaded = false; }
       emit pointShotsChanged(pointId);
       emit operationFinished(operation, false, response ? QString::fromStdString(response->message) : failure);
       return;
     }
     const auto document = QJsonDocument::fromJson(QByteArray::fromStdString(response->shots_json));
     if (!document.isArray() || QString::fromStdString(response->point.point_id) != pointId) {
+      { std::lock_guard<std::mutex> lock(impl_->mutex); impl_->pointShotsData[pointId].loaded = false; }
       emit pointShotsChanged(pointId);
       emit operationFinished(operation, false, QStringLiteral("视角服务返回了无效数据，请刷新重试"));
       return;
@@ -920,6 +956,10 @@ void PatrolClient::clearHomePoint(const QString &mapId, quint64 expectedMapRevis
 
 void PatrolClient::returnHome(const QString &mapId, quint64 mapRevision) {
 #ifdef DESKTOP_HAS_PATROL_INTERFACES
+  if (returnActiveOrPending()) {
+    emit errorOccurred(QStringLiteral("返航任务已在执行或等待受理"));
+    return;
+  }
   if (!impl_->returnHome->action_server_is_ready()) {
     emit errorOccurred(QStringLiteral("返航 Action 未就绪；请先启动 robot_patrol"));
     return;
@@ -933,6 +973,8 @@ void PatrolClient::returnHome(const QString &mapId, quint64 mapRevision) {
     std::lock_guard<std::mutex> lock(impl_->mutex);
     impl_->returnPending = true;
     impl_->cancelReturnWhilePending = false;
+    if (impl_->pointPending) impl_->cancelPointWhilePending = true;
+    if (impl_->goalPending) impl_->cancelRequestedWhilePending = true;
   }
   rclcpp_action::Client<patrol_interfaces::action::ReturnHome>::SendGoalOptions options;
   options.goal_response_callback =
@@ -945,6 +987,7 @@ void PatrolClient::returnHome(const QString &mapId, quint64 mapRevision) {
       cancelRequested = impl_->cancelReturnWhilePending;
       impl_->cancelReturnWhilePending = false;
     }
+    emit statusChanged();
     if (!handle) { emit errorOccurred(QStringLiteral("返航目标被拒绝")); return; }
     if (cancelRequested) {
       impl_->returnHome->async_cancel_goal(handle);
@@ -970,7 +1013,14 @@ void PatrolClient::returnHome(const QString &mapId, quint64 mapRevision) {
     emit operationFinished(QStringLiteral("返航任务"),
                            result.code == rclcpp_action::ResultCode::SUCCEEDED, message);
   };
-  impl_->returnHome->async_send_goal(goal, options);
+  try {
+    impl_->returnHome->async_send_goal(goal, options);
+    emit statusChanged();
+  } catch (const std::exception &error) {
+    { std::lock_guard<std::mutex> lock(impl_->mutex); impl_->returnPending = false; }
+    emit statusChanged();
+    emit errorOccurred(QString::fromUtf8(error.what()));
+  }
 #else
   Q_UNUSED(mapId); Q_UNUSED(mapRevision);
   PATROL_UNAVAILABLE(QStringLiteral("一键返回"));
@@ -1006,21 +1056,112 @@ void PatrolClient::cancelReturnHome() {
 
 void PatrolClient::cancelActiveTask() {
 #ifdef DESKTOP_HAS_PATROL_INTERFACES
-  bool route = false, returning = false;
+  bool route = false, returning = false, point = false;
   {
     std::lock_guard<std::mutex> lock(impl_->mutex);
     route = impl_->goalPending || static_cast<bool>(impl_->currentGoal);
     returning = impl_->returnPending || static_cast<bool>(impl_->currentReturnGoal);
+    point = impl_->pointPending || static_cast<bool>(impl_->currentPointGoal);
   }
+  // Cancel a queued/active return first so canceling the old task cannot
+  // leave an unintended return ready to start afterwards.
+  if (returning) cancelReturnHome();
+  if (point) cancelInspectPoint();
   if (route) cancelRunRoute();
-  else if (returning) cancelReturnHome();
-  else emit errorOccurred(QStringLiteral("当前没有可取消的本地任务"));
+  if (!route && !returning && !point) emit errorOccurred(QStringLiteral("当前没有可取消的本地任务"));
+#endif
+}
+
+void PatrolClient::inspectPoint(const QString &mapId, quint64 mapRevision,
+                                const QString &pointId, quint64 pointRevision,
+                                double x, double y, double yaw, bool inspectionEnabled,
+                                int ptzPreset, const QString &recognitionPrompt) {
+#ifdef DESKTOP_HAS_PATROL_INTERFACES
+  if (hasActiveOrPendingRun()) {
+    emit errorOccurred(QStringLiteral("已有任务或启动请求，请先取消并等待结束"));
+    return;
+  }
+  if (!pointServerReady()) {
+    emit errorOccurred(QStringLiteral("到点巡检服务未就绪，请先启动巡航联锁"));
+    return;
+  }
+  patrol_interfaces::action::InspectPoint::Goal goal;
+  goal.request_id = QUuid::createUuid().toString(QUuid::WithoutBraces).toStdString();
+  goal.owner_session_id = impl_->ownerSessionId.toStdString();
+  goal.map_id = mapId.toStdString(); goal.map_revision = mapRevision;
+  goal.point_id = pointId.toStdString(); goal.point_revision = pointRevision;
+  goal.x = x; goal.y = y; goal.yaw = yaw;
+  goal.inspection_enabled = inspectionEnabled;
+  goal.ptz_preset = static_cast<uint16_t>(std::clamp(ptzPreset, 0, 255));
+  goal.recognition_prompt = recognitionPrompt.toStdString();
+  {
+    std::lock_guard<std::mutex> lock(impl_->mutex);
+    impl_->pointPending = true;
+    impl_->cancelPointWhilePending = false;
+  }
+  rclcpp_action::Client<patrol_interfaces::action::InspectPoint>::SendGoalOptions options;
+  options.goal_response_callback = [this](auto handle) {
+    bool cancelRequested;
+    {
+      std::lock_guard<std::mutex> lock(impl_->mutex);
+      impl_->pointPending = false;
+      impl_->currentPointGoal = handle;
+      cancelRequested = impl_->cancelPointWhilePending;
+      impl_->cancelPointWhilePending = false;
+    }
+    emit statusChanged();
+    if (!handle) { emit errorOccurred(QStringLiteral("到点巡检目标被拒绝，请检查后台和当前任务")); return; }
+    if (cancelRequested) impl_->inspectPoint->async_cancel_goal(handle);
+    emit operationFinished(QStringLiteral("一键到达"), true,
+                           cancelRequested ? QStringLiteral("目标受理后已立即取消")
+                                           : QStringLiteral("目标已受理，正在前往巡检点"));
+  };
+  options.feedback_callback = [this](auto, const std::shared_ptr<const patrol_interfaces::action::InspectPoint::Feedback> feedback) {
+    { std::lock_guard<std::mutex> lock(impl_->mutex); impl_->statusData = statusInfo(feedback->status); }
+    emit statusChanged();
+  };
+  options.result_callback = [this](const rclcpp_action::ClientGoalHandle<patrol_interfaces::action::InspectPoint>::WrappedResult &result) {
+    { std::lock_guard<std::mutex> lock(impl_->mutex); impl_->currentPointGoal.reset(); }
+    emit statusChanged();
+    emit operationFinished(QStringLiteral("到点巡检任务"),
+                           result.code == rclcpp_action::ResultCode::SUCCEEDED && result.result && result.result->success,
+                           result.result ? QString::fromStdString(result.result->message) : QStringLiteral("到点巡检任务已结束"));
+    QMetaObject::invokeMethod(this, [this] { refreshRuns(); refreshInspectionResults(); }, Qt::QueuedConnection);
+  };
+  try {
+    impl_->inspectPoint->async_send_goal(goal, options);
+    emit statusChanged();
+  } catch (const std::exception &error) {
+    { std::lock_guard<std::mutex> lock(impl_->mutex); impl_->pointPending = false; }
+    emit statusChanged();
+    emit errorOccurred(QString::fromUtf8(error.what()));
+  }
+#else
+  Q_UNUSED(mapId); Q_UNUSED(mapRevision); Q_UNUSED(pointId); Q_UNUSED(pointRevision);
+  Q_UNUSED(x); Q_UNUSED(y); Q_UNUSED(yaw); Q_UNUSED(inspectionEnabled); Q_UNUSED(ptzPreset); Q_UNUSED(recognitionPrompt);
+  PATROL_UNAVAILABLE(QStringLiteral("一键到达"));
+#endif
+}
+
+void PatrolClient::cancelInspectPoint() {
+#ifdef DESKTOP_HAS_PATROL_INTERFACES
+  rclcpp_action::ClientGoalHandle<patrol_interfaces::action::InspectPoint>::SharedPtr goal;
+  {
+    std::lock_guard<std::mutex> lock(impl_->mutex);
+    goal = impl_->currentPointGoal;
+    if (!goal && impl_->pointPending) impl_->cancelPointWhilePending = true;
+  }
+  if (goal) impl_->inspectPoint->async_cancel_goal(goal);
 #endif
 }
 
 void PatrolClient::runRoute(const QString &routeId, const QString &mapId,
                             quint64 routeRevision, quint64 mapRevision, quint32 loopCount, const QString &planDigest) {
 #ifdef DESKTOP_HAS_PATROL_INTERFACES
+  if (hasActiveOrPendingRun()) {
+    emit errorOccurred(QStringLiteral("已有任务或启动请求，请先取消并等待结束"));
+    return;
+  }
   if (!impl_->runRoute->action_server_is_ready()) {
     emit errorOccurred(QStringLiteral("巡航 Action 未就绪；请先启动 robot_patrol"));
     return;
@@ -1107,7 +1248,8 @@ bool PatrolClient::hasActiveOrPendingRun() const {
   std::lock_guard<std::mutex> lock(impl_->mutex);
   return impl_->statusData.active || impl_->goalPending ||
          static_cast<bool>(impl_->currentGoal) || impl_->returnPending ||
-         static_cast<bool>(impl_->currentReturnGoal);
+         static_cast<bool>(impl_->currentReturnGoal) || impl_->pointPending ||
+         static_cast<bool>(impl_->currentPointGoal);
 #else
   return false;
 #endif

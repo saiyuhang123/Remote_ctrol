@@ -23,10 +23,13 @@
   </div>
   <div class="console-actions">
     <button class="btn gray" id="intercomOpen">麦克风 / 音响</button>
+    <button class="btn" id="returnHome" disabled>一键返回</button>
+    <button class="btn gray" id="cancelReturn" disabled>取消返回</button>
     <button class="btn gray" id="release" disabled>释放控制权</button>
     <button class="btn" id="stop"><span class="icon" data-icon="stop"></span>急停</button>
   </div>
 </header>
+<p id="taskNotice" class="console-notice" role="status" hidden></p>
 <dialog id="intercomDialog" aria-labelledby="intercomTitle">
   <div class="toolbar"><h2 id="intercomTitle">双向语音对讲</h2><button class="btn gray" id="intercomClose">收起</button></div>
   <p class="form-hint">网页主动开启，机器人被动接入。使用独立麦克风和音响。</p>
@@ -37,7 +40,7 @@
   <p id="intercomMessage" role="status" class="form-hint">取得网页控制权后，可查询设备并开启对讲。</p>
 </dialog>
 <iframe id="view" title="机器人工作区" allow="autoplay; fullscreen" allowfullscreen></iframe>
-<script src="console.js?v=records-tabs-20261026-2"></script>
+<script src="console.js?v=one-click-20261029"></script>
 <script src="intercom-client.js"></script>
 </body>
 </html>

@@ -134,7 +134,7 @@ void MainWindow::setupUi() {
     if (!cancelPatrolRun(QStringLiteral("取消导航"))) controller_->cancelNavigation();
   });
   returnHomeButton_ = button("一键返回", headerRow, "returnHome");
-  returnHomeButton_->setToolTip("取消当前路线并返回当前地图已保存的待命点");
+  returnHomeButton_->setToolTip("结束当前路线或到点巡检，确认停止后返回当前地图待命点");
   connect(returnHomeButton_, &QPushButton::clicked, this, &MainWindow::returnHome);
   auto *emergency = button("急停", headerRow, "emergencyStop"); emergency->setEnabled(!offline_);
   connect(emergency, &QPushButton::clicked, controller_, &LocalController::emergencyStop);
@@ -174,6 +174,9 @@ void MainWindow::setupUi() {
   patrolAction_ = tools->addAction(QIcon(":/console/route.svg"), "路线巡航"); patrolAction_->setObjectName("patrolAction");
   patrolAction_->setToolTip("打开独立的本地点位、路线与多点巡航页面");
   connect(patrolAction_, &QAction::triggered, this, &MainWindow::openPatrolPage);
+  auto *inspectAction = tools->addAction(QIcon(":/console/target.svg"), "一键到达与巡检");
+  inspectAction->setObjectName("inspectionTargetAction");
+  connect(inspectAction, &QAction::triggered, this, &MainWindow::openInspectionTarget);
   auto *moduleMenu = ui_->menubar->addMenu("工具"); moduleMenu->addAction(mapEditorAction_); moduleMenu->addAction(patrolAction_);
   auto *devices = tools->addAction("设备执勤"); devices->setObjectName("deviceDutyAction");
   devices->setToolTip("独立启动气体检测和云台往返巡航"); moduleMenu->addAction(devices);
@@ -292,6 +295,8 @@ void MainWindow::setupUi() {
   connect(relocate, &QPushButton::clicked, this, [this] { sendInitialPose(goalX_->value(), goalY_->value(), goalYaw_->value() * pi / 180.); });
   navigationHint_ = hint("请先启用操作", navLayout); navigationHint_->setObjectName("consoleNavigationHint");
   auto *openRoute = button("打开路线巡航", navLayout); connect(openRoute, &QPushButton::clicked, this, &MainWindow::openPatrolPage);
+  auto *openTarget = button("一键到达与巡检", navLayout, "openInspectionTarget");
+  connect(openTarget, &QPushButton::clicked, this, &MainWindow::openInspectionTarget);
   navLayout->addStretch(); controlTabs_->addTab(scrollPane(nav), "导航");
 
   manualPage_ = new QWidget; auto *manual = pageLayout(manualPage_); manualPage_->installEventFilter(this);

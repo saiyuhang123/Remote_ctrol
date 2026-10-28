@@ -49,6 +49,7 @@ add_library(desktop_app STATIC
   src/adapters/desktop_remote_bridge.cpp
   src/runtime/process_manager.cpp src/runtime/map_saver.cpp
   src/patrol/patrol_client.cpp src/patrol/patrol_page.cpp
+  src/patrol/inspection_target_page.cpp
   src/patrol/recorded_road_page.cpp
   src/vision/vision_client.cpp src/vision/vision_panel.cpp
   src/devices/device_client.cpp src/devices/device_panel.cpp
@@ -110,6 +111,12 @@ if(BUILD_TESTING)
   endif()
   add_test(NAME desktop_patrol_page COMMAND desktop_patrol_page_test)
   set_tests_properties(desktop_patrol_page PROPERTIES TIMEOUT 45 ENVIRONMENT "QT_QPA_PLATFORM=offscreen;ROS_DOMAIN_ID=216;ROS_LOCALHOST_ONLY=1;ROS_LOG_DIR=${CMAKE_CURRENT_BINARY_DIR}/test_ros_logs")
+  if(patrol_interfaces_FOUND)
+    add_executable(desktop_inspection_target_test tests/inspection_target_test.cpp)
+    target_link_libraries(desktop_inspection_target_test PRIVATE desktop_app Qt5::Test)
+    add_test(NAME desktop_inspection_target COMMAND desktop_inspection_target_test)
+    set_tests_properties(desktop_inspection_target PROPERTIES TIMEOUT 60 ENVIRONMENT "QT_QPA_PLATFORM=offscreen;ROS_DOMAIN_ID=217;ROS_LOCALHOST_ONLY=1;ROS_LOG_DIR=${CMAKE_CURRENT_BINARY_DIR}/test_ros_logs")
+  endif()
   add_executable(desktop_ros_services_test tests/ros_services_test.cpp)
   target_link_libraries(desktop_ros_services_test PRIVATE desktop_app Qt5::Test)
   foreach(dep hk_camera ocr_interfaces slam_toolbox cartographer_ros_msgs)

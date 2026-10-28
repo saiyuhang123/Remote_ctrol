@@ -207,11 +207,13 @@ void MainWindow::updateControls() {
   if (returnHomeButton_) {
     const auto home = patrolClient_ ? patrolClient_->homePoint() : PatrolHomeInfo();
     const QString activeMap = patrolClient_ ? patrolClient_->activeMapId() : QString();
-    const auto patrol = patrolClient_ ? patrolClient_->status() : PatrolStatusInfo();
-    const bool returnRunning = patrol.active && patrol.runId.startsWith(QStringLiteral("return_"));
+    const bool returnRunning = patrolClient_ && patrolClient_->returnActiveOrPending();
+    quint64 mapRevision = 0;
+    if (patrolClient_) for (const auto &map : patrolClient_->maps()) if (map.mapId == activeMap) mapRevision = map.revision;
     returnHomeButton_->setEnabled(
         !offline_ && allowed() && profile().navigation && !home.mapId.isEmpty() &&
-        home.exists && home.mapId == activeMap && !returnRunning &&
+        home.exists && home.mapId == activeMap && home.mapRevision == mapRevision && !returnRunning &&
+        patrolClient_->returnServerReady() &&
         state_.poseValid && state_.frame == QStringLiteral("map") &&
         state_.navigationAvailable && state_.estopValid && !state_.estopped &&
         state_.guardValid && state_.guardReady && !(controller_ && controller_->manualReady()));
@@ -240,9 +242,9 @@ bool MainWindow::cancelPatrolRun(const QString &reason) {
   if (!patrolClient_->hasActiveOrPendingRun()) return false;
   const auto status = patrolClient_->status();
   if (status.runId.startsWith(QStringLiteral("return_"))) {
-    patrolClient_->cancelReturnHome();
+    patrolClient_->cancelActiveTask();
   } else {
-    patrolClient_->cancelRunRoute();
+    patrolClient_->cancelActiveTask();
     if (!status.runId.isEmpty()) patrolClient_->controlRun(3, status.runId);
   }
   log(reason + "：已向本地任务发送取消请求，等待停车确认");
@@ -271,9 +273,8 @@ void MainWindow::returnHome() {
   quint64 mapRevision = 0;
   for (const auto &item : patrolClient_->maps())
     if (item.mapId == mapId) mapRevision = item.revision;
-  if (!mapRevision) { log(QStringLiteral("一键返回：活跃地图版本未知，请刷新地图")); return; }
-  const auto status = patrolClient_->status();
-  if (status.active && status.runId.startsWith(QStringLiteral("return_"))) {
+  if (!mapRevision || home.mapRevision != mapRevision) { log(QStringLiteral("一键返回：地图版本已变化，请刷新并重新保存返航点")); return; }
+  if (patrolClient_->returnActiveOrPending()) {
     log(QStringLiteral("一键返回：返航任务已在执行")); return;
   }
   patrolClient_->returnHome(mapId, mapRevision);
@@ -409,6 +410,11 @@ void MainWindow::openMapEditor() {
   editor->activateWindow();
 }
 
+void MainWindow::openInspectionTarget() {
+  openPatrolPage();
+  if (patrolPage_) patrolPage_->showInspectionTarget();
+}
+
 void MainWindow::openPatrolPage() {
   if (patrolWindow_) {
     patrolWindow_->raise();
@@ -427,7 +433,7 @@ void MainWindow::openPatrolPage() {
   else if (profile().backend == "cartographer") localizationFile = prefix + ".pbstream";
   auto *dialog = new QDialog(this);
   dialog->setObjectName("patrolWindow");
-  dialog->setWindowTitle("路线巡航");
+  dialog->setWindowTitle("巡检任务 · 路线 / 一键到达");
   dialog->setAttribute(Qt::WA_DeleteOnClose);
   const QSize available = screen() ? screen()->availableGeometry().size() : QSize(1280, 840);
   dialog->resize(qMin(1180, available.width() - 40), qMin(760, available.height() - 40));
