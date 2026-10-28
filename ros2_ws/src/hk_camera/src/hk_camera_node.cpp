@@ -7,6 +7,7 @@
 #include <cv_bridge/cv_bridge.h>
 #include <opencv2/opencv.hpp>
 #include <stdexcept>
+#include <cmath>
 #include <QDir>
 #include <QJsonDocument>
 #include <QJsonObject>
@@ -36,13 +37,49 @@ HKCameraNode::HKCameraNode(const std::string& name)
     decoder_ = new HKDecoder();  // HKCameraNode 不是 QObject, 不传 parent
 
     loadParameters();
+    rclcpp::InitOptions transport_options;
+    transport_options.auto_initialize_logging(false);
+    sdk_context_ = std::make_shared<rclcpp::Context>();
+    sdk_context_->init(0, nullptr, transport_options);
+    sdk_node_ = std::make_shared<rclcpp::Node>("hk_camera_sdk", get_namespace(),
+        rclcpp::NodeOptions().context(sdk_context_).use_global_arguments(false)
+            .start_parameter_services(false).start_parameter_event_publisher(false));
+    preview_context_ = std::make_shared<rclcpp::Context>();
+    preview_context_->init(0, nullptr, transport_options);
+    preview_node_ = std::make_shared<rclcpp::Node>("hk_camera_preview", get_namespace(),
+        rclcpp::NodeOptions().context(preview_context_).use_global_arguments(false)
+            .start_parameter_services(false).start_parameter_event_publisher(false));
+    rclcpp::ExecutorOptions sdk_executor_options;
+    sdk_executor_options.context = sdk_context_;
+    sdk_executor_ = std::make_unique<rclcpp::executors::SingleThreadedExecutor>(sdk_executor_options);
+    sdk_executor_->add_node(sdk_node_);
     setupPublishers();
     setupSubscribers();
     setupServices();
     connectCameraSignals();
+    stream_status_timer_ = create_wall_timer(std::chrono::seconds(1),
+                                           [this] { publishStreamStatus(); });
     face_timer_ = create_wall_timer(std::chrono::milliseconds(100),
                                   [this] { processFaceCaptures(); });
     face_status_timer_ = create_wall_timer(std::chrono::seconds(1), [this] { publishFaceStatus(); });
+    try {
+        raw_publish_thread_ = std::thread([this] { publishFrames(false); });
+        preview_publish_thread_ = std::thread([this] { publishFrames(true); });
+        sdk_thread_ = std::thread([this] {
+            try { sdk_executor_->spin(); }
+            catch (const std::exception&) {
+                if (rclcpp::ok(sdk_context_)) RCLCPP_ERROR(get_logger(), "SDK executor stopped unexpectedly");
+            }
+        });
+    } catch (...) {
+        sdk_executor_->cancel();
+        if (sdk_thread_.joinable()) sdk_thread_.join();
+        latest_frame_.close();
+        if (raw_publish_thread_.joinable()) raw_publish_thread_.join();
+        if (preview_publish_thread_.joinable()) preview_publish_thread_.join();
+        delete decoder_;
+        throw;
+    }
 
     RCLCPP_INFO(get_logger(), "HKCameraNode initialized (SDK %s)",
                 camera_->getSDKVersion().c_str());
@@ -62,13 +99,19 @@ HKCameraNode::HKCameraNode(const std::string& name)
 
 HKCameraNode::~HKCameraNode()
 {
+    sdk_executor_->cancel();
+    sdk_thread_.join();
     stopPTZ();
     ptz_timer_->cancel();
     accept_faces_ = false;
     face_timer_->cancel();
     face_status_timer_->cancel();
+    stream_status_timer_->cancel();
     for (const auto& connection : camera_connections_) QObject::disconnect(connection);
     decoder_->stop();
+    latest_frame_.close();
+    raw_publish_thread_.join();
+    preview_publish_thread_.join();
     if (alarm_handle_ >= 0) camera_->closeAlarmChan(alarm_handle_);
     while (true) {
         { std::lock_guard<std::mutex> guard(face_mutex_); if (face_queue_.empty()) break; }
@@ -77,6 +120,9 @@ HKCameraNode::~HKCameraNode()
     if (user_id_ >= 0)      camera_->logout(user_id_);
     camera_->cleanup();
     delete decoder_;
+    sdk_executor_->remove_node(sdk_node_);
+    if (rclcpp::ok(sdk_context_)) sdk_context_->shutdown("Camera stopped");
+    if (rclcpp::ok(preview_context_)) preview_context_->shutdown("Camera stopped");
 }
 
 // ============================================================
@@ -106,6 +152,12 @@ void HKCameraNode::loadParameters()
     raw_rate_descriptor.read_only = true;
     raw_rate_descriptor.description = "Raw image publish limit, 0..30 fps; 0 is unlimited. Restart to change.";
     declare_parameter("raw_publish_fps", 8., raw_rate_descriptor);
+    rcl_interfaces::msg::ParameterDescriptor stream_descriptor;
+    stream_descriptor.read_only = true;
+    stream_descriptor.description = "RTSP timeout/retry settings; restart to change.";
+    declare_parameter("reconnect_interval", 5., stream_descriptor);
+    declare_parameter("stream_open_timeout_ms", 3000, stream_descriptor);
+    declare_parameter("stream_read_timeout_ms", 2000, stream_descriptor);
     declare_parameter("preview_max_width", 640);
     declare_parameter("preview_publish_fps", 5.);
 
@@ -116,6 +168,14 @@ void HKCameraNode::loadParameters()
     preview_publish_fps_ = get_parameter("preview_publish_fps").as_double();
     if (!validPreviewSettings(preview_max_width_, preview_publish_fps_))
         throw std::invalid_argument("preview_max_width must be 160..4096; preview_publish_fps must be 0.5..30");
+    const double reconnect = get_parameter("reconnect_interval").as_double();
+    const auto open_timeout = get_parameter("stream_open_timeout_ms").as_int();
+    const auto read_timeout = get_parameter("stream_read_timeout_ms").as_int();
+    if (!std::isfinite(reconnect) || reconnect < .1 || reconnect > 60. ||
+        open_timeout < 100 || open_timeout > 30000 || read_timeout < 100 || read_timeout > 30000)
+        throw std::invalid_argument("RTSP reconnect_interval must be 0.1..60 s and timeouts 100..30000 ms");
+    decoder_options_ = {static_cast<int>(open_timeout), static_cast<int>(read_timeout),
+                        static_cast<int>(reconnect*1000.)};
 
     login_info_.ip       = get_parameter("ip").as_string();
     login_info_.port     = static_cast<uint16_t>(get_parameter("port").as_int());
@@ -164,12 +224,14 @@ void HKCameraNode::setupPublishers()
 {
     image_pub_  = create_publisher<sensor_msgs::msg::Image>(
         "/hk_camera/image_raw", rclcpp::QoS(1).reliable());
-    preview_pub_ = create_publisher<sensor_msgs::msg::Image>(
+    preview_pub_ = preview_node_->create_publisher<sensor_msgs::msg::Image>(
         "/hk_camera/image_preview", rclcpp::SensorDataQoS().keep_last(1));
     alarm_pub_  = create_publisher<msg::CameraAlarm>(
         "/hk_camera/alarm", 10);
-    status_pub_ = create_publisher<std_msgs::msg::String>(
+    status_pub_ = preview_node_->create_publisher<std_msgs::msg::String>(
         "/hk_camera/status", 10);
+    stream_status_pub_ = preview_node_->create_publisher<std_msgs::msg::String>(
+        "/hk_camera/stream_status", rclcpp::QoS(1).best_effort());
     face_status_pub_ = create_publisher<std_msgs::msg::String>("/hk_camera/face_status", 5);
     face_pub_ = create_publisher<msg::FaceCapture>(
         "/hk_camera/face_capture", rclcpp::QoS(10).reliable().transient_local());
@@ -232,24 +294,25 @@ void HKCameraNode::setupServices()
     // public services so it can combine these two independent devices.
     const bool public_ptz = get_parameter("enable_ptz_services").as_bool();
     const std::string ptz_prefix = public_ptz ? "/hk_camera/" : "/hk_camera/sdk/";
-    control_ptz_srv_ = create_service<srv::ControlPTZ>(ptz_prefix + "control_ptz",
+    control_ptz_srv_ = sdk_node_->create_service<srv::ControlPTZ>(ptz_prefix + "control_ptz",
         [this](const srv::ControlPTZ::Request::SharedPtr req,
                srv::ControlPTZ::Response::SharedPtr res) { onControlPTZ(req, res); });
-    ptz_timer_ = create_wall_timer(std::chrono::milliseconds(100), [this] {
+    ptz_timer_ = sdk_node_->create_wall_timer(std::chrono::milliseconds(100), [this] {
+        std::lock_guard<std::recursive_mutex> lock(sdk_session_mutex_);
         if (active_ptz_command_ && std::chrono::steady_clock::now() >= ptz_deadline_)
             stopPTZ();  // Retry on SDK errors until a stop succeeds.
     });
 
-    get_ptz_pose_srv_ = create_service<srv::GetPTZPose>(
+    get_ptz_pose_srv_ = sdk_node_->create_service<srv::GetPTZPose>(
         ptz_prefix + "get_ptz_pose",
         [this](const srv::GetPTZPose::Request::SharedPtr req,
                srv::GetPTZPose::Response::SharedPtr res) { onGetPTZPose(req, res); });
-    ptz_preset_srv_ = create_service<srv::PTZPreset>(
+    ptz_preset_srv_ = sdk_node_->create_service<srv::PTZPreset>(
         "/hk_camera/preset",
         [this](const srv::PTZPreset::Request::SharedPtr req,
                srv::PTZPreset::Response::SharedPtr res) { onPTZPreset(req, res); });
 
-    set_ptz_pose_srv_ = create_service<srv::SetPTZPose>(
+    set_ptz_pose_srv_ = sdk_node_->create_service<srv::SetPTZPose>(
         ptz_prefix + "set_ptz_pose",
         [this](const srv::SetPTZPose::Request::SharedPtr  req,
                srv::SetPTZPose::Response::SharedPtr       res) {
@@ -286,22 +349,68 @@ void HKCameraNode::connectCameraSignals()
 
 void HKCameraNode::onDecodedImage(const QImage& image)
 {
-    if (image.isNull()) return;
-    const auto current = std::chrono::steady_clock::now();
-    const auto stamp = now();
+    // This callback runs on the RTSP reader. Never serialize or publish a ROS
+    // image here: DDS backpressure must not stop draining the camera stream.
+    latest_frame_.put(image, now().nanoseconds());
+}
 
-    if (raw_gate_.due(image_pub_->get_subscription_count() > 0, raw_publish_fps_, current))
-        publishImage(image_pub_, image, stamp);
-    if (preview_gate_.due(preview_pub_->get_subscription_count() > 0,
-                          preview_publish_fps_, current))
-        publishImage(preview_pub_, makePreview(image, preview_max_width_), stamp);
-
-    if (status_gate_.due(true, 1., current))
+void HKCameraNode::publishFrames(bool preview)
+{
+    uint64_t seen = 0;
+    ImageRateGate gate;
+    const auto publisher = preview ? preview_pub_ : image_pub_;
+    const double fps = preview ? preview_publish_fps_ : raw_publish_fps_;
+    while (const auto frame = latest_frame_.waitNext(seen))
     {
-        auto status = std_msgs::msg::String();
-        status.data = "streaming_active";
-        status_pub_->publish(status);
+        const auto current = std::chrono::steady_clock::now();
+        if (!decoder_->isRunning() || current-frame->received > std::chrono::seconds(1) ||
+            !gate.due(publisher->get_subscription_count() > 0, fps, current)) continue;
+        try {
+            publishImage(publisher, preview ? makePreview(frame->image, preview_max_width_) : frame->image,
+                         rclcpp::Time(frame->stamp_ns));
+            auto& last_publish = preview ? last_preview_publish_ms_ : last_raw_publish_ms_;
+            last_publish = std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now().time_since_epoch()).count();
+        } catch (const std::exception&) {
+            if (rclcpp::ok(get_node_base_interface()->get_context()))
+                RCLCPP_ERROR(get_logger(), "%s image publish failed", preview ? "Preview" : "Raw");
+        }
     }
+}
+
+void HKCameraNode::publishStreamStatus()
+{
+    const auto health = decoder_->health();
+    const std::string state = !health.requested ? "stopped" :
+        health.connected && health.frame_age_ms <= decoder_options_.read_timeout_ms ? "streaming" :
+        health.connection_attempts > 1 ? "reconnecting" : "connecting";
+    if (state != last_stream_state_) {
+        if (state == "streaming" || state == "stopped")
+            RCLCPP_INFO(get_logger(), "Video state=%s attempts=%lu frames=%lu", state.c_str(),
+                        health.connection_attempts, health.frames);
+        else
+            RCLCPP_WARN(get_logger(), "Video state=%s attempts=%lu frame_age_ms=%ld error=%s",
+                        state.c_str(), health.connection_attempts, health.frame_age_ms, health.last_error.c_str());
+        last_stream_state_ = state;
+    }
+    std_msgs::msg::String legacy;
+    legacy.data = state == "streaming" ? "streaming_active" : "streaming_" + state;
+    status_pub_->publish(legacy);
+    const auto now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count();
+    const auto age = [now_ms](int64_t value) { return value ? now_ms-value : int64_t(-1); };
+    QJsonObject object{{"state", QString::fromStdString(state)}, {"requested", health.requested},
+        {"connected", health.connected}, {"frames", static_cast<qint64>(health.frames)},
+        {"connection_attempts", static_cast<qint64>(health.connection_attempts)},
+        {"frame_age_ms", static_cast<qint64>(health.frame_age_ms)},
+        {"raw_publish_age_ms", static_cast<qint64>(age(last_raw_publish_ms_))},
+        {"preview_publish_age_ms", static_cast<qint64>(age(last_preview_publish_ms_))},
+        {"last_sdk_query_ms", static_cast<qint64>(last_sdk_query_ms_)},
+        {"last_sdk_lock_wait_ms", static_cast<qint64>(last_sdk_lock_wait_ms_)},
+        {"last_error", QString::fromStdString(health.last_error)}};
+    std_msgs::msg::String message;
+    message.data = QJsonDocument(object).toJson(QJsonDocument::Compact).toStdString();
+    stream_status_pub_->publish(message);
 }
 
 // ---- 报警回调 → 发布 CameraAlarm ----
@@ -519,6 +628,7 @@ void HKCameraNode::onLogout(
         if (alarm_handle_ >= 0) camera_->closeAlarmChan(alarm_handle_);
         alarm_handle_ = -1;
         decoder_->stop();
+        latest_frame_.clear();
         while (true) {
             { std::lock_guard<std::mutex> guard(face_mutex_); if (face_queue_.empty()) break; }
             processFaceCaptures();
@@ -550,11 +660,12 @@ void HKCameraNode::onStartStream(
     if (decoder_->isRunning())
     {
         res->success = true;
-        res->message = "Stream already active";
+        res->message = "Stream already active or reconnecting";
         return;
     }
 
-    if (decoder_->start(login_info_, channel_))
+    latest_frame_.clear();
+    if (decoder_->start(login_info_, channel_, decoder_options_))
     {
         res->success = true;
         res->message = "RTSP stream started";
@@ -575,6 +686,7 @@ void HKCameraNode::onStopStream(
     if (decoder_->isRunning())
     {
         decoder_->stop();
+        latest_frame_.clear();
         res->success = true;
         res->message = "Stream stopped";
     }
@@ -716,7 +828,16 @@ void HKCameraNode::onGetPTZPose(
     const srv::GetPTZPose::Request::SharedPtr,
     srv::GetPTZPose::Response::SharedPtr res)
 {
+    using Clock = std::chrono::steady_clock;
+    const auto started = Clock::now();
     std::lock_guard<std::recursive_mutex> lock(sdk_session_mutex_);
+    const auto locked = Clock::now();
+    last_sdk_lock_wait_ms_ = std::chrono::duration_cast<std::chrono::milliseconds>(locked-started).count();
+    struct Timing {
+        std::atomic<int64_t>& elapsed;
+        Clock::time_point start;
+        ~Timing() { elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now()-start).count(); }
+    } timing{last_sdk_query_ms_, locked};
     if (user_id_ < 0) { res->message = "Not logged in"; return; }
     NET_DVR_PTZPOS pose{};
     DWORD length = 0;

@@ -2,6 +2,7 @@
 #define HK_CAMERA_NODE_H
 
 #include <rclcpp/rclcpp.hpp>
+#include <rclcpp/executors/single_threaded_executor.hpp>
 #include <sensor_msgs/msg/image.hpp>
 #include <std_msgs/msg/string.hpp>
 #include <std_srvs/srv/trigger.hpp>
@@ -13,6 +14,7 @@
 #include "hk_camera/hk_camera.h"
 #include "hk_camera/hk_decoder.h"
 #include "hk_camera/image_preview.h"
+#include "hk_camera/latest_frame.h"
 #include "hk_camera/msg/camera_alarm.hpp"
 #include "hk_camera/msg/face_capture.hpp"
 #include "hk_camera/srv/capture_picture.hpp"
@@ -75,6 +77,8 @@ private:
     // ---- 与 HKCamera (Qt 层) 桥接 ----
     void connectCameraSignals();
     void onDecodedImage(const QImage& image);
+    void publishFrames(bool preview);
+    void publishStreamStatus();
     void onAlarm(const AlarmEvent& alarm);
     void onFaceCapture(const FaceCaptureEvent& event);
     void processFaceCaptures();
@@ -142,6 +146,21 @@ private:
     int active_ptz_command_ = 0, active_ptz_speed_ = 0;
     std::chrono::steady_clock::time_point ptz_deadline_;
     std::vector<QMetaObject::Connection> camera_connections_;
+    DecoderOptions decoder_options_;
+    LatestFrame latest_frame_;
+    std::thread raw_publish_thread_, preview_publish_thread_;
+    std::atomic<int64_t> last_raw_publish_ms_{0}, last_preview_publish_ms_{0};
+    rclcpp::TimerBase::SharedPtr stream_status_timer_;
+    std::string last_stream_state_;
+    // A separate DDS participant keeps small control replies out of the
+    // full-image transport's queues, including capture service responses.
+    std::shared_ptr<rclcpp::Context> sdk_context_;
+    rclcpp::Node::SharedPtr sdk_node_;
+    std::shared_ptr<rclcpp::Context> preview_context_;
+    rclcpp::Node::SharedPtr preview_node_;
+    std::unique_ptr<rclcpp::executors::SingleThreadedExecutor> sdk_executor_;
+    std::thread sdk_thread_;
+    std::atomic<int64_t> last_sdk_query_ms_{0}, last_sdk_lock_wait_ms_{0};
 
     // Keep SDK calls and login/logout serialized, but release this before
     // converting a capture or returning its large ROS image response.
@@ -156,11 +175,11 @@ private:
     double raw_publish_fps_ = 8.;
     int preview_max_width_ = 640;
     double preview_publish_fps_ = 5.;
-    ImageRateGate raw_gate_, preview_gate_, status_gate_;
     rclcpp::Publisher<msg::CameraAlarm>::SharedPtr            alarm_pub_;
     rclcpp::Publisher<msg::FaceCapture>::SharedPtr            face_pub_;
     rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr      face_image_pub_;
     rclcpp::Publisher<std_msgs::msg::String>::SharedPtr       status_pub_;
+    rclcpp::Publisher<std_msgs::msg::String>::SharedPtr       stream_status_pub_;
     rclcpp::Publisher<std_msgs::msg::String>::SharedPtr       face_status_pub_;
 
     // ---- 订阅器 ----

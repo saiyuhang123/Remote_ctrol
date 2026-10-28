@@ -12,14 +12,28 @@
 
 #include <rclcpp/rclcpp.hpp>
 #include <rclcpp/executors/multi_threaded_executor.hpp>
+#include <cstdlib>
 #include <QCoreApplication>
+#include <QDir>
+#include <QFileInfo>
 #include "hk_camera/hk_camera_node.h"
 #include "hk_camera/hk_camera.h"
 
 int main(int argc, char* argv[])
 {
-    rclcpp::init(argc, argv);
     QCoreApplication app(argc, argv);
+    if (!std::getenv("FASTRTPS_DEFAULT_PROFILES_FILE")) {
+        QString profile = QDir(QCoreApplication::applicationDirPath()).absoluteFilePath(
+            "../../share/hk_camera/config/camera_dds_profiles.xml");
+        if (!QFileInfo::exists(profile)) profile = QString::fromUtf8(HK_DDS_PROFILE);
+        if (!QFileInfo::exists(profile) ||
+            ::setenv("FASTRTPS_DEFAULT_PROFILES_FILE", profile.toLocal8Bit().constData(), 0) != 0) return 1;
+    }
+    // Full-resolution images and capture replies must not perform DDS network
+    // delivery on the SDK/executor thread. Scope this to the camera process;
+    // an explicitly supplied middleware policy still takes precedence.
+    if (::setenv("RMW_FASTRTPS_PUBLICATION_MODE", "ASYNCHRONOUS", 0) != 0) return 1;
+    rclcpp::init(argc, argv);
 
     // 初始化 HK SDK
     auto* camera = hk_camera::HKCamera::instance();

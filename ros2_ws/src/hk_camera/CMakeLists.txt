@@ -96,7 +96,8 @@ endforeach()
 
 function(configure_hk_sdk_target target)
   target_compile_definitions(${target} PRIVATE
-    HK_SDK_LIB_DIR="${HK_SDK_LIB_DIR_ABS}")
+    HK_SDK_LIB_DIR="${HK_SDK_LIB_DIR_ABS}"
+    HK_DDS_PROFILE="${CMAKE_CURRENT_SOURCE_DIR}/config/camera_dds_profiles.xml")
 endfunction()
 
 # 公共头文件路径
@@ -261,5 +262,14 @@ if(BUILD_TESTING)
   ament_target_dependencies(test_capture_scheduling rclcpp sensor_msgs std_msgs std_srvs geometry_msgs cv_bridge OpenCV)
   set_tests_properties(test_capture_scheduling PROPERTIES TIMEOUT 15
     ENVIRONMENT "ROS_DOMAIN_ID=224;ROS_LOCALHOST_ONLY=1;OPENBLAS_NUM_THREADS=1")
+  ament_add_gtest(test_decoder_recovery test/test_decoder_recovery.cpp src/hk_decoder.cpp
+    include/hk_camera/hk_decoder.h)
+  target_include_directories(test_decoder_recovery PRIVATE ${COMMON_INCLUDE_DIRS})
+  target_link_libraries(test_decoder_recovery Qt5::Core Qt5::Gui)
+  ament_target_dependencies(test_decoder_recovery OpenCV)
+  ament_add_gtest(test_latest_frame test/test_latest_frame.cpp)
+  target_include_directories(test_latest_frame PRIVATE include)
+  target_link_libraries(test_latest_frame Qt5::Core Qt5::Gui)
+  set_tests_properties(test_decoder_recovery test_latest_frame PROPERTIES TIMEOUT 15)
 endif()
 ament_package()

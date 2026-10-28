@@ -8,7 +8,7 @@
 
 using namespace std::chrono_literals;
 
-TEST(CameraScheduling, LensQueryRunsWhileTheRealCaptureGroupIsOccupied)
+TEST(CameraScheduling, LensQueryRunsWhileCaptureAndDefaultCallbacksAreOccupied)
 {
     rclcpp::init(0, nullptr);
     struct Shutdown { ~Shutdown() { rclcpp::shutdown(); } } shutdown;
@@ -29,7 +29,8 @@ TEST(CameraScheduling, LensQueryRunsWhileTheRealCaptureGroupIsOccupied)
         });
     ASSERT_TRUE(capture_group);
     ASSERT_NE(capture_group, camera->get_node_base_interface()->get_default_callback_group());
-    rclcpp::executors::MultiThreadedExecutor executor(rclcpp::ExecutorOptions(), 2);
+    // Two blocked camera groups plus one thread to receive the client's reply.
+    rclcpp::executors::MultiThreadedExecutor executor(rclcpp::ExecutorOptions(), 3);
     executor.add_node(camera);
     executor.add_node(client_node);
     std::promise<void> release;
@@ -55,6 +56,15 @@ TEST(CameraScheduling, LensQueryRunsWhileTheRealCaptureGroupIsOccupied)
         released.wait();
     }, capture_group);
     ASSERT_EQ(entering.wait_for(2s), std::future_status::ready);
+    std::promise<void> default_entered;
+    auto default_entering = default_entered.get_future();
+    rclcpp::TimerBase::SharedPtr default_blocker;
+    default_blocker = camera->create_wall_timer(1ms, [&] {
+        default_blocker->cancel();
+        default_entered.set_value();
+        released.wait();
+    });
+    ASSERT_EQ(default_entering.wait_for(2s), std::future_status::ready);
     auto response = client->async_send_request(std::make_shared<hk_camera::srv::GetPTZPose::Request>());
     ASSERT_EQ(response.wait_for(400ms), std::future_status::ready);
     EXPECT_EQ(response.get()->message, "Not logged in");
