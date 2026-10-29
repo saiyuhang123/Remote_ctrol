@@ -187,7 +187,7 @@
     const pointBusy=task.running && task.kind==='point';
     const ready=app.mapReady && targetStamp===stamp() && $('targetX').value!=='' && $('targetY').value!=='';
     $('pointStart').textContent=$('targetInspect').checked?'到达并巡检':'一键到达';
-    const motionReady=control.estop_known===true && control.estopped===false && !t.desktop?.pending?.estop_release;
+    const motionReady=control.estop_known===true && control.estopped===false && !t.desktop?.pending?.estop_release && RobotControlAccess.guardReady(app);
     $('pointStart').disabled=!owner || !ready || Boolean(pending) || task.running || t.patrol?.active || !motionReady;
     $('pointCancel').disabled=!owner || !(pointBusy || pending);
     $('pointHome').disabled=!owner || !motionReady || !app.mapReady || homeStamp!==stamp() || task.kind==='return' || Boolean(task.pending_return);

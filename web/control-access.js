@@ -2,6 +2,10 @@
 (() => {
   'use strict';
   const el = id => document.getElementById(id);
+  function guardReady(app) {
+    const g = app.telemetry?.patrol_guard || {};
+    return g.available === true && g.ready === true && Number.isFinite(g.age) && g.age <= 1.5;
+  }
   function update(app) {
     const t = app.telemetry || {}, c = t.control || {}, local = t.desktop || {};
     const connected = app.ws?.readyState === 1 && Number.isFinite(t.received_at_ms) && Date.now()-t.received_at_ms < 3000;
@@ -15,7 +19,11 @@
     el('btnClaim').title = reasons.join('；') || '取得本网页控制权';
     const stopHint = c.estop_known !== true ? '急停状态未知：可操作设备，行驶前需解除急停。' :
       c.estopped ? '急停保持中：可操作设备，行驶前需解除急停。' : '急停已解除；行驶和任务需由你明确启动。';
-    el('controlHint').textContent = (reasons.join('；') || '可取得控制权。') + ' ' + stopHint;
+    const guard = t.patrol_guard || {};
+    const guardHint = guardReady(app) ? '' : ' 巡航联锁未就绪：'+
+      (guard.reason || '请先在 Qt 启用巡航联锁并启动导航')+(guard.fault_code ? ` (${guard.fault_code})` : '')+
+      '；停稳后可在顶栏明确复位，旧任务不会自动恢复。';
+    el('controlHint').textContent = (reasons.join('；') || '可取得控制权。') + ' ' + stopHint + guardHint;
     const otherOwner = c.owner_present && !app.session;
     const busy = t.task?.running || t.patrol?.active || t.nav?.active_goal_count > 0;
     const pending = app.unlockPending || local.pending?.estop_release;
@@ -48,5 +56,5 @@
     app.unlockPending = false; app.unlockRequestId = '';
     report(data.message || data.code, !data.ok); changed(); return true;
   }
-  window.RobotControlAccess = {update, release, result};
+  window.RobotControlAccess = {update, release, result, guardReady};
 })();

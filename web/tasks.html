@@ -276,7 +276,7 @@ function updateUi() {
     (control.estopped ? '急停保持' : '已释放');
   $('estopText').className = control.estop_known !== true ? 'warning' :
     (control.estopped ? 'dangerText' : 'good');
-  const motionReady = control.estop_known === true && control.estopped === false && !app.telemetry?.desktop?.pending?.estop_release;
+  const motionReady = control.estop_known === true && control.estopped === false && !app.telemetry?.desktop?.pending?.estop_release && RobotControlAccess.guardReady(app);
   $('btnStart').disabled = !owner || !motionReady || !sync || !selected || running;
   if (selected?.requires_preview && !window.previewIsCurrent?.()) $('btnStart').disabled = true;
   $('btnPreview').disabled = !owner || !sync || !selected?.requires_preview || running;

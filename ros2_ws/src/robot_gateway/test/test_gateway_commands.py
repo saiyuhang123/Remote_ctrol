@@ -68,6 +68,51 @@ def test_battery_waiting_zero_soc_expiry_and_recovery(gateway):
     assert node._battery_snapshot()['percentage'] == 85.
 
 
+def test_control_generations_advance_only_at_ownership_boundaries(gateway):
+    node,ws,data,results=gateway
+    first=node._control_snapshot()['revision']
+    asyncio.run(node.handle_command(ws,dict(type='control_heartbeat',session_id=data['session_id'])))
+    assert node._control_snapshot()['revision']==first
+    node._perform_release('explicit test release')
+    released=node._control_snapshot()['revision']
+    assert released>first
+    token,_,_=node._claim_control(ws)
+    assert token!=data['session_id'] and node._control_snapshot()['revision']>released
+
+
+def test_guard_reset_is_explicit_checks_busy_and_preserves_guard_refusal(gateway):
+    from patrol_interfaces.srv import ResetInterlock
+    from std_msgs.msg import String
+    import json
+    node,ws,data,results=gateway
+    calls=[]
+    response=ResetInterlock.Response(success=False,message='车辆尚未停稳，不能复位联锁',interlocked=True)
+    class ResetClient:
+        def service_is_ready(self):return True
+        def call_async(self,request):
+            calls.append(request);f=Future();f.set_result(response);return f
+    node._reset_interlock_client=ResetClient()
+    node._on_guard_status(String(data=json.dumps(dict(ready=False,locked=True,fault_code='OPERATOR_LOST',reason='操作端心跳丢失'))))
+    assert not node._guard_snapshot()['ready']
+    payload=dict(data,type='patrol_reset_interlock')
+    asyncio.run(node.handle_command(ws,dict(payload,session_id='invalid')))
+    assert not calls and results[-1]['code']=='NOT_OWNER'
+    node._patrol_status={'active':True}
+    asyncio.run(node.handle_command(ws,payload))
+    assert not calls and results[-1]['code']=='BUSY'
+    node._patrol_status={'active':False}
+    asyncio.run(node.handle_command(ws,payload))
+    assert len(calls)==1 and results[-1]['code']=='INTERLOCK_NOT_READY'
+    assert results[-1]['message']=='车辆尚未停稳，不能复位联锁'
+    response.success=True;response.interlocked=False;response.message='巡航联锁已复位'
+    asyncio.run(node.handle_command(ws,payload))
+    assert len(calls)==2 and results[-1]['ok'] and not node._task_kind
+    assert calls[-1].session_id==data['session_id']
+    assert not node._interlock_reset_pending
+    node._guard_time-=2.
+    assert not node._guard_snapshot()['available']
+
+
 @pytest.mark.parametrize('capacity,voltage', [(101.,24.),(-1.,24.),(float('nan'),24.),(50.,0.),(50.,float('inf'))])
 def test_invalid_battery_clears_previous_reading(gateway, capacity, voltage):
     node, *_ = gateway

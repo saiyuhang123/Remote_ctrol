@@ -40,6 +40,8 @@ class RobotFixture:
         self.task = {'kind': '', 'running': False}
         self.mode = 'idle'
         self.heartbeat = 0
+        self.control_revision = 0
+        self.guard = dict(available=True,ready=True,age=.1,reset_available=True)
         self.accepted = self.closed = self.canceled = 0
         self.messages = []
         self.reject_route = False
@@ -161,7 +163,7 @@ class RobotFixture:
 
     def control(self):
         return dict(owner_present=self.owner is not None, mode=self.mode,
-                    local_control=False, estop_known=True, estopped=False)
+                    revision=self.control_revision,local_control=False, estop_known=True, estopped=False)
 
     def gas(self):
         return dict(status=dict(enabled=self.gas_mode != 'stopped', connected=self.gas_mode != 'error',
@@ -171,7 +173,7 @@ class RobotFixture:
                     status_age=.1, data_age=30 if self.gas_mode == 'stale' else .1)
 
     def telemetry(self):
-        return dict(type='telemetry', control=self.control(), task=self.task, frame='map',
+        return dict(type='telemetry', control=self.control(), task=self.task, frame='map',patrol_guard=self.guard,
                     speed=0, turn=0, pose={'x': 0, 'y': 0, 'yaw': 0}, scan=[], paths={},
                     patrol=dict(active=self.task['running'], state=3, state_name='navigating',
                                 route_id='r', run_id='run' if self.task['running'] else '',
@@ -203,6 +205,7 @@ class RobotFixture:
             self.canceled += 1
         self.task = {'kind': '', 'running': False}
         self.owner = self.token = None
+        self.control_revision += 1
         self.mode = 'idle'
 
     async def handle(self, ws):
@@ -236,8 +239,9 @@ class RobotFixture:
                         await self.send(ws, dict(result, ok=False, code='CONTROL_BUSY'))
                         continue
                     self.owner, self.token, self.mode = ws, 'fixture_token', 'manual'
+                    self.control_revision += 1
                     self.heartbeat = time.monotonic()
-                    await self.send(ws, dict(result, session_id=self.token))
+                    await self.send(ws, dict(result, session_id=self.token,control_revision=self.control_revision))
                     continue
                 if command == 'estop':
                     self.release(self.owner)
@@ -272,6 +276,9 @@ class RobotFixture:
                     self.audio.update(state='playing' if command=='audio_play' else 'stopped',
                                       request_id=data['request_id'],message='机器人正在播放' if command=='audio_play' else '已停止')
                     await self.send(ws,result)
+                elif command=='patrol_reset_interlock':
+                    self.guard.update(ready=True,fault_code='',reason='巡航联锁已复位')
+                    await self.send(ws,dict(result,message='巡航联锁已复位，任务已终止且车辆停稳'))
                 elif command=='capture':
                     item=dict(capture_id=data['request_id'],stamp=time.time(),label='网页手动抓拍',image_url='/captures/2026-10-22/web.jpg',available=True)
                     self.captures.append(item)
@@ -384,6 +391,63 @@ def test_view_navigation_keeps_one_socket_and_close_still_cancels(web):
     wait_for(lambda: any(item['type'] == 'route_pause' for item in robot.messages))
     page.close()
     wait_for(lambda: robot.canceled == 1 and robot.owner is None)
+
+
+def test_monitor_render_stall_keeps_task_lease_and_one_connection(web):
+    robot,page,_=web
+    start_route(robot,page)
+    owner=robot.token
+    page.context.add_init_script("""
+      if (location.pathname.endsWith('/monitor.html')) {
+        addEventListener('load', () => {
+          const end=performance.now()+1600;
+          while (performance.now()<end) {} // large-map first render
+        }, {once:true});
+      }
+    """)
+    page.locator('header nav a[data-page=monitor]').click()
+    page.frame_locator('#view').locator('#gasValue').get_by_text('12.3',exact=True).wait_for()
+    page.wait_for_timeout(400)
+    assert robot.token==owner and robot.task['running']
+    assert robot.accepted==1 and robot.canceled==0
+    page.close()
+    wait_for(lambda:robot.owner is None and robot.canceled==1)
+
+
+def test_unresponsive_shell_expires_worker_lease_and_does_not_resume(web):
+    robot,page,_=web
+    start_route(robot,page)
+    page.evaluate('''() => { const end=performance.now()+6200; while(performance.now()<end) {} }''')
+    wait_for(lambda:robot.owner is None and robot.canceled==1)
+    page.wait_for_timeout(700)
+    assert not robot.task['running']
+    assert sum(item['type']=='control_claim' for item in robot.messages)==1
+
+
+def test_delayed_preclaim_snapshot_cannot_revoke_current_lease(web):
+    robot,page,_=web
+    view=start_route(robot,page)
+    owner=robot.token
+    stale=robot.telemetry()
+    stale['control']=dict(stale['control'],revision=0,owner_present=False)
+    asyncio.run_coroutine_threadsafe(robot.send(robot.owner,stale),robot.loop).result(3)
+    page.wait_for_timeout(1400)
+    assert robot.token==owner and robot.task['running'] and robot.canceled==0
+    assert view.locator('#controlTag').inner_text()=='本网页控制中'
+
+
+def test_reacquiring_control_requires_explicit_guard_reset_before_new_task(web):
+    robot,page,_=web
+    robot.guard.update(ready=False,fault_code='OPERATOR_LOST',reason='操作端心跳丢失')
+    view=open_view(robot,page)
+    view.locator('#btnClaim').click();view.locator('#routeBody input').check()
+    page.locator('#guardNotice').get_by_text('OPERATOR_LOST',exact=False).wait_for()
+    assert view.locator('#btnStart').is_disabled()
+    assert not any(item['type']=='patrol_reset_interlock' for item in robot.messages)
+    page.locator('#resetPatrol').click()
+    page.wait_for_function("document.querySelector('#resetPatrol').disabled && document.querySelector('#guardNotice').hidden")
+    assert not robot.task['running']
+    view.locator('#btnStart').click();wait_for(lambda:robot.task['running'])
 
 
 def test_one_click_inspection_survives_view_change_and_can_cancel_from_tasks(web):

@@ -44,8 +44,8 @@ import tf2_ros
 
 from patrol_interfaces.action import InspectPoint, ReturnHome, RunRoute
 from patrol_interfaces.msg import OperatorHeartbeat, PatrolStatus
-from patrol_interfaces.srv import ControlRun
-from .business import WebBusiness
+from patrol_interfaces.srv import ControlRun, ResetInterlock
+from .business import WebBusiness, call as call_ros_service
 from .intercom import Intercom
 from .desktop_relay import DesktopRelay
 
@@ -155,6 +155,7 @@ class GatewayNode(Node):
         self._stale_logged = True
 
         self._owner_session = ""
+        self._control_revision = 0
         self._owner_ws = None
         self._control_last_heartbeat = 0.0
         self._control_mode = "idle"  # idle/manual/route/return
@@ -177,6 +178,10 @@ class GatewayNode(Node):
         self._nav_statuses: dict[str, str] = {}
         self._nav_status_time = 0.0
         self._patrol_status: dict = {}
+        self._guard_status = {}
+        self._guard_time = 0.0
+        self._interlock_reset_pending = False
+        self._reset_interlock_client = self.create_client(ResetInterlock, '/patrol/reset_interlock')
         self._detector_status: dict = {}
         self._detector_time = 0.0
         self._camera_status: dict = {}
@@ -262,6 +267,7 @@ class GatewayNode(Node):
             ("/ptz_patrol/status", self._on_ptz_patrol_status),
             ("/ptz/state", self._on_ptz_driver_status),
             ("/audio/status", self._on_audio_status),
+            ("/patrol/guard_status", self._on_guard_status),
         ):
             self.create_subscription(String, topic, callback, 10)
         self.create_subscription(
@@ -385,6 +391,18 @@ class GatewayNode(Node):
     def _on_gas_data(self, message):
         self._status_callback("_gas_data", "_gas_data_time", message)
 
+    def _on_guard_status(self, message):
+        self._status_callback('_guard_status', '_guard_time', message)
+
+    def _guard_snapshot(self):
+        with self._data_lock:
+            status = dict(self._guard_status)
+            age = time.monotonic()-self._guard_time if self._guard_time else None
+            pending = self._interlock_reset_pending
+        available = age is not None and age <= 1.5
+        return dict(status, available=available, ready=available and status.get('ready') is True,
+                    age=age, reset_available=_safe_ready(self._reset_interlock_client), reset_pending=pending)
+
     def _on_ptz_patrol_status(self, message):
         self._status_callback("_ptz_patrol_status", "_ptz_patrol_time", message)
 
@@ -451,6 +469,7 @@ class GatewayNode(Node):
     def _control_snapshot(self):
         with self._control_lock:
             owner = bool(self._owner_session)
+            revision = self._control_revision
             mode = self._control_mode
             age = (time.monotonic() - self._control_last_heartbeat
                    if self._control_last_heartbeat else None)
@@ -462,6 +481,7 @@ class GatewayNode(Node):
                          if self._estop_time else None)
         return {
             "owner_present": owner,
+            "revision": revision,
             "mode": mode,
             "lease_age": round(age, 2) if age is not None else None,
             "local_control": bool(local_enabled),
@@ -584,6 +604,7 @@ class GatewayNode(Node):
             "capture": {**self._capture_status, 'available': bool(self._capture_status.get('ready')) and time.monotonic()-self._capture_time<=3},
             "desktop": self._desktop.snapshot(),
             "patrol": patrol,
+            "patrol_guard": self._guard_snapshot(),
             "nav": {
                 "statuses": nav_statuses,
                 "active_goal_count": len(active_nav),
@@ -726,6 +747,7 @@ class GatewayNode(Node):
                 return None, "CONTROL_BUSY", "已有其他网页控制者"
             token = "web_" + uuid.uuid4().hex
             self._owner_session = token
+            self._control_revision += 1
             self._owner_ws = websocket
             self._control_last_heartbeat = now
             self._control_mode = "manual"
@@ -739,6 +761,7 @@ class GatewayNode(Node):
         token = self._owner_session
         mode = self._control_mode
         self._owner_session = ""
+        self._control_revision += 1
         self._owner_ws = None
         self._control_last_heartbeat = 0.0
         self._control_mode = "idle"
@@ -1674,6 +1697,37 @@ class GatewayNode(Node):
                         "command": self._ptz_jog_command},
             }
 
+    async def _reset_patrol_interlock(self, websocket, data):
+        command, request_id = 'patrol_reset_interlock', str(data.get('request_id', ''))
+        token = str(data.get('session_id', ''))
+        def reply(ok, code, message):
+            self._command_result(websocket, command, ok, code, message, request_id)
+        if self._owner_ws is not websocket or not self._owner_valid(token) or not self._lease_valid():
+            reply(False, 'LEASE_LOST', '网页控制心跳已过期'); return
+        if self._task_snapshot()['running'] or self._local_task_active() or self._active_nav_goal_count():
+            reply(False, 'BUSY', '请先取消任务并等待导航目标终止、车辆停稳'); return
+        ok, code, message = self._estop_check()
+        if not ok:
+            reply(False, code, message); return
+        with self._data_lock:
+            if self._interlock_reset_pending:
+                reply(False, 'BUSY', '巡航联锁复位处理中'); return
+            self._interlock_reset_pending = True
+        try:
+            request = ResetInterlock.Request(request_id=request_id, session_id=token)
+            reply(True, 'PENDING', '正在核对旧导航目标和停稳状态，复位巡航联锁…')
+            response = await call_ros_service(self._reset_interlock_client, request, timeout=6)
+            if not self._owner_valid(token) or not self._lease_valid():
+                reply(False, 'LEASE_LOST', '复位等待期间控制权已失效，请核对联锁状态'); return
+            reply(bool(response.success), '' if response.success else 'INTERLOCK_NOT_READY', response.message)
+        except asyncio.TimeoutError:
+            reply(False, 'TIMEOUT', '联锁复位等待超时，请核对导航、里程计与联锁反馈')
+        except Exception as error:
+            reply(False, 'INTERLOCK_NOT_READY', str(error))
+        finally:
+            with self._data_lock:
+                self._interlock_reset_pending = False
+
     # ---------------------------------------------------------- command loop
     async def handle_command(self, websocket, data: dict):
         msg_type = str(data.get("type", ""))
@@ -1692,7 +1746,7 @@ class GatewayNode(Node):
             if self._owner_ws is websocket and self._owner_session:
                 self._command_result(websocket, msg_type, True, "ALREADY_OWNER",
                                      "当前网页已拥有控制权", request_id,
-                                     session_id=self._owner_session)
+                                     session_id=self._owner_session, control_revision=self._control_snapshot()['revision'])
                 return
             claimed, code, message = self._claim_control(websocket)
             if claimed is None:
@@ -1700,7 +1754,7 @@ class GatewayNode(Node):
                                      request_id)
             else:
                 self._command_result(websocket, msg_type, True, "", message,
-                                     request_id, session_id=claimed)
+                                     request_id, session_id=claimed, control_revision=self._control_snapshot()['revision'])
             return
         if msg_type == "control_heartbeat":
             if not self._owner_valid(token):
@@ -1745,6 +1799,9 @@ class GatewayNode(Node):
 
         if msg_type in WebBusiness.commands:
             await self._business.handle(websocket, data)
+            return
+        if msg_type == 'patrol_reset_interlock':
+            await self._reset_patrol_interlock(websocket, data)
             return
         if msg_type == 'capture':
             self._capture(websocket, data)
@@ -1884,7 +1941,8 @@ async def _handle_client(node: GatewayNode, websocket):
             if not isinstance(data, dict):
                 continue
             try:
-                if data.get('type') in WebBusiness.commands or data.get('type') in DesktopRelay.commands:
+                if (data.get('type') in WebBusiness.commands or data.get('type') in DesktopRelay.commands
+                        or data.get('type') == 'patrol_reset_interlock'):
                     # PLAN may take seconds. Keep reading control heartbeats,
                     # cancel and e-stop messages while ROS serves the request.
                     if len(jobs) >= 4:

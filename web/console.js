@@ -2,11 +2,12 @@
   'use strict';
   const frame = document.getElementById('view');
   const pages = {monitor:'monitor.html', tasks:'tasks.html', records:'records.html'};
-  const viewRevision='one-click-20261029';
+  const viewRevision='lease-20261029-1';
   let socket, session = null, telemetry = null, control = {}, task = {};
   let viewId = '', currentPage = '', reconnectTimer;
   let socketUrl='';
   let returnState = null, returnStateAt = 0, loadingReturnState = false, returnPending = '';
+  let resetPending = '';
   const notice = text => {
     const node = document.getElementById('taskNotice');
     node.textContent = text; node.hidden = !text;
@@ -50,13 +51,24 @@
     const owner = Boolean(session) && fresh && connected && !control.local_control;
     const returning = Boolean(returnPending || task.pending_return || (task.running && task.kind === 'return'));
     const motionReady = control.estop_known === true && control.estopped === false && !telemetry?.desktop?.pending?.estop_release;
+    const guard = telemetry?.patrol_guard || {};
     const button = document.getElementById('returnHome');
-    button.disabled = !owner || !motionReady || !validHome || returning;
+    button.disabled = !owner || !motionReady || !validHome || returning || guard.ready !== true;
     button.textContent = returning ? '正在返回…' : '一键返回';
     button.title = !validHome ? '请先在本地“地图与返航设置”保存当前地图待命点' :
       !owner ? '请先取得控制权并等待新鲜状态' : !motionReady ? '请先解除急停并等待确认' :
       '结束当前路线或到点巡检，确认停止后返回待命点';
     document.getElementById('cancelReturn').disabled = !owner || !returning;
+    const busy = task.running || telemetry?.patrol?.active || telemetry?.nav?.active_goal_count > 0;
+    const reset = document.getElementById('resetPatrol');
+    reset.disabled = !owner || !motionReady || busy || !guard.reset_available || guard.ready === true ||
+      Boolean(resetPending || guard.reset_pending);
+    reset.textContent = resetPending || guard.reset_pending ? '正在复位…' : '复位巡航联锁';
+    reset.title = '明确复位：核对旧任务与 Nav2 目标已终止、里程计新鲜且车辆停稳；不会恢复旧任务';
+    const guardNotice = document.getElementById('guardNotice');
+    guardNotice.hidden = !fresh || guard.ready === true || !guard.available;
+    guardNotice.textContent = `巡航联锁未就绪：${guard.fault_code || ''} ${guard.reason || ''}。`+
+      '旧任务不会自动恢复；确认停稳后点击“复位巡航联锁”，待就绪后重新开始任务。';
   }
   async function loadReturnState() {
     if (loadingReturnState) return;
@@ -114,7 +126,7 @@
     const configuredPort = Number(new URL(location.href).searchParams.get('ws_port') || 8765);
     const port = Number.isInteger(configuredPort) && configuredPort > 0 && configuredPort <= 65535 ? configuredPort : 8765;
     socketUrl=`${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.hostname}:${port}`;
-    socket = new WebSocket(socketUrl);
+    socket = new RobotControlConnection(socketUrl);
     socket.onopen = () => {
       document.getElementById('connection').textContent = '已连接'; post('open');
       document.getElementById('connection').dataset.state = 'connected';
@@ -136,16 +148,20 @@
         if (!data.ok && data.request_id === returnPending) returnPending = '';
         if (data.ok && data.command === 'return_cancel') returnPending = '';
       }
+      if (data.type === 'command_result' && data.command === 'patrol_reset_interlock') {
+        if (data.request_id === resetPending && (!data.ok || data.code !== 'PENDING')) resetPending = '';
+        notice(data.message || data.code);
+      }
       if (data.type === 'task_finished' && data.kind === 'return') {
         if (data.request_id === returnPending) returnPending = '';
         notice((data.success ? '返回完成：' : '返回结束：')+(data.message || data.code || ''));
       }
-      if (before && !session) returnPending = '';
+      if (before && !session) { returnPending = ''; resetPending = ''; }
       if (before !== session) sessionState();
       post('data', data); refreshHeader();
     };
     socket.onclose = () => {
-      session = telemetry = null; control = {}; task = {}; returnPending = '';
+      session = telemetry = null; control = {}; task = {}; returnPending = ''; resetPending = '';
       document.getElementById('connection').textContent = '已断开，正在重连';
       document.getElementById('connection').dataset.state = 'disconnected';
       sessionState(); post('close'); refreshHeader();
@@ -156,7 +172,6 @@
       document.getElementById('connection').dataset.state = 'disconnected';
     };
   }
-  setInterval(() => { if (session) command({type:'control_heartbeat'}); }, 300);
   document.getElementById('release').onclick = () => command({type:'control_release'});
   document.getElementById('stop').onclick = () => send({type:'estop'});
   document.getElementById('returnHome').onclick = () => {
@@ -172,6 +187,13 @@
   };
   document.getElementById('cancelReturn').onclick = () => {
     if (command({type:'return_cancel',request_id:'cancel_home_'+Date.now()})) notice('正在取消返回，请等待停车确认。');
+  };
+  document.getElementById('resetPatrol').onclick = () => {
+    refreshHeader(); if (document.getElementById('resetPatrol').disabled) return;
+    const id = 'reset_patrol_'+Date.now();
+    if (command({type:'patrol_reset_interlock',request_id:id})) {
+      resetPending = id; notice('正在核对任务终止和车辆停稳，请等待联锁复位结果。'); refreshHeader();
+    }
   };
   setInterval(refreshHeader, 500);
   setInterval(loadReturnState, 5000); loadReturnState();
