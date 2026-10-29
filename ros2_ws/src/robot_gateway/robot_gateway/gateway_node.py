@@ -123,7 +123,11 @@ class GatewayNode(Node):
         self._max_linear = float(control["max_linear"])
         self._max_angular = float(control["max_angular"])
         self._cmd_timeout = float(control["cmd_timeout"])
-        self._lease_timeout = 1.0
+        # 1 s was too tight for remote/Tailscale browsers: one missed heartbeat
+        # released control and cancelled the running task (cancel_task=True).
+        # 5 s tolerates network jitter / a busy tab, still stops quickly when
+        # the client really disappears.
+        self._lease_timeout = 5.0
         ros_cfg = cfg.get("ros", {})
         self._base_frame = ros_cfg.get("base_frame", "base_link")
         self._cmd_topic = ros_cfg.get("cmd_vel_topic", "/cmd_vel_teleop")
