@@ -233,10 +233,13 @@ def navigation_nodes(map_yaml, hw, params_file, use_map_server=True, localizatio
         nodes.append(Node(package='nav2_lifecycle_manager', executable='lifecycle_manager',
                           name='lifecycle_manager_localization' if localization_names else 'lifecycle_manager_map',
                           parameters=[{'use_sim_time': False, 'autostart': True,
-                                       'node_names': ['map_server', *localization_names]}], output='screen'))
+                                       'node_names': ['map_server', *localization_names],
+                                       # 大地图 + 高负载下 4 s 默认心跳太紧，会误判 server down
+                                       'bond_timeout': 15.0}], output='screen'))
     nodes.append(Node(package='nav2_lifecycle_manager', executable='lifecycle_manager',
                       name='lifecycle_manager_navigation', parameters=[{'use_sim_time': False,
-                      'autostart': True, 'node_names': names}], output='screen'))
+                      'autostart': True, 'node_names': names,
+                      'bond_timeout': 15.0}], output='screen'))
     # 海康云台巡航节点（与导航解耦，默认关闭；ros2 param set /ptz_patrol enabled true 开启）
     nodes.append(Node(package='chassis_nav2', executable='ptz_patrol.py', name='ptz_patrol',
                       output='screen'))
@@ -384,7 +387,8 @@ def configure(context):
                        parameters=[{'yaml_filename': map_yaml, 'use_sim_time': False}], output='screen'),
                   Node(package='nav2_lifecycle_manager', executable='lifecycle_manager',
                        name='lifecycle_manager_map', parameters=[{'use_sim_time': False,
-                       'autostart': True, 'node_names': ['map_server']}], output='screen')]
+                       'autostart': True, 'node_names': ['map_server'],
+                       'bond_timeout': 15.0}], output='screen')]
     if mode == 'navigation':
         nodes.extend(navigation_nodes(existing_file(args['map'], 'Nav2 栅格地图'), hw,
                                       existing_file(args['nav2_params'], 'Nav2 参数'), enable_recorded_routes=recorded))
