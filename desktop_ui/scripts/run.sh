@@ -7,6 +7,7 @@ if [[ ! -x "$BUILD_DIR/robot_desktop" ]]; then
   echo "请先运行：$DESKTOP_ROOT/scripts/build.sh" >&2
   exit 1
 fi
+export ROS_LOCALHOST_ONLY="${ROS_LOCALHOST_ONLY:-1}"
 set +u
 source /opt/ros/humble/setup.bash
 if [[ -f "$PROJECT_ROOT/ros2_ws/install/setup.bash" ]]; then source "$PROJECT_ROOT/ros2_ws/install/setup.bash"; fi

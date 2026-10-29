@@ -17,8 +17,13 @@ ENABLE_AUDIO="${ENABLE_AUDIO:-1}"
 ENABLE_CAPTURE="${ENABLE_CAPTURE:-$ENABLE_VIDEO}"
 VIDEO_SOURCE="${VIDEO_SOURCE:-rtsp://127.0.0.1:8554/cam}"
 
+export ROS_LOCALHOST_ONLY="${ROS_LOCALHOST_ONLY:-1}"
 source /opt/ros/humble/setup.bash
 source "$ROOT/ros2_ws/install/setup.bash"
+# Match the desktop and all device nodes even when launched from a fresh
+# terminal. The device-local file intentionally differs on .180 and .63.
+source "$ROOT/config/ros_domain.sh"
+echo "ROS 通信：domain=$ROS_DOMAIN_ID，localhost=$ROS_LOCALHOST_ONLY（本机配置）"
 export ROBOT_PROJECT_ROOT="$ROOT"
 export ROBOT_CONFIG="$ROOT/config/config.yaml"
 export ROBOT_PATROL_DB="${ROBOT_PATROL_DB:-$HOME/.local/share/robot_patrol/patrol.sqlite3}"
