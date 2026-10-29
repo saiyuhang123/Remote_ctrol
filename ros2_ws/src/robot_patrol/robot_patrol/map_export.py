@@ -6,6 +6,8 @@ including origin yaw.  Both output files are replaced atomically.
 """
 from __future__ import annotations
 
+import contextlib
+import fcntl
 import hashlib
 import json
 import math
@@ -32,6 +34,18 @@ def _atomic_write(path: Path, data: bytes) -> None:
         except OSError:
             pass
         raise
+
+
+@contextlib.contextmanager
+def _export_lock(output_dir: Path):
+    """Serialize the PNG+meta pair across the desktop UI and robot_patrol."""
+    path = output_dir / ".export.lock"
+    with open(path, "w") as handle:
+        fcntl.flock(handle, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(handle, fcntl.LOCK_UN)
 
 
 def export_web_map(map_yaml: str | Path, output_dir: str | Path, *,
@@ -75,12 +89,20 @@ def export_web_map(map_yaml: str | Path, output_dir: str | Path, *,
             raise ValueError("地图图片尺寸无效")
         # PNG is the browser's canonical active image. Keep the source raster
         # row order unchanged; the page applies the Nav2 origin rotation.
-        temporary_png = output_dir / ".active.png.tmp"
-        image.save(temporary_png, format="PNG", optimize=False)
+        # Unique temp name: the desktop UI and robot_patrol can export at the
+        # same moment, and a shared fixed temp file let one process read the
+        # other's truncated image (empty active.png + empty sha256 in meta).
+        fd, temp_name = tempfile.mkstemp(prefix=".active.", suffix=".png.tmp", dir=output_dir)
+        os.close(fd)
+        temporary_png = Path(temp_name)
+        try:
+            image.save(temporary_png, format="PNG", optimize=False)
+        except BaseException:
+            temporary_png.unlink(missing_ok=True)
+            raise
     png_bytes = temporary_png.read_bytes()
     temporary_png.unlink(missing_ok=True)
     target_png = output_dir / "active.png"
-    _atomic_write(target_png, png_bytes)
 
     metadata = {
         "schema_version": 1,
@@ -95,8 +117,10 @@ def export_web_map(map_yaml: str | Path, output_dir: str | Path, *,
         "sha256": hashlib.sha256(png_bytes).hexdigest(),
         "updated_at": int(__import__("time").time()),
     }
-    _atomic_write(output_dir / "meta.json",
-                  (json.dumps(metadata, ensure_ascii=False, indent=2) + "\n").encode("utf-8"))
+    with _export_lock(output_dir):
+        _atomic_write(target_png, png_bytes)
+        _atomic_write(output_dir / "meta.json",
+                      (json.dumps(metadata, ensure_ascii=False, indent=2) + "\n").encode("utf-8"))
     return metadata
 
 
