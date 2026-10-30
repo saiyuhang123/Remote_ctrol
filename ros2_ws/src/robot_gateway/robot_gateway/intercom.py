@@ -7,6 +7,8 @@ import json
 import os
 import queue
 import threading
+import time
+import uuid
 
 
 class Intercom:
@@ -15,6 +17,23 @@ class Intercom:
         self.active = False
         self.reserved = False
         self.stop_requested = threading.Event()
+        self.call_id = ''
+        self._cue_until = 0.
+
+    def publish_state(self):
+        callback = getattr(self.node, '_publish_intercom_state', None)
+        if callback:
+            callback()
+
+    def announcement_active(self):
+        """Keep the microphone and remote PCM silent during the connected cue."""
+        callback = getattr(self.node, '_audio_snapshot', None)
+        if callback:
+            status = callback()
+            if (status.get('available') and status.get('state') == 'playing'
+                    and status.get('notification') == 'intercom_started'):
+                self._cue_until = time.monotonic()+.25
+        return time.monotonic() < self._cue_until
 
     def stop(self):
         self.stop_requested.set()
@@ -60,7 +79,7 @@ class Intercom:
         self.rate, self.frame_bytes = rate, rate//50*2
         self.play_buffer = bytearray()
         def input_callback(data, frames, timing, status):
-            if self.stop_requested.is_set():
+            if self.stop_requested.is_set() or self.announcement_active():
                 return
             try:
                 self.outgoing.put_nowait(bytes(data))
@@ -68,6 +87,15 @@ class Intercom:
                 pass
         def output_callback(data, frames, timing, status):
             required = len(data)
+            if self.announcement_active():
+                self.play_buffer.clear()
+                while True:
+                    try:
+                        self.incoming.get_nowait()
+                    except queue.Empty:
+                        break
+                data[:] = bytes(required)
+                return
             while len(self.play_buffer) < required:
                 try:
                     self.play_buffer.extend(self.incoming.get_nowait())
@@ -127,13 +155,16 @@ class Intercom:
             if self.reserved:
                 raise ValueError('机器人正在对讲')
             self.reserved, owns_call = True, True
+            self.call_id = uuid.uuid4().hex
             self.stop_requested.clear()
+            self.publish_state()
             # Uploaded announcements must not compete with a live call.
             self.node._audio_stop_pub.publish(self.node._string_type(data='intercom'))
             await asyncio.to_thread(self.open_stream, source, sink, start.get('input_device'), start.get('output_device'))
             if not self.authorized(token) or self.stop_requested.is_set():
                 raise ValueError('开启期间控制权已变化')
             self.active = True
+            self.publish_state()
             await websocket.send(json.dumps(dict(type='ready', sample_rate=self.rate, channels=1, format='s16le')))
             while not self.stop_requested.is_set() and self.authorized(token):
                 if any(not getattr(stream, 'active', True) for stream in source+sink):
@@ -172,4 +203,5 @@ class Intercom:
                     await asyncio.to_thread(self.close_streams, source+sink)
                 finally:
                     self.reserved = False
+                    self.publish_state()
             await websocket.close()

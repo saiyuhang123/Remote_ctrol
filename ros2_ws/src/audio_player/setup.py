@@ -1,4 +1,5 @@
 from setuptools import setup
+from glob import glob
 
 package_name = 'audio_player'
 
@@ -8,13 +9,15 @@ setup(
     packages=[package_name],
     data_files=[
         ('share/ament_index/resource_index/packages', ['resource/' + package_name]),
-        ('share/' + package_name, ['package.xml']),
+        ('share/' + package_name, ['package.xml', 'README.md']),
+        ('share/' + package_name + '/config', glob('config/*.json')),
+        ('share/' + package_name + '/prompts', glob('prompts/*.wav')),
     ],
     install_requires=['setuptools'],
     zip_safe=True,
     maintainer='ubuntu',
     maintainer_email='dev@example.com',
-    description='语音播报与智能提示：TTS 合成 + 机器人端播放',
+    description='固定提示音、运行状态提醒与机器人音频播放',
     license='Proprietary',
     entry_points={
         'console_scripts': [

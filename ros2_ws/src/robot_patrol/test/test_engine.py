@@ -71,6 +71,61 @@ def test_three_points_two_loops_sequence(tmp_path):
     store.close()
 
 
+def test_confirmed_point_events_cover_zero_dwell_and_each_loop(tmp_path):
+    store, mapping = make_store(tmp_path)
+    route = snapshot(['A'])
+    route.steps[0].inspection_enabled = True
+    store.create_run('voice_events', 'route', mapping.map_id, 1, mapping.revision,
+                     route.as_dict(), 2, 1, 1)
+    events = []
+    engine = PatrolEngine(store, route, 'voice_events', 2, 'owner', FakeDriver(),
+        lambda status: None, min_dispatch_interval=0,
+        inspection_cb=lambda *a, **kw: SimpleNamespace(success=True, text='ok'),
+        event_cb=events.append)
+    assert engine.run().success
+    assert [(event['event'], event['loop_index'], event['step_index']) for event in events] == [
+        (name, loop, 1) for loop in (1, 2)
+        for name in ('point_arrived', 'inspection_started', 'inspection_completed')]
+    store.close()
+
+
+def test_failed_settling_and_inspection_never_emit_false_completed_events(tmp_path):
+    store, mapping = make_store(tmp_path)
+    route = snapshot(['A'])
+    route.steps[0].inspection_enabled = True
+    store.create_run('failed_inspect', 'route', mapping.map_id, 1, mapping.revision,
+                     route.as_dict(), 1, 1, 1)
+    events = []
+    engine = PatrolEngine(store, route, 'failed_inspect', 1, 'owner', FakeDriver(),
+        lambda status: None, min_dispatch_interval=0,
+        inspection_cb=lambda *a, **kw: SimpleNamespace(success=False, error_code='OCR_FAILED', message='failed'),
+        event_cb=events.append)
+    assert not engine.run().success
+    assert [event['event'] for event in events] == ['point_arrived', 'inspection_started']
+    store.create_run('failed_stop', 'route', mapping.map_id, 1, mapping.revision,
+                     route.as_dict(), 1, 1, 1)
+    driver = FakeDriver()
+    driver.settle = lambda *a: ('TIMEOUT', None)
+    events.clear()
+    engine = PatrolEngine(store, route, 'failed_stop', 1, 'owner', driver,
+                          lambda status: None, min_dispatch_interval=0, event_cb=events.append)
+    assert not engine.run().success and not events
+    store.close()
+
+
+def test_broken_notification_sink_does_not_change_navigation_result(tmp_path):
+    store, mapping = make_store(tmp_path)
+    route = snapshot(['A'])
+    store.create_run('broken_sink', 'route', mapping.map_id, 1, mapping.revision,
+                     route.as_dict(), 1, 1, 1)
+    def broken(event):
+        raise RuntimeError('Audio observer is unavailable')
+    engine = PatrolEngine(store, route, 'broken_sink', 1, 'owner', FakeDriver(),
+                          lambda status: None, min_dispatch_interval=0, event_cb=broken)
+    assert engine.run().success
+    store.close()
+
+
 def test_pause_while_navigation_redispatches_same_point(tmp_path):
     store, mapping = make_store(tmp_path)
     driver = FakeDriver(pause_once=True)

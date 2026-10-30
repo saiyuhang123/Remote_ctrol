@@ -221,6 +221,10 @@ class GatewayNode(Node):
         self._audio_dir = Path(os.environ.get('ROBOT_AUDIO_DIR', project / 'data/audio')).expanduser().resolve()
         self._audio_pub = self.create_publisher(String, '/audio_play', 10)
         self._audio_stop_pub = self.create_publisher(String, '/audio_stop', 10)
+        self._events_pub = self.create_publisher(String, '/robot_gateway/events', 20)
+        self._intercom_state_pub = self.create_publisher(String, '/audio/intercom_state',
+            QoSProfile(depth=1, reliability=ReliabilityPolicy.RELIABLE,
+                       durability=DurabilityPolicy.TRANSIENT_LOCAL))
         self._string_type = String
         self._business = WebBusiness(self)
         self._intercom = Intercom(self)
@@ -285,11 +289,30 @@ class GatewayNode(Node):
         self.create_timer(0.1, self._make_telemetry)
         self.create_timer(0.2, self._publish_operator_heartbeat)
         self.create_timer(0.25, self._poll_ptz_pose)
+        self.create_timer(.5, self._publish_intercom_state)
         self.get_logger().info(
             f"gateway ready; limits ±{self._max_linear} m/s / "
             f"±{self._max_angular} rad/s; lazy teleop publisher")
 
     # ------------------------------------------------------------- basic state
+    def _publish_voice_event(self, event, **fields):
+        publisher = getattr(self, '_events_pub', None)
+        if publisher is not None:
+            try:
+                value = dict(fields, event=event, event_id=uuid.uuid4().hex, event_time_ns=time.time_ns())
+                publisher.publish(String(data=json.dumps(value, ensure_ascii=False)))
+            except Exception as error:
+                self.get_logger().debug('Voice event unavailable: '+str(error))
+
+    def _publish_intercom_state(self):
+        call = self._intercom
+        try:
+            self._intercom_state_pub.publish(String(data=json.dumps(dict(
+                reserved=bool(call.reserved), active=bool(call.active),
+                call_id=getattr(call, 'call_id', ''), event_time_ns=time.time_ns()))))
+        except Exception as error:
+            self.get_logger().debug('Intercom state unavailable: '+str(error))
+
     @staticmethod
     def _yaw_of(q):
         return math.atan2(2 * (q.w * q.z + q.x * q.y),
@@ -758,6 +781,7 @@ class GatewayNode(Node):
             self._release_scheduled = False
             self._task_final = {}
         self.get_logger().info("web control claimed")
+        self._publish_voice_event('remote_control')
         self._broadcast_control_state()
         return token, "", "网页已取得控制权"
 
@@ -789,6 +813,8 @@ class GatewayNode(Node):
         self._publish_disabled_operator_heartbeat(token)
         if had_owner:
             self.get_logger().warn(f"web control released: {reason}")
+            if reason in ('网页控制心跳超时', '浏览器连接断开'):
+                self._publish_voice_event('remote_disconnected')
         if notify_websocket is not None:
             self._command_result(notify_websocket, "control_release", True,
                                  "RELEASED", reason)

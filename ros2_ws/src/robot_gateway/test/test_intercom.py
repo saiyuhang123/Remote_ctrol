@@ -78,3 +78,28 @@ def test_unauthorized_call_never_opens_audio_devices():
     call,owned,_=fixture();owned[0]=False;socket=Socket(call,owned)
     asyncio.run(call.handle(socket))
     assert not call.audio_module.streams and socket.closed
+
+
+def test_connected_cue_mutes_pcm_and_microphone_then_call_resumes(monkeypatch):
+    now = [100.]
+    monkeypatch.setattr('robot_gateway.intercom.time.monotonic', lambda: now[0])
+    call, _, _ = fixture()
+    state = dict(available=True, state='playing', notification='intercom_started')
+    call.node._audio_snapshot = lambda: state
+    source, sink = [], []
+    try:
+        call.open_stream(source, sink, 0, 1)
+        assert call.outgoing.empty()
+        call.incoming.put(b'\x03\x04'*960)
+        output = bytearray(1920)
+        sink[0].options['callback'](output, 960, None, None)
+        assert output == bytes(1920) and call.incoming.empty()
+        state['state'] = 'done'
+        now[0] += .3
+        source[0].options['callback'](b'\x01\x02'*960, 960, None, None)
+        assert call.outgoing.get_nowait() == b'\x01\x02'*960
+        call.incoming.put(b'\x03\x04'*960)
+        sink[0].options['callback'](output, 960, None, None)
+        assert output == b'\x03\x04'*960
+    finally:
+        call.close_streams(source+sink)

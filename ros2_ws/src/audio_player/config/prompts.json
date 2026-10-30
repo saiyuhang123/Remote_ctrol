@@ -1,0 +1,249 @@
+{
+  "battery_low": 20,
+  "battery_critical": 10,
+  "odom_topic": "/odom",
+  "battery_topic": "/battery_status",
+  "base_frame": "base_link",
+  "clips": {
+    "system_ready": {
+      "file": "system_ready.wav",
+      "text": "机器人系统已就绪，等待任务指令。",
+      "priority": 10,
+      "cooldown": 0,
+      "ttl": 12,
+      "enabled": true
+    },
+    "patrol_start": {
+      "file": "patrol_start.wav",
+      "text": "开始执行巡检任务，请注意机器人通行。",
+      "priority": 10,
+      "cooldown": 0,
+      "ttl": 12,
+      "enabled": true
+    },
+    "point_arrived": {
+      "file": "point_arrived.wav",
+      "text": "已到达巡检点。",
+      "priority": 10,
+      "cooldown": 0,
+      "ttl": 12,
+      "enabled": true
+    },
+    "point_inspection_start": {
+      "file": "point_inspection_start.wav",
+      "text": "开始点位巡检。",
+      "priority": 10,
+      "cooldown": 0,
+      "ttl": 12,
+      "enabled": true
+    },
+    "point_inspection_done": {
+      "file": "point_inspection_done.wav",
+      "text": "当前点位巡检完成。",
+      "priority": 10,
+      "cooldown": 0,
+      "ttl": 12,
+      "enabled": true
+    },
+    "patrol_paused": {
+      "file": "patrol_paused.wav",
+      "text": "巡检任务已暂停。",
+      "priority": 10,
+      "cooldown": 0,
+      "ttl": 12,
+      "enabled": true
+    },
+    "patrol_resumed": {
+      "file": "patrol_resumed.wav",
+      "text": "继续执行巡检任务。",
+      "priority": 10,
+      "cooldown": 0,
+      "ttl": 12,
+      "enabled": true
+    },
+    "patrol_canceled": {
+      "file": "patrol_canceled.wav",
+      "text": "巡检任务已取消。",
+      "priority": 40,
+      "cooldown": 0,
+      "ttl": 12,
+      "enabled": true
+    },
+    "patrol_completed": {
+      "file": "patrol_completed.wav",
+      "text": "本次巡检任务已全部完成。",
+      "priority": 40,
+      "cooldown": 0,
+      "ttl": 12,
+      "enabled": true
+    },
+    "return_start": {
+      "file": "return_start.wav",
+      "text": "开始返回待命点，请注意机器人通行。",
+      "priority": 10,
+      "cooldown": 0,
+      "ttl": 12,
+      "enabled": true
+    },
+    "return_arrived": {
+      "file": "return_arrived.wav",
+      "text": "已返回待命点，等待下一步指令。",
+      "priority": 40,
+      "cooldown": 0,
+      "ttl": 12,
+      "enabled": true
+    },
+    "person_detected": {
+      "file": "person_detected.wav",
+      "text": "检测到人员，请注意机器人通行。",
+      "priority": 5,
+      "cooldown": 30,
+      "ttl": 5,
+      "enabled": true
+    },
+    "emergency_stop": {
+      "file": "emergency_stop.wav",
+      "text": "急停已触发，请检查现场安全。",
+      "priority": 100,
+      "cooldown": 0,
+      "ttl": 6,
+      "enabled": true
+    },
+    "emergency_released": {
+      "file": "emergency_released.wav",
+      "text": "急停已解除，请确认后再操作。",
+      "priority": 70,
+      "cooldown": 0,
+      "ttl": 6,
+      "enabled": true
+    },
+    "battery_low": {
+      "file": "battery_low.wav",
+      "text": "电量偏低，请及时安排充电。",
+      "priority": 60,
+      "cooldown": 120,
+      "ttl": 12,
+      "enabled": true
+    },
+    "battery_critical": {
+      "file": "battery_critical.wav",
+      "text": "电量不足，请停止巡检并安排充电。",
+      "priority": 90,
+      "cooldown": 60,
+      "ttl": 8,
+      "enabled": true
+    },
+    "navigation_failed": {
+      "file": "navigation_failed.wav",
+      "text": "导航未完成，请检查定位和通行条件。",
+      "priority": 40,
+      "cooldown": 0,
+      "ttl": 12,
+      "enabled": true
+    },
+    "localization_abnormal": {
+      "file": "localization_abnormal.wav",
+      "text": "定位状态异常，请检查后再继续任务。",
+      "priority": 60,
+      "cooldown": 60,
+      "ttl": 10,
+      "enabled": true
+    },
+    "remote_disconnected": {
+      "file": "remote_disconnected.wav",
+      "text": "远程连接已中断，请检查通信状态。",
+      "priority": 70,
+      "cooldown": 10,
+      "ttl": 8,
+      "enabled": true
+    },
+    "gas_alarm": {
+      "file": "gas_alarm.wav",
+      "text": "气体读数超出设定范围，请核查现场环境。",
+      "priority": 90,
+      "cooldown": 60,
+      "ttl": 8,
+      "enabled": true
+    },
+    "sensor_abnormal": {
+      "file": "sensor_abnormal.wav",
+      "text": "传感器反馈异常，请检查设备连接。",
+      "priority": 60,
+      "cooldown": 60,
+      "ttl": 10,
+      "enabled": true
+    },
+    "camera_abnormal": {
+      "file": "camera_abnormal.wav",
+      "text": "相机连接异常，请检查视频设备。",
+      "priority": 60,
+      "cooldown": 60,
+      "ttl": 10,
+      "enabled": true
+    },
+    "inspection_failed": {
+      "file": "inspection_failed.wav",
+      "text": "当前点位巡检未完成，请查看异常记录。",
+      "priority": 40,
+      "cooldown": 0,
+      "ttl": 12,
+      "enabled": true
+    },
+    "task_interrupted": {
+      "file": "task_interrupted.wav",
+      "text": "巡检任务已中断，请检查系统状态。",
+      "priority": 40,
+      "cooldown": 0,
+      "ttl": 12,
+      "enabled": true
+    },
+    "local_control": {
+      "file": "local_control.wav",
+      "text": "已切换为本地控制。",
+      "priority": 30,
+      "cooldown": 3,
+      "ttl": 5,
+      "enabled": true
+    },
+    "remote_control": {
+      "file": "remote_control.wav",
+      "text": "已切换为远程控制。",
+      "priority": 30,
+      "cooldown": 3,
+      "ttl": 5,
+      "enabled": true
+    },
+    "capture_saved": {
+      "file": "capture_saved.wav",
+      "text": "照片已保存。",
+      "priority": 10,
+      "cooldown": 2,
+      "ttl": 6,
+      "enabled": true
+    },
+    "report_ready": {
+      "file": "report_ready.wav",
+      "text": "巡检报告已生成。",
+      "priority": 10,
+      "cooldown": 0,
+      "ttl": 20,
+      "enabled": true
+    },
+    "intercom_started": {
+      "file": "intercom_started.wav",
+      "text": "语音对讲已接通。",
+      "priority": 75,
+      "cooldown": 0,
+      "ttl": 3,
+      "enabled": true
+    },
+    "intercom_ended": {
+      "file": "intercom_ended.wav",
+      "text": "语音对讲已结束。",
+      "priority": 60,
+      "cooldown": 0,
+      "ttl": 4,
+      "enabled": true
+    }
+  }
+}

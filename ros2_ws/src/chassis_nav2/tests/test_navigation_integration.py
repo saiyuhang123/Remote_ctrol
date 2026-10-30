@@ -25,6 +25,21 @@ SRC = Path(__file__).resolve().parents[2]
 ROOT = SRC.parents[1]
 
 
+def test_standard_navigation_starts_audio_with_an_environment_opt_out(monkeypatch):
+    hw = dict(robot_geometry=dict(confirmed=True, wheel_base=.6,
+                  max_steering_deg=27., footprint=[[.4,.3],[.4,-.3],[-.4,-.3],[-.4,.3]]),
+              chassis={})
+    monkeypatch.setattr(bringup, 'Node', lambda **kwargs: kwargs)
+    monkeypatch.setattr(bringup, 'share', lambda name: SRC/name)
+    monkeypatch.delenv('ROBOT_ENABLE_AUDIO', raising=False)
+    path = str(SRC/'chassis_nav2/config/nav2.yaml')
+    nodes = bringup.navigation_nodes('/tmp/map.yaml', hw, path)
+    assert sum(n.get('package') == 'audio_player' and n.get('executable') == 'tts_node' for n in nodes) == 1
+    monkeypatch.setenv('ROBOT_ENABLE_AUDIO', '0')
+    assert not any(n.get('package') == 'audio_player'
+                   for n in bringup.navigation_nodes('/tmp/map.yaml', hw, path))
+
+
 def test_recorded_routes_are_opt_in_and_have_independent_plugins():
     from chassis_nav2.recorded_routes import validate_options,nav2_overlay
     assert not validate_options({})

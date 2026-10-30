@@ -109,7 +109,8 @@ class PatrolEngine:
                  settle_timeout: float = 10.0, point_timeout: float = 300.0,
                  min_dispatch_interval: float = 0.5, inspection_cb: Callable | None = None,
                  inspection_depart_cb: Callable | None = None,
-                 inspection_finish_cb: Callable | None = None):
+                 inspection_finish_cb: Callable | None = None,
+                 event_cb: Callable | None = None):
         self.store = store
         self.snapshot = snapshot
         self.run_id = run_id
@@ -123,6 +124,7 @@ class PatrolEngine:
         self.inspection_cb = inspection_cb
         self.inspection_depart_cb = inspection_depart_cb
         self.inspection_finish_cb = inspection_finish_cb
+        self.event_cb = event_cb
         self.flags = ControlFlags()
         self._status_lock = threading.RLock()
         self._status: dict[str, Any] = {
@@ -145,6 +147,14 @@ class PatrolEngine:
             self._status["sequence"] = int(self._status.get("sequence", 0)) + 1
             status = dict(self._status)
         self.status_cb(status)
+
+    def _emit_event(self, name: str) -> None:
+        if self.event_cb:
+            try:
+                self.event_cb(dict(self.status, event=name))
+            except Exception:
+                # Observability and audio must never change navigation results.
+                pass
 
     def request_pause(self) -> None:
         self.flags.request_pause()
@@ -337,12 +347,14 @@ class PatrolEngine:
                         actual = settle[1]
                         self._record_attempt(loop_index, step_index, attempt_index, step,
                                              "SUCCEEDED", actual, started_at)
+                        self._emit_event('point_arrived')
                         if bool(getattr(step, "inspection_enabled", False)) and self.inspection_cb:
                             self._set_status(
                                 state=STATE_INSPECTING, loop_index=loop_index,
                                 step_index=step_index, current_point_name=step.point_name,
                                 message=("到达巡检点，正在执行多视角拍照" if getattr(step, 'shots', None)
                                          else "到达巡检点，正在执行云台抓拍与识别"))
+                            self._emit_event('inspection_started')
                             try:
                                 outcome = self.inspection_cb(
                                     step, self.run_id, self.snapshot.map_id,
@@ -375,6 +387,8 @@ class PatrolEngine:
                             return self._canceled(completed_loops, completed_steps)
                         if dwell_result == "REPOSITION":
                             continue
+                        if bool(getattr(step, 'inspection_enabled', False)) and self.inspection_cb:
+                            self._emit_event('inspection_completed')
                         completed_steps += 1
                         pause = self._sleep_interruptible(self.min_dispatch_interval)
                         if pause == "CANCELED":

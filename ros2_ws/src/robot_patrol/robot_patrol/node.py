@@ -218,6 +218,8 @@ class PatrolNode(Node):
                                 durability=DurabilityPolicy.TRANSIENT_LOCAL)
         self._status_pub = self.create_publisher(PatrolStatus, "/patrol/status", status_qos,
                                                  callback_group=self._callback_group)
+        self._events_pub = self.create_publisher(String, '/patrol/events', 20,
+                                                callback_group=self._callback_group)
         self.create_subscription(Odometry, "/odom", self._on_odom, qos_profile_sensor_data,
                                  callback_group=self._callback_group)
         # Continuous LIO base pose. In wheel_imu mode /odom is the EKF output,
@@ -481,6 +483,18 @@ class PatrolNode(Node):
             self._last_status = dict(data)
             message = self._to_ros_status(data)
         self._status_pub.publish(message)
+
+    def _notify_event(self, data: dict) -> None:
+        """Volatile factual events, never replayed by late audio subscribers."""
+        try:
+            value = dict(data, instance_id=self._instance_id, event_time_ns=time.time_ns())
+            self._events_pub.publish(String(data=json.dumps(value, ensure_ascii=False)))
+        except Exception as error:
+            self.get_logger().debug('Patrol event could not be published: '+str(error))
+
+    def _finish_run(self, *args, **kwargs) -> None:
+        self._store.finish_run(*args, **kwargs)
+        self._notify_event({'event': 'report_ready', 'run_id': args[0] if args else kwargs['run_id']})
 
     def _request_safety_interrupt(self, reason: str) -> None:
         """Unify ESTOP, guard loss and manual takeover into one stop path."""
@@ -1359,6 +1373,7 @@ class PatrolNode(Node):
                 inspection_cb=self._inspection_client.run,
                 inspection_depart_cb=self._inspection_client.depart,
                 inspection_finish_cb=self._inspection_client.finish,
+                event_cb=self._notify_event,
             )
             with self._run_lock:
                 safety_reason = self._safety_interrupt_reason
@@ -1377,13 +1392,13 @@ class PatrolNode(Node):
                     self._active_request_id = goal_handle.request.request_id
             if canceled_before_start:
                 if safety_reason:
-                    self._store.finish_run(
+                    self._finish_run(
                         run_id, STATE_INTERRUPTED, False, 0, 0,
                         "INTERRUPTED", safety_reason, now_ns())
                     engine.mark_interrupted_before_start(safety_reason)
                     return self._finish_canceled_goal(
                         goal_handle, result, safety_reason, run_id)
-                self._store.finish_run(run_id, STATE_CANCELED, False, 0, 0,
+                self._finish_run(run_id, STATE_CANCELED, False, 0, 0,
                                        "CANCELED", "任务在校验阶段被取消", now_ns())
                 engine.mark_canceled_before_start("任务在校验阶段被取消")
                 return self._finish_canceled_goal(
@@ -1401,7 +1416,7 @@ class PatrolNode(Node):
             engine_result = engine.run()
             loops = engine_result.completed_loops
             steps = engine_result.completed_steps
-            self._store.finish_run(
+            self._finish_run(
                 run_id, engine_result.final_state, engine_result.success,
                 engine_result.completed_loops, engine_result.completed_steps,
                 engine_result.error_code, engine_result.message, now_ns(),
@@ -1424,7 +1439,7 @@ class PatrolNode(Node):
                 goal_handle.abort()
         except PatrolError as error:
             if run_id:
-                self._store.finish_run(run_id, STATE_FAILED, False, loops, steps,
+                self._finish_run(run_id, STATE_FAILED, False, loops, steps,
                                        error.code, error.message, now_ns())
             result.success = False
             result.final_state = STATE_FAILED
@@ -1436,7 +1451,7 @@ class PatrolNode(Node):
             goal_handle.abort()
         except Exception as error:  # noqa: BLE001 - node boundary
             if run_id:
-                self._store.finish_run(run_id, STATE_FAILED, False, loops, steps,
+                self._finish_run(run_id, STATE_FAILED, False, loops, steps,
                                        "INTERRUPTED", str(error), now_ns())
             result.success = False
             result.final_state = STATE_FAILED

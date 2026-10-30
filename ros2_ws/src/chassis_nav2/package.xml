@@ -52,6 +52,7 @@
   <exec_depend>nav2_smac_planner</exec_depend>
   <depend>nav2_regulated_pure_pursuit_controller</depend>
   <exec_depend>hk_camera</exec_depend>
+  <exec_depend>audio_player</exec_depend>
 
   <export>
     <build_type>ament_cmake</build_type>

@@ -1,5 +1,6 @@
 """Assemble the real RoboSense/Wit/JD03 pipeline from one hardware file."""
 import json
+import os
 import math
 import shutil
 from datetime import datetime
@@ -244,6 +245,10 @@ def navigation_nodes(map_yaml, hw, params_file, use_map_server=True, localizatio
     # 海康云台巡航节点（与导航解耦，默认关闭；ros2 param set /ptz_patrol enabled true 开启）
     nodes.append(Node(package='chassis_nav2', executable='ptz_patrol.py', name='ptz_patrol',
                       output='screen'))
+    if os.environ.get('ROBOT_ENABLE_AUDIO', '1') != '0':
+        # Both 2D and 3D navigation use this entry. The player's domain lock
+        # reuses a web-started service instead of opening a second sound output.
+        nodes.append(Node(package='audio_player', executable='tts_node', output='screen'))
     return nodes
 
 

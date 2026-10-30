@@ -2,13 +2,22 @@
 <package format="3">
   <name>audio_player</name>
   <version>0.1.0</version>
-  <description>语音播报与智能提示：TTS 合成（edge-tts 在线/espeak-ng 离线）+ 机器人端播放</description>
+  <description>机器人固定提示音、运行状态语音提醒及音频文件播放</description>
   <maintainer email="dev@example.com">ubuntu</maintainer>
   <license>Proprietary</license>
 
   <exec_depend>rclpy</exec_depend>
   <exec_depend>std_msgs</exec_depend>
   <exec_depend>robot_common</exec_depend>
+  <exec_depend>ament_index_python</exec_depend>
+  <exec_depend>action_msgs</exec_depend>
+  <exec_depend>nav_msgs</exec_depend>
+  <exec_depend>nav2_msgs</exec_depend>
+  <exec_depend>patrol_interfaces</exec_depend>
+  <exec_depend>yunle_msgs</exec_depend>
+  <exec_depend>tf2_ros</exec_depend>
+  <exec_depend>ffmpeg</exec_depend>
+  <test_depend>python3-pytest</test_depend>
 
   <export>
     <build_type>ament_python</build_type>
