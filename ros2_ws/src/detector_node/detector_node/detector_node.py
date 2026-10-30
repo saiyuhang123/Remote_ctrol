@@ -24,7 +24,7 @@ class DetectorNode(Node):
         project = Path(os.environ.get('ROBOT_PROJECT_ROOT', Path.home() / 'Remote_ctrol'))
         defaults = dict(input_mode='ros', image_topic='/hk_camera/image_raw',
                         video_source='rtsp://127.0.0.1:8554/cam', enable_person=True,
-                        enable_plate=True, enable_face=True, max_inference_hz=4., cpu_threads=2,
+                        enable_plate=True, enable_face=True, max_inference_hz=1., cpu_threads=2,
                         staging_dir=str(project/'data/vision/staging'), conf_threshold=.45,
                         track_ttl_sec=2., plate_confirmations=2, plate_ocr_interval_sec=2.,
                         face_conf_threshold=.8, face_input_width=960, face_capture_interval_sec=2.,
