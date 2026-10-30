@@ -70,3 +70,6 @@ offline_outputs/
 
 # Local deployment backups (include binaries and duplicate source snapshots).
 /deployment_logs/
+
+# 根目录误生成的 CMake/ament 构建目录
+/build/
