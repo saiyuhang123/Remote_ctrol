@@ -1,7 +1,7 @@
 # pcd2pgm
 
 本项目移植自 KYBOT 工作区，用于 FAST-LIO PCD 到 Nav2 栅格的同坐标投影。
-完整步骤和投影限制见 [实机导航移植说明](../../../实机导航移植说明.md)。
+完整步骤和投影限制见 [项目 README：FAST-LIO 建图与导航](../../../README.md#fastlio)。
 启动必须指定实测 `pcd:=/实际路径/site.pcd`，高度带位于 PCD 坐标系；发布 `/projected_map`。
 
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)

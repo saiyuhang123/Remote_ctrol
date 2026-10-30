@@ -15,7 +15,7 @@ from rcl_interfaces.msg import SetParametersResult
 from sensor_msgs.msg import Image
 from std_msgs.msg import String
 from ament_index_python.packages import get_package_share_directory
-from .detection_pipeline import Pipeline, YoloCpu, YunetCpu, LpdYunetCpu, PlateTextCpu
+from .detection_pipeline import Pipeline, YoloCpu, YunetCpu, LpdYunetCpu, PlateTextCpu, ModelSchedule
 
 
 class DetectorNode(Node):
@@ -55,6 +55,7 @@ class DetectorNode(Node):
         cv2.setNumThreads(self.get_parameter('cpu_threads').value)
         self.lock = threading.Lock()
         self.latest = None
+        self.image_sequence = 0
         self.stop_event = threading.Event()
         self.instance = str(uuid.uuid4())
         self.staging = Path(self.get_parameter('staging_dir').value).expanduser().resolve()
@@ -70,7 +71,8 @@ class DetectorNode(Node):
                           last_error='', input_ready=False, face=False, person=False, plate=False,
                           face_backend='opencv_yunet', person_backend='yolo26n_openvino',
                           plate_backend='lpd_yunet+hyperlpr3_rec', recognition_mode='host',
-                          plate_ocr_calls=0, plate_ocr_skipped=0)
+                          plate_ocr_calls=0, plate_ocr_skipped=0,
+                          model_schedule='staggered', model_frames={}, model_inference_ms={})
         self.outgoing = []
         self.pub = self.create_publisher(String, '/vision/raw_detections', 100)
         self.status_pub = self.create_publisher(String, '/vision/detector_status', 5)
@@ -98,6 +100,7 @@ class DetectorNode(Node):
     def on_image(self, message):
         with self.lock:
             self.latest = message
+            self.image_sequence += 1
             self.last_frame_mono = time.monotonic()
 
     def publish_status(self):
@@ -187,12 +190,17 @@ class DetectorNode(Node):
         cap = None
         video = self.get_parameter('input_mode').value == 'video'
         source = self.get_parameter('video_source').value
-        next_frame = time.monotonic()
+        schedule = ModelSchedule()
+        cached_message, cached_frame, bridge = None, None, None
+        processed_sequences = {}
+        model_names = {0: 'person', -1: 'face', -2: 'plate'}
         try:
             while not self.stop_event.is_set():
                 person, plate, face = (self.get_parameter(key).value for key in ('enable_person', 'enable_plate', 'enable_face'))
                 if not person and not plate and not face:
                     self.pipeline = None
+                    cached_message, cached_frame = None, None
+                    processed_sequences.clear()
                     if cap is not None:
                         cap.release()
                         cap = None
@@ -201,9 +209,11 @@ class DetectorNode(Node):
                         self.latest = None
                     self.stop_event.wait(.1)
                     continue
-                if self.stop_event.wait(max(0., next_frame-time.monotonic())):
+                enabled = ({0} if person else set()) | ({-1} if face else set()) | ({-2} if plate else set())
+                model, due = schedule.next(enabled, self.get_parameter('max_inference_hz').value,
+                                           time.monotonic())
+                if self.stop_event.wait(max(0., due-time.monotonic())):
                     break
-                next_frame = time.monotonic() + 1./self.get_parameter('max_inference_hz').value
                 try:
                     pipeline = self.load_pipeline(person, plate, face)
                     with self.lock:
@@ -231,25 +241,47 @@ class DetectorNode(Node):
                         self.last_frame_mono = time.monotonic()
                     else:
                         with self.lock:
-                            message, self.latest = self.latest, None
-                        if message is None:
+                            message = self.latest
+                            sequence = self.image_sequence
+                            frame_age = time.monotonic() - self.last_frame_mono
+                        if (message is None or frame_age > 3. or
+                                processed_sequences.get(model) == sequence):
+                            # Reserve this model's slot without treating a
+                            # frozen image as another independent observation.
+                            skipped = time.monotonic()
+                            schedule.complete(model, skipped, skipped)
                             continue
-                        from cv_bridge import CvBridge
-                        frame = CvBridge().imgmsg_to_cv2(message, desired_encoding='bgr8')
+                        # Different models can share the latest full-resolution
+                        # frame; do not deserialize/convert it again per model.
+                        if message is not cached_message:
+                            if bridge is None:
+                                from cv_bridge import CvBridge
+                                bridge = CvBridge()
+                            cached_frame = bridge.imgmsg_to_cv2(message, desired_encoding='bgr8')
+                            cached_message = message
+                        frame = cached_frame
                         stamp = message.header.stamp.sec*10**9 + message.header.stamp.nanosec
                         basis = 'ros_image_stamp' if stamp else 'host_image_receipt'
                         stamp = stamp or time.time_ns()
                     start = time.monotonic()
-                    self.save_events(pipeline.process(frame, person, plate, face=face), stamp, basis)
+                    self.save_events(pipeline.process(frame, person, plate, face=face,
+                                                      run_classes={model}), stamp, basis)
+                    if not video:
+                        processed_sequences[model] = sequence
+                    finished = time.monotonic()
+                    schedule.complete(model, start, finished)
                     with self.lock:
                         self.state.update(ready=not self.model_errors,
                                           face=face and pipeline.face is not None,
                                           person=person and pipeline.detector is not None,
                                           plate=plate and pipeline.plate is not None and pipeline.plate_detector is not None,
-                                          inference_ms=(time.monotonic()-start)*1000,
+                                          inference_ms=(finished-start)*1000,
                                           plate_ocr_calls=pipeline.plate_ocr_calls,
                                           plate_ocr_skipped=pipeline.plate_ocr_skipped)
                         self.state['last_error'] = '; '.join(self.model_errors)
+                        name = model_names[model]
+                        self.state['model_frames'][name] = self.state['model_frames'].get(name, 0) + 1
+                        self.state['model_inference_ms'][name] = (finished-start)*1000
                         self.state['frames'] += 1
                 except Exception as error:
                     with self.lock:

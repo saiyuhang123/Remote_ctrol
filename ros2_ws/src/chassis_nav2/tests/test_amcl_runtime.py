@@ -137,7 +137,7 @@ class AmclRuntimeTest(unittest.TestCase):
                     wait_for(lambda: initial.get_subscription_count() > 0)
                     initialize()
                     wait_for(lambda: buffer.can_transform('map', 'base_link', rclpy.time.Time()))
-                    for name in ('controller_server', 'smoother_server', 'planner_server',
+                    for name in ('controller_server', 'planner_server',
                                  'behavior_server', 'bt_navigator', 'waypoint_follower', 'velocity_smoother'):
                         active(name)
                     for step in range(1, 13):

@@ -188,6 +188,8 @@ class PlateTextCpu:
         import onnxruntime as ort
         options = ort.SessionOptions()
         options.intra_op_num_threads, options.inter_op_num_threads = threads, 1
+        options.add_session_config_entry('session.intra_op.allow_spinning', '0')
+        options.add_session_config_entry('session.inter_op.allow_spinning', '0')
         options.log_severity_level = 3
         self.session = ort.InferenceSession(str(model_path), sess_options=options, providers=['CPUExecutionProvider'])
         self.input = self.session.get_inputs()[0]
@@ -213,6 +215,34 @@ class PlateTextCpu:
         return self.decode(self.session.run(None, {self.input.name: tensor})[0])
 
 
+class ModelSchedule:
+    """Spread enabled models over a period, without catch-up bursts."""
+    def __init__(self, idle_gap=.02):
+        self.idle_gap = idle_gap
+        self.enabled, self.hz = (), None
+        self.due, self.started = {}, {}
+        self.not_before = 0.
+
+    def next(self, enabled, hz, now):
+        enabled = tuple(cls for cls in (0, -1, -2) if cls in enabled)
+        if not enabled:
+            raise ValueError('at least one model must be enabled')
+        period = 1. / hz
+        if enabled != self.enabled or hz != self.hz:
+            self.enabled, self.hz = enabled, hz
+            self.due = {cls: max(now + index * period / len(enabled),
+                                 self.started.get(cls, -math.inf) + period)
+                        for index, cls in enumerate(enabled)}
+        cls = min(enabled, key=self.due.get)
+        return cls, max(self.due[cls], self.not_before)
+
+    def complete(self, cls, started, finished):
+        self.started[cls] = started
+        self.due[cls] = max(started + 1. / self.hz, finished + self.idle_gap)
+        self.not_before = max(started + 1. / self.hz / len(self.enabled),
+                              finished + self.idle_gap)
+
+
 class Pipeline:
     """Independent models with anonymous IoU tracks and per-track records."""
     def __init__(self, detector=None, plate=None, track_ttl=2., plate_confirmations=2,
@@ -222,6 +252,7 @@ class Pipeline:
             raise ValueError('plate_ocr_interval must be 0..60 seconds')
         self.plate_ocr_interval = plate_ocr_interval
         self.frame_sequence = 0
+        self.plate_frame_sequence = 0
         self.plate_ocr_calls = self.plate_ocr_skipped = 0
         self.detector, self.plate, self.plate_detector = detector, plate, plate_detector
         self.face, self.face_capture_interval = face, face_capture_interval
@@ -231,19 +262,22 @@ class Pipeline:
     def reset(self):
         self.tracks.clear()
 
-    def process(self, frame, person=True, plate=True, now=None, face=False):
+    def process(self, frame, person=True, plate=True, now=None, face=False, run_classes=None):
         now = time.monotonic() if now is None else now
         self.frame_sequence += 1
         enabled_classes = ({0} if person else set()) | ({-1} if face else set()) | ({-2} if plate else set())
+        run_classes = enabled_classes if run_classes is None else enabled_classes.intersection(run_classes)
+        if -2 in run_classes:
+            self.plate_frame_sequence += 1
         self.tracks = {key: tr for key, tr in self.tracks.items()
                        if now-tr['last'] <= self.track_ttl and tr['cls'] in enabled_classes}
         available = set(self.tracks)
         events, detections = [], []
-        if person and self.detector is not None:
+        if 0 in run_classes and self.detector is not None:
             detections.extend((cls, score, box, None) for cls, score, box in self.detector(frame) if cls == 0)
-        if face and self.face is not None:
+        if -1 in run_classes and self.face is not None:
             detections.extend((cls, score, box, None) for cls, score, box in self.face(frame))
-        if plate and self.plate_detector is not None:
+        if -2 in run_classes and self.plate_detector is not None:
             detections.extend((-2, item['confidence'], item['bbox'], item['corners'])
                               for item in self.plate_detector(frame))
         for cls, score, box, corners in detections:
@@ -258,7 +292,7 @@ class Pipeline:
             previous_plate_frame = tr.get('plate_frame')
             tr.update(box=box, last=now)
             if cls == -2:
-                tr['plate_frame'] = self.frame_sequence
+                tr['plate_frame'] = self.plate_frame_sequence
             x1, y1, x2, y2 = map(int, box)
             crop = frame[max(0, y1):max(0, y2), max(0, x1):max(0, x2)]
             if not crop.size:
@@ -280,7 +314,7 @@ class Pipeline:
                 # A missed detection, a box jump, or an uncertain/new reading
                 # restores per-frame OCR until the candidate is confirmed.
                 if (tr.get('plate_confirmed', False) and overlap >= .6 and
-                        previous_plate_frame == self.frame_sequence - 1 and
+                        previous_plate_frame == self.plate_frame_sequence - 1 and
                         now - tr['plate_ocr_last'] < self.plate_ocr_interval):
                     self.plate_ocr_skipped += 1
                     continue

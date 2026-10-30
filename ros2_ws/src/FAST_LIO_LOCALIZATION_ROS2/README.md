@@ -3,7 +3,7 @@
 本项目从 `/home/jkbot/kybot_ws` 移植此包，适配 JD03、RSHELIOS 和维特 IMU；
 速腾驱动直接生成 FAST-LIO 所需的 XYZIRT 点云。
 实机统一启动、待标定配置、地图保存与 Nav2 接入见项目根目录
-[实机导航移植说明](../../../实机导航移植说明.md)。
+[项目 README：FAST-LIO 建图与导航](../../../README.md#fastlio)。
 
 请优先使用 `ros2 launch chassis_nav2 mapping.launch.py` 或 `localization.launch.py`，
 显式传入 `pcd_map`。下文保留上游算法说明；低层 launch 和零值配置不代表新车已标定。

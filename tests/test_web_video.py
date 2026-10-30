@@ -90,7 +90,7 @@ def test_transcode_dimensions_and_rate_are_configurable():
     assert video_settings({}) == (1280, 15)
     assert video_settings({'ROBOT_VIDEO_MAX_WIDTH':'960', 'ROBOT_VIDEO_FPS':'10'}) == (960, 10)
     command = transcode_command('-stimeout', 960, 10)
-    assert "scale='min(960,iw)':-2,fps=10" in command
+    assert "fps=10,scale='min(960,iw)':-2" in command
     assert command[command.index('-g')+1] == '20'
     for environment in ({'ROBOT_VIDEO_MAX_WIDTH':'961'}, {'ROBOT_VIDEO_MAX_WIDTH':'319'},
                         {'ROBOT_VIDEO_FPS':'0'}, {'ROBOT_VIDEO_FPS':'31'}, {'ROBOT_VIDEO_FPS':'bad'}):

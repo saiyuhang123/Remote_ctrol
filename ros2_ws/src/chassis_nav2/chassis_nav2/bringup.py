@@ -209,9 +209,10 @@ def navigation_nodes(map_yaml, hw, params_file, use_map_server=True, localizatio
     if use_map_server:
         nodes.append(Node(package='nav2_map_server', executable='map_server', name='map_server',
                           parameters=[params, {'yaml_filename': map_yaml, 'use_sim_time': False}], output='screen'))
+    # The configured navigation BTs do not call SmoothPath. A standalone
+    # smoother_server would still subscribe to every full global costmap.
     names = []
     for package, executable in [('nav2_controller', 'controller_server'),
-                                ('nav2_smoother', 'smoother_server'),
                                 ('nav2_planner', 'planner_server'),
                                 ('nav2_behaviors', 'behavior_server'),
                                 ('nav2_bt_navigator', 'bt_navigator'),

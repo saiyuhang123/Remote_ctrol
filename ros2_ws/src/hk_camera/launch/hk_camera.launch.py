@@ -56,7 +56,7 @@ def generate_launch_description():
         description='人脸小图、背景图、带框图和坐标 JSON 的保存目录'
     )
     raw_publish_fps_arg = DeclareLaunchArgument(
-        'raw_publish_fps', default_value='8.0',
+        'raw_publish_fps', default_value='2.0',
         description='原图发布上限 0..30 fps；0 表示不限帧'
     )
     enable_gui_arg = DeclareLaunchArgument(

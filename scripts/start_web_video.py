@@ -87,7 +87,8 @@ def transcode_command(timeout_option, max_width=1280, fps=15):
     return ['ffmpeg', '-hide_banner', '-loglevel', 'warning', '-nostdin',
             '-rtsp_transport', 'tcp', timeout_option, '5000000', '-threads', '2',
             '-allowed_media_types', 'video', '-i', 'rtsp://127.0.0.1:8554/camera_source', '-map', '0:v:0',
-            '-filter_threads', '1', '-vf', f"scale='min({max_width},iw)':-2,fps={fps}",
+            # Drop unused frames before the relatively expensive resize.
+            '-filter_threads', '1', '-vf', f"fps={fps},scale='min({max_width},iw)':-2",
             '-c:v', 'libx264', '-threads', '2', '-preset', 'ultrafast',
             '-tune', 'zerolatency', '-profile:v', 'baseline', '-pix_fmt', 'yuv420p',
             '-bf', '0', '-g', str(fps*2), '-keyint_min', str(fps*2), '-sc_threshold', '0',

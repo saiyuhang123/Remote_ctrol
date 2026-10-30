@@ -17,5 +17,5 @@ hk_camera_node:
     stream_type: 0             # 0=主码流 1=子码流
     preview_max_width: 640     # UI 预览最大宽度；不放大原图
     preview_publish_fps: 5.0   # UI 预览帧率，与原图独立限帧
-    raw_publish_fps: 8.0       # 原图发布上限；保持完整分辨率，0=不限帧，重启生效
+    raw_publish_fps: 2.0       # 原图发布上限；保持完整分辨率，0=不限帧，重启生效
     link_mode: 0               # 0=TCP 1=UDP 2=组播

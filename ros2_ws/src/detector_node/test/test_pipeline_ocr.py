@@ -6,7 +6,7 @@ import numpy as np
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from detector_node.detection_pipeline import Pipeline
+from detector_node.detection_pipeline import Pipeline, ModelSchedule
 
 
 class Plates:
@@ -144,3 +144,70 @@ def test_other_detection_events_keep_their_existing_cadence():
     assert pipeline.process(frame, person=True, plate=False, face=True, now=.25) == []
     later = pipeline.process(frame, person=True, plate=False, face=True, now=2.)
     assert [event['event_type'] for event in later] == ['face_capture']
+
+
+def test_staggered_models_preserve_tracks_and_confirmed_plate_cache():
+    frame = np.zeros((200, 300, 3), dtype=np.uint8)
+    ocr = OCR()
+    person = lambda _: [(0, .99, [0, 0, 50, 100])]
+    face = lambda _: [(-1, .99, [0, 0, 30, 30])]
+    pipeline = Pipeline(detector=person, face=face, plate_detector=Plates(), plate=ocr)
+    events = []
+    for cycle in range(3):
+        for offset, cls in enumerate((0, -1, -2)):
+            events.extend(pipeline.process(frame, person=True, plate=True, face=True,
+                                           now=cycle + offset / 3., run_classes={cls}))
+    assert sum(event['event_type'] == 'person' for event in events) == 1
+    assert sum(event['event_type'] == 'vehicle_plate' for event in events) == 1
+    assert {track['cls'] for track in pipeline.tracks.values()} == {0, -1, -2}
+    assert ocr.calls == 2
+    assert pipeline.plate_ocr_skipped == 1
+    # A real missed plate frame must still invalidate the OCR cache.
+    pipeline.plate_detector.visible = False
+    pipeline.process(frame, person=True, plate=True, face=True, now=3., run_classes={-2})
+    pipeline.plate_detector.visible = True
+    pipeline.process(frame, person=True, plate=True, face=True, now=3.2, run_classes={-2})
+    assert ocr.calls == 3
+    pipeline.process(frame, person=True, plate=False, face=False, now=3.3, run_classes={0})
+    assert all(track['cls'] == 0 for track in pipeline.tracks.values())
+
+
+def test_model_schedule_keeps_each_model_at_one_hz_and_spreads_starts():
+    schedule = ModelSchedule()
+    now, starts = 0., {0: [], -1: [], -2: []}
+    for _ in range(12):
+        cls, due = schedule.next({0, -1, -2}, 1., now)
+        now = max(now, due)
+        starts[cls].append(now)
+        schedule.complete(cls, now, now + .05)
+        now += .05
+    for offset, cls in enumerate((0, -1, -2)):
+        assert starts[cls] == pytest.approx([cycle + offset / 3. for cycle in range(4)])
+
+
+def test_model_schedule_drops_backlog_and_respects_rate_after_switches():
+    schedule = ModelSchedule()
+    cls, due = schedule.next({0, -1, -2}, 1., 0.)
+    assert cls == 0
+    schedule.complete(cls, 0., 2.)
+    cls, due = schedule.next({0, -1, -2}, 1., 2.)
+    assert cls == -1 and due >= 2.02
+    schedule.complete(cls, due, due + .05)
+    # Removing other models cannot trigger an extra face inference immediately.
+    cls, next_due = schedule.next({-1}, 1., due + .05)
+    assert cls == -1 and next_due >= due + 1.
+    # A runtime rate change gets a new phase, with the new per-model limit.
+    cls, changed_due = schedule.next({-1}, .5, due + .1)
+    assert cls == -1 and changed_due >= due + 2.
+
+
+def test_model_loading_delay_does_not_collapse_staggered_phases():
+    schedule = ModelSchedule()
+    cls, due = schedule.next({0, -1, -2}, 1., 0.)
+    # Compiling/loading models can make all original deadlines overdue.
+    schedule.complete(cls, 5., 5.05)
+    cls, due = schedule.next({0, -1, -2}, 1., 5.05)
+    assert cls == -1 and due == pytest.approx(5. + 1. / 3.)
+    schedule.complete(cls, due, due + .05)
+    cls, due = schedule.next({0, -1, -2}, 1., due + .05)
+    assert cls == -2 and due == pytest.approx(5. + 2. / 3.)
