@@ -225,13 +225,14 @@ void VisionClient::query(const QString &type, const QString &cursor) {
   Q_UNUSED(type); Q_UNUSED(cursor);
 #endif
 }
-void VisionClient::setMapLabel(const QString &label) {
+bool VisionClient::setMapLabel(const QString &label) {
 #ifdef DESKTOP_HAS_VISION_INTERFACES
-  if (impl_->offline) return;
-  if (!impl_->context->service_is_ready()) { emit message("记录服务尚未就绪，请稍后关联地图标记"); return; }
+  if (impl_->offline || label.trimmed().isEmpty()) return false;
+  if (!impl_->context->service_is_ready()) { emit message("记录服务尚未就绪，请稍后关联地图标记"); return false; }
   auto request = std::make_shared<vision_interfaces::srv::SetRecordingContext::Request>(); request->map_id = label.trimmed().toStdString();
   impl_->context->async_send_request(request, [this](rclcpp::Client<vision_interfaces::srv::SetRecordingContext>::SharedFuture future) { emit message(QString::fromStdString(future.get()->message)); });
+  return true;
 #else
-  Q_UNUSED(label);
+  Q_UNUSED(label); return false;
 #endif
 }

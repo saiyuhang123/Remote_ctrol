@@ -77,6 +77,17 @@ MainWindow::MainWindow(const DesktopConfig &config, bool offline, QWidget *paren
   closeSafetyTimer_->setInterval(200);
   connect(closeSafetyTimer_, &QTimer::timeout, this, &MainWindow::pollCloseAfterSafetyStop);
   setupUi();
+  // Label new vision events with the active map automatically. The recorder
+  // clears its context on restart, so keep retrying (the panel dedups and only
+  // marks a label as sent once the service accepted it).
+  auto *visionMapTimer = new QTimer(this);
+  visionMapTimer->setInterval(5000);
+  connect(visionMapTimer, &QTimer::timeout, this, [this] {
+    if (!patrolClient_ || !visionPanel_) return;
+    const QString mapId = patrolClient_->activeMapId();
+    if (!mapId.isEmpty()) visionPanel_->setMapLabel(mapId);
+  });
+  visionMapTimer->start();
   remoteBridge_ = new DesktopRemoteBridge(cameraPanel_, visionPanel_, controller_, offline_, this);
   patrolClient_->refreshMaps();
   connect(controller_, &LocalController::message, this, &MainWindow::log);

@@ -127,6 +127,13 @@ VisionPanel::VisionPanel(const DesktopConfig &config, bool offline, QWidget *par
   });
 }
 VisionPanel::~VisionPanel() { delete client_; }
+void VisionPanel::setMapLabel(const QString &label) {
+  // The recorder resets its map context on restart, so MainWindow retries
+  // this until the set_recording_context service accepts the label.
+  if (label.isEmpty() || label == mapLabel_) return;
+  if (client_->setMapLabel(label)) mapLabel_ = label;
+}
+
 bool VisionPanel::setRemoteFeature(const QString &parameter, bool enabled, QString *detail) {
   return client_->setFeature(parameter, enabled, detail);
 }

@@ -17,7 +17,7 @@ public:
   void startDetector(bool person, bool plate);
   void stopDetector();
   void query(const QString &type = {}, const QString &cursor = {});
-  void setMapLabel(const QString &label);
+  bool setMapLabel(const QString &label);
 signals:
   void cameraRequested();
   void message(const QString &text);

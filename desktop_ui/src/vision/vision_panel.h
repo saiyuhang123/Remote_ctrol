@@ -10,10 +10,12 @@ public:
   VisionPanel(const DesktopConfig &config, bool offline, QWidget *parent = nullptr);
   ~VisionPanel() override;
   bool setRemoteFeature(const QString &parameter, bool enabled, QString *detail);
+  void setMapLabel(const QString &label);
 signals:
   void cameraRequested();
   void message(const QString &text);
 private:
   VisionClient *client_;
   QPointer<QDialog> history_;
+  QString mapLabel_;
 };
