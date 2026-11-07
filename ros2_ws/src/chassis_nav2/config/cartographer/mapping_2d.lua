@@ -1,9 +1,10 @@
 -- JD03 巡检车 2D 建图配置（cartographer）。
--- 数据源：/scan（pointcloud_to_laserscan 单帧 360°）、/odom（EKF 轮速+IMU 融合）、/imu/data（wit_ros2_imu）。
--- TF：cartographer 发 map->odom；odom->base_link 由 EKF 发布；base_link->imu_link 静态 TF。
+-- 数据源：/scan（pointcloud_to_laserscan）与 /imu/data（wit_ros2_imu）。
+-- TF：cartographer 独占 map->odom 与 odom->base_link；本链路不启动 EKF。
+-- 轮速节点发布 /odom，供 Nav2 读取底盘速度；自身不发布 TF。
 -- 注意：cartographer 强制 IMU 系与 tracking_frame 位置重合（sensor_bridge.cpp CHECK，
 -- 否则 SIGABRT），而本车 IMU 实测偏离 base_link [0.32, 0, 0.22]，故 tracking_frame 用
--- imu_link；published_frame 保持 base_link，对外发布的 map->odom 不受影响。
+-- imu_link；published_frame 使用 base_link，将估计结果发布到车体坐标系。
 
 include "map_builder.lua"
 include "trajectory_builder.lua"
@@ -18,7 +19,7 @@ options = {
   provide_odom_frame = true,
   publish_frame_projected_to_2d = true,
   use_pose_extrapolator = true,
-  use_odometry = false,   -- /odom 是 EKF 融合结果，与 /imu/data 同源（重复融合）；scan matching 主要靠 IMU 外推
+  use_odometry = false,   -- Cartographer 使用扫描与 IMU；/odom 仅供 Nav2 读取底盘速度
   use_nav_sat = false,
   use_landmarks = false,
   num_laser_scans = 1,

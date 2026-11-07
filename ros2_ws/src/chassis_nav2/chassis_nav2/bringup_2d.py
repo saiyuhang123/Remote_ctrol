@@ -1,6 +1,7 @@
 """2D 管线：SLAM Toolbox 建图、AMCL 定位，或 Cartographer 建图/定位。
 
-map->odom 由所选定位/建图节点提供；odom->base_link 固定由 EKF（轮速+IMU）发布。
+Cartographer 发布 map->odom 与 odom->base_link；轮速节点提供 /odom 速度，不发布 TF。
+SLAM Toolbox / AMCL 使用 EKF（轮速+IMU）发布 odom->base_link 与 /odom。
 
 与 3D 管线（bringup.py，FAST-LIO）互不混用；slam_toolbox 与 cartographer 两个 2D 后端
 配置、地图文件、Nav2 参数各自独立，运行时三选一，不可同时启动。
@@ -70,9 +71,13 @@ def assemble(args, mapping, backend):
         nodes.append(bringup.chassis_node(hw))
     if args['enable_control'].lower() == 'true':
         nodes.append(bringup.bridge_node(hw))
-    # 轮速 + IMU 经 EKF 发 odom->base_link 与 /odom，定位节点与 Nav2 共用
-    nodes.append(bringup.wheel_node(hw, '/odom_raw', 'wheel_odom', False, '/odom_wheel'))
-    nodes.append(bringup.ekf_node(hw))
+    if backend == 'cartographer':
+        # Cartographer 独占 odom->base_link；不启动 EKF，避免重复发布。
+        # /odom 的 twist 供 Nav2 读取底盘速度；积分位姿保留 wheel_odom 标识。
+        nodes.append(bringup.wheel_node(hw, '/odom', 'wheel_odom', False, '/odom_wheel'))
+    else:
+        nodes.append(bringup.wheel_node(hw, '/odom_raw', 'wheel_odom', False, '/odom_wheel'))
+        nodes.append(bringup.ekf_node(hw))
     enable_patrol = args.get('enable_patrol', 'false').lower() == 'true'
     mux_config = 'twist_mux_patrol.yaml' if enable_patrol else 'twist_mux.yaml'
     nodes.append(Node(package='twist_mux', executable='twist_mux',

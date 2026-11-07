@@ -790,6 +790,16 @@ class IntegrationTests(unittest.TestCase):
                     patch.object(bringup_2d, 'Node', side_effect=lambda **kwargs: kwargs):
                 nodes = bringup_2d.assemble(args, mapping=False, backend='cartographer')
             self.assertFalse(any(n['package'] in ('nav2_amcl', 'slam_toolbox') for n in nodes))
+            self.assertEqual(sum(n['package'] == 'robot_localization' for n in nodes), 0)
+            wheel = next(n for n in nodes if n.get('executable') == 'jd03_odometry.py')
+            wheel_params = wheel['parameters'][0]
+            self.assertEqual(wheel_params['odom_topic'], '/odom')
+            self.assertEqual(wheel_params['odom_frame'], 'wheel_odom')
+            self.assertEqual(wheel_params['comparison_topic'], '/odom_wheel')
+            self.assertIs(wheel_params['publish_tf'], False)
+            lua = (SRC/'chassis_nav2/config/cartographer/mapping_2d.lua').read_text()
+            self.assertIn('published_frame = "base_link"', lua)
+            self.assertIn('provide_odom_frame = true', lua)
             carto = next(n for n in nodes if n.get('executable') == 'cartographer_node')
             self.assertIn(str(root/'map.pbstream'), carto['arguments'])
             manager = next(n for n in nodes if n.get('name') == 'lifecycle_manager_map')
