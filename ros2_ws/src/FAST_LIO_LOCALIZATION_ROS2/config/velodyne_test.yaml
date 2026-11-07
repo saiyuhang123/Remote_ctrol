@@ -16,6 +16,8 @@
     interval: 5
 /**:
   ros__parameters:
+    # Startup/RViz ICP aligns a fixed prior PCD; no periodic ICP after convergence.
+    prior_map.enable: true
     feature_extract_enable: false
     point_filter_num: 4
     max_iteration: 3

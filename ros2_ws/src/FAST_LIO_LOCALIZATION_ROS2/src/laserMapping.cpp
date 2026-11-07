@@ -66,6 +66,8 @@
 #include "atomic_map_save.h"
 #include "preprocess.h"
 #include "gravity_observation.hpp"
+#include "fixed_prior_map.hpp"
+#include <std_msgs/msg/string.hpp>
 #include <ikd-Tree/ikd_Tree.h>
 
 #define INIT_TIME           (0.1)
@@ -140,7 +142,7 @@ PointCloudXYZI::Ptr _featsArray;
 pcl::VoxelGrid<PointType> downSizeFilterSurf;
 pcl::VoxelGrid<PointType> downSizeFilterMap;
 
-KD_TREE<PointType> ikdtree;
+std::unique_ptr<KD_TREE<PointType>> ikdtree(new KD_TREE<PointType>());
 
 V3F XAxisPoint_body(LIDAR_SP_LEN, 0.0, 0.0);
 V3F XAxisPoint_world(LIDAR_SP_LEN, 0.0, 0.0);
@@ -246,7 +248,7 @@ void RGBpointBodyLidarToIMU(PointType const * const pi, PointType * const po)
 void points_cache_collect()
 {
     PointVector points_history;
-    ikdtree.acquire_removed_points(points_history);
+    ikdtree->acquire_removed_points(points_history);
     // for (int i = 0; i < points_history.size(); i++) _featsArray->push_back(points_history[i]);
 }
 
@@ -296,7 +298,7 @@ void lasermap_fov_segment()
 
     points_cache_collect();
     double delete_begin = omp_get_wtime();
-    if(cub_needrm.size() > 0) kdtree_delete_counter = ikdtree.Delete_Point_Boxes(cub_needrm);
+    if(cub_needrm.size() > 0) kdtree_delete_counter = ikdtree->Delete_Point_Boxes(cub_needrm);
     kdtree_delete_time = omp_get_wtime() - delete_begin;
 }
 
@@ -501,8 +503,8 @@ void map_incremental()
     }
 
     double st_time = omp_get_wtime();
-    add_point_size = ikdtree.Add_Points(PointToAdd, true);
-    ikdtree.Add_Points(PointNoNeedDownsample, false);
+    add_point_size = ikdtree->Add_Points(PointToAdd, true);
+    ikdtree->Add_Points(PointNoNeedDownsample, false);
     add_point_size = PointToAdd.size() + PointNoNeedDownsample.size();
     kdtree_incremental_time = omp_get_wtime() - st_time;
 }
@@ -709,7 +711,7 @@ void h_share_model(state_ikfom &s, esekfom::dyn_share_datastruct<double> &ekfom_
         if (ekfom_data.converge)
         {
             /** Find the closest surfaces in the map **/
-            ikdtree.Nearest_Search(point_world, NUM_MATCH_POINTS, points_near, pointSearchSqDis);
+            ikdtree->Nearest_Search(point_world, NUM_MATCH_POINTS, points_near, pointSearchSqDis);
             point_selected_surf[i] = points_near.size() < NUM_MATCH_POINTS ? false : pointSearchSqDis[NUM_MATCH_POINTS - 1] > 5 ? false : true;
         }
 
@@ -979,6 +981,20 @@ public:
 
         map_save_srv_ = this->create_service<std_srvs::srv::Trigger>("map_save", std::bind(&LaserMappingNode::map_save_callback, this, std::placeholders::_1, std::placeholders::_2, std::placeholders::_3));
 
+        prior_enabled_ = this->declare_parameter<bool>("prior_map.enable", false);
+        if (prior_enabled_) {
+            if (pcd_save_en) throw std::runtime_error("Fixed-map localization cannot save/overwrite a map");
+            prior_map_ = std::make_unique<fast_lio_prior::FixedMap<PointType>>(
+                map_file_path, filter_size_map_min);
+            prior_status_ = this->create_publisher<std_msgs::msg::String>(
+                "/fastlio/prior_map_status", rclcpp::QoS(1).transient_local());
+            prior_alignment_pub_ = this->create_publisher<nav_msgs::msg::Odometry>("/map_to_odom", rclcpp::QoS(1).transient_local());
+            prior_alignment_sub_ = this->create_subscription<nav_msgs::msg::Odometry>(
+                "/fastlio/prior_map_alignment", 1,
+                std::bind(&LaserMappingNode::prior_alignment, this, std::placeholders::_1));
+            publish_prior_status();
+            RCLCPP_INFO(this->get_logger(), "Prior PCD loaded: %zu points; bootstrap until initial ICP", prior_map_->size());
+        }
         RCLCPP_INFO(this->get_logger(), "Node init finished.");
     }
 
@@ -990,6 +1006,43 @@ public:
     }
 
 private:
+    void publish_prior_status() {
+        std_msgs::msg::String status;
+        status.data = "{\"mode\":\"" + std::string(prior_active_ ? "fixed_map" : "bootstrap") +
+            "\",\"revision\":" + std::to_string(prior_revision_) +
+            ",\"map_points\":" + std::to_string(prior_map_->size()) + "}";
+        prior_status_->publish(status);
+    }
+
+    void prior_alignment(const nav_msgs::msg::Odometry::SharedPtr msg) {
+        try {
+            if (msg->header.frame_id != "map" || msg->child_frame_id != lio_odom_frame)
+                throw std::runtime_error("alignment must be map -> " + lio_odom_frame);
+            const double stamp = msg->header.stamp.sec + msg->header.stamp.nanosec * 1e-9;
+            if (first_lidar_time > 0. && stamp < first_lidar_time)
+                throw std::runtime_error("alignment predates this LIO session");
+            const auto &p = msg->pose.pose.position;
+            const auto &q = msg->pose.pose.orientation;
+            auto cloud = prior_map_->in_lio_frame(Eigen::Vector3d(p.x,p.y,p.z),
+                Eigen::Quaterniond(q.w,q.x,q.y,q.z));
+            // A fresh tree joins the old tree's background rebuilder before destruction.
+            // All callbacks run on the single-thread executor; filter/IMU state stays intact.
+            auto next = std::make_unique<KD_TREE<PointType>>();
+            next->set_downsample_param(filter_size_map_min);
+            next->Build(cloud->points);
+            ikdtree.swap(next);
+            prior_active_ = true;
+            ++prior_revision_;
+            Nearest_Points.clear();
+            publish_prior_status();
+            // Publish the global correction only after the fixed tree has adopted it.
+            prior_alignment_pub_->publish(*msg);
+            RCLCPP_INFO(this->get_logger(), "Fixed prior map active: revision=%zu, points=%zu; ICP now on demand", prior_revision_, prior_map_->size());
+        } catch (const std::exception &e) {
+            RCLCPP_ERROR(this->get_logger(), "Prior-map alignment rejected: %s", e.what());
+        }
+    }
+
     void timer_callback()
     {
         if(sync_packages(Measures))
@@ -1064,7 +1117,7 @@ private:
             flg_EKF_inited = (Measures.lidar_beg_time - first_lidar_time) < INIT_TIME ? \
                             false : true;
             /*** Segment the map in lidar FOV ***/
-            lasermap_fov_segment();
+            if (!prior_active_) lasermap_fov_segment();  // Never delete parts of the fixed PCD.
 
             /*** downsample the feature points in a scan ***/
             downSizeFilterSurf.setInputCloud(feats_undistort);
@@ -1072,23 +1125,23 @@ private:
             t1 = omp_get_wtime();
             feats_down_size = feats_down_body->points.size();
             /*** initialize the map kdtree ***/
-            if(ikdtree.Root_Node == nullptr)
+            if(ikdtree->Root_Node == nullptr)
             {
                 RCLCPP_INFO(this->get_logger(), "Initialize the map kdtree");
                 if(feats_down_size > 5)
                 {
-                    ikdtree.set_downsample_param(filter_size_map_min);
+                    ikdtree->set_downsample_param(filter_size_map_min);
                     feats_down_world->resize(feats_down_size);
                     for(int i = 0; i < feats_down_size; i++)
                     {
                         pointBodyToWorld(&(feats_down_body->points[i]), &(feats_down_world->points[i]));
                     }
-                    ikdtree.Build(feats_down_world->points);
+                    ikdtree->Build(feats_down_world->points);
                 }
                 return;
             }
-            int featsFromMapNum = ikdtree.validnum();
-            kdtree_size_st = ikdtree.size();
+            int featsFromMapNum = ikdtree->validnum();
+            kdtree_size_st = ikdtree->size();
 
             // cout<<"[ mapping ]: In num: "<<feats_undistort->points.size()<<" downsamp "<<feats_down_size<<" Map num: "<<featsFromMapNum<<"effect num:"<<effct_feat_num<<endl;
 
@@ -1108,10 +1161,10 @@ private:
 
             if(0) // If you need to see map point, change to "if(1)"
             {
-                PointVector ().swap(ikdtree.PCL_Storage);
-                ikdtree.flatten(ikdtree.Root_Node, ikdtree.PCL_Storage, NOT_RECORD);
+                PointVector ().swap(ikdtree->PCL_Storage);
+                ikdtree->flatten(ikdtree->Root_Node, ikdtree->PCL_Storage, NOT_RECORD);
                 featsFromMap->clear();
-                featsFromMap->points = ikdtree.PCL_Storage;
+                featsFromMap->points = ikdtree->PCL_Storage;
             }
 
             pointSearchInd_surf.resize(feats_down_size);
@@ -1125,6 +1178,9 @@ private:
             double t_update_start = omp_get_wtime();
             double solve_H_time = 0;
             kf.update_iterated_dyn_share_modified(LASER_POINT_COV, solve_H_time);
+            if (prior_active_ && effct_feat_num < 10)
+                RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 3000,
+                    "Fixed-map matching weak (%d points); check alignment or use RViz 2D Pose Estimate", effct_feat_num);
             state_point = kf.get_x();
             euler_cur = SO3ToEuler(state_point.rot);
             pos_lid = state_point.pos + state_point.rot * state_point.offset_T_L_I;
@@ -1140,7 +1196,7 @@ private:
 
             /*** add the feature points to map kdtree ***/
             t3 = omp_get_wtime();
-            map_incremental();
+            if (!prior_active_) map_incremental();  // Bootstrap/mapping only; fixed PCD is immutable.
             t5 = omp_get_wtime();
 
             /******* Publish points *******/
@@ -1154,7 +1210,7 @@ private:
             if (runtime_pos_log)
             {
                 frame_num ++;
-                kdtree_size_end = ikdtree.size();
+                kdtree_size_end = ikdtree->size();
                 aver_time_consu = aver_time_consu * (frame_num - 1) / frame_num + (t5 - t0) / frame_num;
                 aver_time_icp = aver_time_icp * (frame_num - 1)/frame_num + (t_update_end - t_update_start) / frame_num;
                 aver_time_match = aver_time_match * (frame_num - 1)/frame_num + (match_time)/frame_num;
@@ -1227,6 +1283,12 @@ private:
     bool flg_EKF_converged, EKF_stop_flg = 0;
     double epsi[23] = {0.001};
 
+    bool prior_enabled_ = false, prior_active_ = false;
+    size_t prior_revision_ = 0;
+    std::unique_ptr<fast_lio_prior::FixedMap<PointType>> prior_map_;
+    rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr prior_alignment_sub_;
+    rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr prior_alignment_pub_;
+    rclcpp::Publisher<std_msgs::msg::String>::SharedPtr prior_status_;
     FILE *fp = nullptr;
     ofstream fout_pre, fout_out, fout_dbg;
 };

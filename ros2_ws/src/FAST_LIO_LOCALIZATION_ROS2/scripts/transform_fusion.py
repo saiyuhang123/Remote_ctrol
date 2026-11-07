@@ -7,6 +7,7 @@ import time
 
 import rclpy
 from rclpy.node import Node
+from rclpy.qos import QoSProfile, DurabilityPolicy
 import numpy as np
 
 import tf2_ros
@@ -38,7 +39,9 @@ class TransformFusionNode(Node):
 
         # 구독자
         self.create_subscription(Odometry, '/Odometry', self.cb_save_fastlio_odom, 1)
-        self.create_subscription(Odometry, '/map_to_odom', self.cb_save_map_to_odom, 1)
+        prior_enabled = self.declare_parameter('prior_map.enable', False).value
+        alignment_qos = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL) if prior_enabled else 1
+        self.create_subscription(Odometry, '/map_to_odom', self.cb_save_map_to_odom, alignment_qos)
 
         # 퍼블리셔, 브로드캐스터
         self.pub_localization = self.create_publisher(Odometry, '/localization', 1)

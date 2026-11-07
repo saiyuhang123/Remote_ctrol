@@ -2,6 +2,7 @@
 # coding=utf-8
 
 import array
+import time
 from collections import OrderedDict
 import numpy as np
 import open3d as o3d
@@ -34,8 +35,8 @@ class GlobalLocalizationNode(Node):
         PointField.FLOAT64: np.float64,
     }
 
-    def __init__(self):
-        super().__init__('fast_lio_localization')
+    def __init__(self, **kwargs):
+        super().__init__('fast_lio_localization', **kwargs)
 
         # ─── Parameters ───────────────────────────────────────────
         self.declare_parameter('map_voxel_size', 0.1)
@@ -57,6 +58,14 @@ class GlobalLocalizationNode(Node):
         self.base_from_body[:3, 3] = translation
         self.initial_base_z = self.declare_parameter('initial_base_z', 0.).value
         self.pending_initial_pose = None
+        self.prior_enabled = self.declare_parameter('prior_map.enable', False).value
+        self.initial_attempts = self.declare_parameter('initialization_attempts', 5).value
+        self.lio_odom_frame = self.declare_parameter('lio_odom_frame', 'lio_odom').value
+        if self.initial_attempts < 1 or self.freq_localization <= 0:
+            raise ValueError('initialization_attempts and freq_localization must be positive')
+        self._attempts_left = 0
+        self._next_attempt = 0.
+        self.cur_scan_msg = None
 
         # ─── State Variables ─────────────────────────────────────
         self.global_map      = None
@@ -74,7 +83,10 @@ class GlobalLocalizationNode(Node):
         # ─── Publishers ──────────────────────────────────────────
         self.pub_pc_in_map   = self.create_publisher(PointCloud2, '/cur_scan_in_map', 1)
         self.pub_submap      = self.create_publisher(PointCloud2, '/submap', 1)
-        self.pub_map_to_odom = self.create_publisher(Odometry,     '/map_to_odom', 1)
+        # Fixed-map mode hands the correction to C++ first; it publishes /map_to_odom
+        # after rebuilding the prior tree, so TF never accepts an unapplied correction.
+        alignment_topic = '/fastlio/prior_map_alignment' if self.prior_enabled else '/map_to_odom'
+        self.pub_map_to_odom = self.create_publisher(Odometry, alignment_topic, 1)
 
         # ─── Subscriptions ───────────────────────────────────────
         self.create_subscription(PointCloud2,                  '/cloud_registered', self.cb_save_cur_scan, 1)
@@ -134,13 +146,27 @@ class GlobalLocalizationNode(Node):
             self.get_logger().warn('Initial pose must be in map frame')
             return
         self.pending_initial_pose = msg
+        self._attempts_left = self.initial_attempts
+        self._next_attempt = 0.
         self._try_initial_pose()
 
     def _try_initial_pose(self):
         if self.pending_initial_pose is None or self.global_map is None or self.cur_scan_odom is None:
             return
+        if self.prior_enabled and time.monotonic() < self._next_attempt:
+            return
         msg = self.pending_initial_pose
-        self.pending_initial_pose = None
+        if self.prior_enabled:
+            # Decode point clouds only for an explicit startup/relocalization request.
+            if self.cur_scan_msg is None:
+                return
+            pcd = o3d.geometry.PointCloud()
+            pcd.points = o3d.utility.Vector3dVector(self.pc2_to_array(self.cur_scan_msg))
+            self.cur_scan = pcd
+            self._attempts_left -= 1
+            self._next_attempt = time.monotonic() + 1.
+        else:
+            self.pending_initial_pose = None
 
         # /initialpose is map<-base, but ICP estimates map<-LIO world.
         initial_base = self.pose_to_mat(msg)
@@ -150,15 +176,22 @@ class GlobalLocalizationNode(Node):
         # 已初始化也允许重定位 (机器人被搬动/定位丢失时可从 RViz 重新给初始位姿)
         success = self.global_localization(initial)
         if success:
+            self.pending_initial_pose = None
             if not self.initialized:
                 self.initialized = True
-                period = 1.0 / self.freq_localization
-                self.create_timer(period, self.timer_callback)
+                if not self.prior_enabled:
+                    period = 1.0 / self.freq_localization
+                    self.create_timer(period, self.timer_callback)
+                else:
+                    self.get_logger().info('Fixed-map mode: periodic ICP disabled; RViz /initialpose requests re-localization.')
                 self.get_logger().info('Initial global localization succeeded.')
             else:
                 self.get_logger().info('Re-localization succeeded.')
+        elif self.prior_enabled:
+            if self._attempts_left <= 0:
+                self.pending_initial_pose = None
+                self.get_logger().warn('ICP request failed after bounded retries; keeping previous alignment. Set /initialpose to retry.')
         elif self.initialized:
-            # 重定位失败: 保持原 T_map_to_odom, 周期 ICP 继续跑
             self.get_logger().warn('Re-localization failed, keeping previous pose.')
 
     def cb_save_cur_odom(self, msg: Odometry):
@@ -188,11 +221,16 @@ class GlobalLocalizationNode(Node):
         if stamp <= self._scan_stamp:
             return
         self._scan_stamp = stamp
-        msg.header.frame_id = 'lio_odom'
+        msg.header.frame_id = self.lio_odom_frame
         # 纯可视化话题, RViz 没订阅时跳过重发 (省每帧几百 KB 的序列化/传输)
         if self.pub_pc_in_map.get_subscription_count():
             self.pub_pc_in_map.publish(msg)
 
+        self.cur_scan_msg = msg
+        self.cur_scan_odom = odom
+        if self.prior_enabled:
+            self._try_initial_pose()
+            return
         pts = self.pc2_to_array(msg)
         pcd = o3d.geometry.PointCloud()
         pcd.points = o3d.utility.Vector3dVector(pts)
@@ -249,7 +287,7 @@ class GlobalLocalizationNode(Node):
         self.get_logger().info(f'ICP fitness: {fitness:.3f}')
 
         if fitness > self.localization_th:
-            if self.initialized:
+            if self.initialized and not self.prior_enabled:
                 T = self._smooth_correction(T)
             self.T_map_to_odom = T
             odom = Odometry()
@@ -260,6 +298,7 @@ class GlobalLocalizationNode(Node):
             odom.pose.pose.orientation = Quaternion(x=quat[0], y=quat[1], z=quat[2], w=quat[3])
             odom.header.stamp          = matched_odom.header.stamp
             odom.header.frame_id       = 'map'
+            odom.child_frame_id        = self.lio_odom_frame
             self.pub_map_to_odom.publish(odom)
             return True
 

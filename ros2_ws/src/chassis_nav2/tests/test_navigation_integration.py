@@ -588,6 +588,7 @@ class IntegrationTests(unittest.TestCase):
         node.global_map, node.cur_scan_odom, node.pending_initial_pose = None, None, None
         node.get_logger = lambda: SimpleNamespace(info=lambda *a: None, warn=lambda *a: None)
         node.initialized, node.freq_localization = True, 1.
+        node.prior_enabled, node.initial_attempts = False, 5
         node.base_from_body = transform([.3, -.1, .4], [0., 0., .2])
         node.initial_base_z = -.4
         initial = PoseWithCovarianceStamped()
