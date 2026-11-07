@@ -85,9 +85,20 @@ def test_bag_clock_is_forwarded_to_odometry_ndt_and_sensor_conversion(assembly):
     args['use_sim_time'] = 'true'
     nodes = assemble(fixed=True)
     for executable in ('jd03_odometry.py', 'ekf_node', 'multi_sensor_fusion',
-                       'pointcloud_to_laserscan_node', 'cloud_crop_box.py', 'fixed_route_node'):
+                       'pointcloud_to_laserscan_node', 'fixed_route_node'):
         node = next(n for n in nodes if n['executable'] == executable)
         assert any(isinstance(p, dict) and p.get('use_sim_time') is True for p in node['parameters'])
+    assert not any(n['executable'] == 'cloud_crop_box.py' for n in nodes)
+    scan = next(n for n in nodes if n['executable'] == 'pointcloud_to_laserscan_node')
+    assert dict(scan['remappings']) == {'cloud_in': '/velodyne_points', 'scan': '/scan'}
+    params = scan['parameters'][0]
+    assert params['target_frame'] == 'base_link'
+    # The direct pipeline must retain the configured front sector and height/range filters.
+    import yaml
+    hardware = yaml.safe_load(Path(args['hardware_file']).read_text())
+    for key in ('angle_min', 'angle_max', 'angle_increment', 'min_height', 'max_height',
+                'range_min', 'range_max', 'scan_time'):
+        assert params[key] == hardware['scan'][key]
 
 
 def test_replay_cannot_enable_real_chassis_control(assembly):

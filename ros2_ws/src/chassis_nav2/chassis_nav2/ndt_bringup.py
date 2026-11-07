@@ -105,17 +105,7 @@ def configure(context, fixed=False):
                    additional_env={'OMP_NUM_THREADS': '2'}, output='screen')
         nodes += [ndt, stop_with(ndt, 'NDT localization')]
         if yes('start_scan'):
-            scan = dict(hw['scan'], use_sim_time=sim, target_frame='base_link',
-                        transform_tolerance=.1, use_inf=True, inf_epsilon=1.)
-            scan.setdefault('angle_min', -math.pi)
-            scan.setdefault('angle_max', math.pi)
-            nodes += [
-                Node(package='chassis_nav2', executable='cloud_crop_box.py', name='cloud_crop_box',
-                     parameters=[{'use_sim_time': sim}], output='screen'),
-                Node(package='pointcloud_to_laserscan', executable='pointcloud_to_laserscan_node',
-                     name='pointcloud_to_scan', parameters=[scan],
-                     remappings=[('cloud_in', '/velodyne_points_cropped'), ('scan', '/scan')], output='screen'),
-            ]
+            nodes += bringup.scan_nodes(hw, use_sim_time=sim)
         if args.get('map'):
             nodes += [Node(package='nav2_map_server', executable='map_server', name='map_server',
                            parameters=[{'yaml_filename': bringup.existing_file(args['map'], '栅格地图'),

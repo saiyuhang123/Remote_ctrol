@@ -168,18 +168,16 @@ def ekf_node(hw):
                 remappings=[('odometry/filtered', '/odom')], output='screen')
 
 
-def scan_nodes(hw):
-    # 摄像头支柱等车身固定物裁剪：/scan 链路不经过 LIO 的 blind，需在入口抠掉
-    scan_params = dict(hw['scan'], use_sim_time=False, target_frame='base_link',
+def scan_nodes(hw, use_sim_time=False):
+    # 直接将原始点云投影为 /scan；角度、高度和距离窗口由 hardware.yaml 控制。
+    # 当前车辆仅取前方 180 度，后方摄像头支柱位于扫描窗口之外。
+    scan_params = dict(hw['scan'], use_sim_time=use_sim_time, target_frame='base_link',
                        transform_tolerance=.1, use_inf=True, inf_epsilon=1.)
-    # 扫描角度窗口可在 hardware.yaml scan 段配置（屏蔽扇区），缺省全向 ±π
     scan_params.setdefault('angle_min', -math.pi)
     scan_params.setdefault('angle_max', math.pi)
-    return [Node(package='chassis_nav2', executable='cloud_crop_box.py', name='cloud_crop_box',
-                 parameters=[{'use_sim_time': False}], output='screen'),
-            Node(package='pointcloud_to_laserscan', executable='pointcloud_to_laserscan_node',
+    return [Node(package='pointcloud_to_laserscan', executable='pointcloud_to_laserscan_node',
                  name='pointcloud_to_scan', parameters=[scan_params],
-                 remappings=[('cloud_in', '/velodyne_points_cropped'), ('scan', '/scan')], output='screen')]
+                 remappings=[('cloud_in', '/velodyne_points'), ('scan', '/scan')], output='screen')]
 
 
 def navigation_nodes(map_yaml, hw, params_file, use_map_server=True, localization_names=(), enable_recorded_routes=False):
